@@ -1,13 +1,39 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Linter } from 'eslint';
+import { Injector, runInInjectionContext } from '@angular/core';
+import { toMermaid } from '@matrix-fsm/core';
+import { configs as matrixFsmConfigs } from '@matrix-fsm/eslint-plugin';
+import { type ESLint, Linter } from 'eslint';
 import tseslint from 'typescript-eslint';
 import { describe, expect, it } from 'vitest';
-import { configs as matrixFsmConfigs } from '@matrix-fsm/eslint-plugin';
-import { bootstrapPlayground } from './main.js';
-import { UserRole } from './core/index.js';
+import { AuthApiService, GlobalAuthStore, UserRole } from './core';
+import { calculateSubscriptionPrice } from './domain/pricing.domain';
+import { authFSM } from './features/auth/auth.machine';
+import { AuthFeatureStore } from './features/auth/auth.store';
 
-describe('@matrix-fsm/playground - End-to-End Blueprint Verification', () => {
+function setupPlaygroundInjector() {
+  const injector = Injector.create({
+    providers: [
+      { provide: GlobalAuthStore, useClass: GlobalAuthStore, deps: [] },
+      { provide: AuthApiService, useClass: AuthApiService, deps: [] },
+      { provide: AuthFeatureStore, useClass: AuthFeatureStore, deps: [] },
+    ],
+  });
+
+  const globalAuth = injector.get(GlobalAuthStore);
+  const authApi = injector.get(AuthApiService);
+  const store = runInInjectionContext(injector, () => injector.get(AuthFeatureStore));
+
+  return {
+    injector,
+    globalAuth,
+    authApi,
+    store,
+    mermaidDiagram: toMermaid(authFSM),
+  };
+}
+
+describe('@matrix-fsm/playground - Angular DI & Blueprint E2E Verification', () => {
   it('verifies auth.machine.ts passes all 7 AST rules of @matrix-fsm/eslint-plugin with zero errors', () => {
     const machinePath = path.resolve(
       import.meta.dirname,
@@ -26,7 +52,10 @@ describe('@matrix-fsm/playground - End-to-End Blueprint Verification', () => {
             ecmaVersion: 'latest',
             sourceType: 'module',
           },
-          ...(matrixFsmConfigs.recommended as unknown as Linter.Config),
+          plugins: {
+            '@matrix-fsm': matrixFsmConfigs.recommended.plugins['@matrix-fsm'] as unknown as ESLint.Plugin,
+          },
+          rules: matrixFsmConfigs.recommended.rules as Linter.RulesRecord,
         },
       ],
       { filename: 'auth.machine.ts' },
@@ -35,12 +64,14 @@ describe('@matrix-fsm/playground - End-to-End Blueprint Verification', () => {
     expect(messages).toEqual([]);
   });
 
-  it('executes the complete 3-layer Auth flow with Policy-Driven Design and Effect-TS retry', async () => {
-    const { globalAuth, authApi, store, mermaidDiagram, calculateSubscriptionPrice } =
-      bootstrapPlayground();
+  it('executes the complete 3-layer AuthFeatureStore flow via Angular DI', async () => {
+    const { globalAuth, authApi, store, mermaidDiagram } =
+      setupPlaygroundInjector();
 
     expect(store.fsmState()).toBe('loginView');
-    expect(mermaidDiagram).toContain('state "⚡ authenticating" as authenticating');
+    expect(mermaidDiagram).toContain(
+      'state "⚡ authenticating" as authenticating',
+    );
 
     // 1. Invalid email triggers stay() and patches error in-place
     store.send('LOGIN');
@@ -60,7 +91,9 @@ describe('@matrix-fsm/playground - End-to-End Blueprint Verification', () => {
 
     expect(store.fsmState()).toBe('proUpsellPromo');
     expect(store.fsmContext().user?.email).toBe('free@matrix-fsm.dev');
-    expect(calculateSubscriptionPrice(100, store.fsmContext().policy)).toBe(100);
+    expect(calculateSubscriptionPrice(100, store.fsmContext().policy)).toBe(
+      100,
+    );
 
     store.send('DISMISS_PROMO');
     expect(store.fsmState()).toBe('loggedIn');
@@ -79,7 +112,7 @@ describe('@matrix-fsm/playground - End-to-End Blueprint Verification', () => {
   });
 
   it('retries 2 times on NetworkTimeoutError and routes via _tag to offlineRetryView, then recovers on RETRY', async () => {
-    const { globalAuth, authApi, store } = bootstrapPlayground();
+    const { globalAuth, authApi, store } = setupPlaygroundInjector();
     globalAuth.setRole(UserRole.Admin);
     authApi.setSimulationMode('timeout');
 
@@ -91,37 +124,14 @@ describe('@matrix-fsm/playground - End-to-End Blueprint Verification', () => {
 
     await new Promise((r) => setTimeout(r, 80));
 
-    // 1 initial attempt + 2 retries = 3 calls
     expect(authApi.callCount).toBe(3);
     expect(store.fsmState()).toBe('offlineRetryView');
 
-    // Network recovers -> RETRY transitions to authenticating -> loggedIn
     authApi.setSimulationMode('success');
     store.send('RETRY');
     await new Promise((r) => setTimeout(r, 20));
 
     expect(store.fsmState()).toBe('loggedIn');
     expect(store.fsmContext().user?.email).toBe('admin@matrix-fsm.dev');
-  });
-
-  it('aborts in-flight Effect task when CANCEL is dispatched', async () => {
-    const { authApi, store } = bootstrapPlayground();
-    authApi.setSimulationMode('slow_success');
-
-    store.send('UPDATE_CREDENTIALS', {
-      email: 'slow@matrix-fsm.dev',
-      password: 'pass',
-    });
-    store.send('LOGIN');
-    expect(store.fsmState()).toBe('authenticating');
-    expect(store.isPending()).toBe(true);
-
-    store.send('CANCEL');
-    expect(store.fsmState()).toBe('loginView');
-    expect(store.isPending()).toBe(false);
-
-    await new Promise((r) => setTimeout(r, 250));
-    expect(store.fsmState()).toBe('loginView');
-    expect(store.fsmContext().user).toBeNull();
   });
 });

@@ -14,9 +14,6 @@
     },
     {
       "path": "./packages/router"
-    },
-    {
-      "path": "./apps/playground"
     }
   ]
 }

@@ -10,6 +10,12 @@
   },
   "private": true,
   "devDependencies": {
+    "@angular-devkit/core": "~22.1.0",
+    "@angular-devkit/schematics": "~22.1.0",
+    "@angular/build": "~22.1.0",
+    "@angular/cli": "~22.1.0",
+    "@angular/compiler-cli": "~22.1.0",
+    "@angular/language-service": "~22.1.0",
     "@eslint/js": "^9.8.0",
     "@nx/angular": "^23.3.0",
     "@nx/eslint": "^23.3.0",
@@ -18,11 +24,13 @@
     "@nx/vite": "^23.3.0",
     "@nx/vitest": "23.3.0",
     "@nx/web": "23.3.0",
+    "@schematics/angular": "~22.1.0",
     "@swc/helpers": "~0.5.18",
     "@types/node": "^22.0.0",
     "@typescript-eslint/rule-tester": "^8.71.2",
     "@typescript-eslint/utils": "^8.71.2",
     "@vitest/coverage-v8": "~5.0.1",
+    "angular-eslint": "^22.1.0",
     "eslint": "^9.8.0",
     "eslint-config-prettier": "^10.0.0",
     "jiti": "2.4.2",
@@ -38,10 +46,20 @@
     "vitest": "^5.0.5"
   },
   "dependencies": {
-    "@angular/core": "^22.2.3",
+    "@angular/common": "~22.1.0",
+    "@angular/compiler": "~22.1.0",
+    "@angular/core": "~22.1.0",
+    "@angular/forms": "~22.1.0",
+    "@angular/platform-browser": "~22.1.0",
+    "@angular/router": "~22.1.0",
     "@ngrx/signals": "^22.0.1",
     "effect": "^4.0.5",
     "rxjs": "^7.8.2"
+  },
+  "pnpm": {
+    "overrides": {
+      "@angular/core": "~22.1.0"
+    }
   },
   "nx": {
     "includedScripts": [],

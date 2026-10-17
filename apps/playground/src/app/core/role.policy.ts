@@ -15,9 +15,6 @@ export interface UserEntitlements {
   readonly maxProjects: number;
 }
 
-/**
- * Exhaustive policy lookup table: features & FSMs never check raw `UserRole` enums.
- */
 export const ROLE_POLICIES: Record<UserRole, UserEntitlements> = {
   [UserRole.Free]: {
     showUpsellAds: true,

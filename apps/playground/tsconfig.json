@@ -1,22 +1,22 @@
 {
   "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noPropertyAccessFromIndexSignature": true,
+    "experimentalDecorators": true,
+    "moduleResolution": "bundler",
+    "module": "preserve"
+  },
+  "angularCompilerOptions": {
+    "enableI18nLegacyMessageIdFormat": false,
+    "strictInjectionParameters": true,
+    "strictInputAccessModifiers": true,
+    "strictTemplates": true
+  },
   "files": [],
   "include": [],
   "references": [
     {
-      "path": "../../packages/core"
-    },
-    {
-      "path": "../../packages/angular"
-    },
-    {
-      "path": "../../packages/router"
-    },
-    {
       "path": "./tsconfig.app.json"
-    },
-    {
-      "path": "./tsconfig.spec.json"
     }
   ]
 }

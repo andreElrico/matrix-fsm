@@ -29,7 +29,7 @@
     "@matrix-fsm/angular": "workspace:*"
   },
   "peerDependencies": {
-    "@angular/core": "^22.0.0",
+    "@angular/core": "~22.1.0",
     "@ngrx/signals": "^22.0.0"
   }
 }

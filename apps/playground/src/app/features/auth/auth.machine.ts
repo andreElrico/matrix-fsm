@@ -4,11 +4,7 @@
  */
 
 import { awaiting, createFSM, stay, transitions } from '@matrix-fsm/core';
-import type {
-  Credentials,
-  User,
-  UserEntitlements,
-} from '../../core/index.js';
+import type { Credentials, User, UserEntitlements } from '../../core';
 
 export interface AuthContext {
   credentials: Credentials;

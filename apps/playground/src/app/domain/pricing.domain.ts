@@ -3,7 +3,7 @@
  * STRICT RULE: 0% Angular DI (inject() is forbidden!)
  */
 
-import type { Credentials, UserEntitlements } from '../core/index.js';
+import type { Credentials, UserEntitlements } from '../core';
 
 export function hasValidCredentials(credentials: Credentials): boolean {
   return (

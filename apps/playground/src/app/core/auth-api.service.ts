@@ -2,6 +2,7 @@
  * Layer 1 (Core): Auth API Service & Effect-TS Tagged Errors
  */
 
+import { Injectable } from '@angular/core';
 import { Data, Effect } from 'effect';
 
 export interface Credentials {
@@ -19,11 +20,20 @@ export class NetworkTimeoutError extends Data.TaggedError('NetworkTimeoutError')
   readonly message: string;
 }> {}
 
-export type ApiSimulationMode = 'success' | 'timeout' | 'invalid_credentials' | 'slow_success';
+export type ApiSimulationMode =
+  | 'success'
+  | 'timeout'
+  | 'invalid_credentials'
+  | 'slow_success';
 
+@Injectable({ providedIn: 'root' })
 export class AuthApiService {
   private mode: ApiSimulationMode = 'success';
   public callCount = 0;
+
+  getSimulationMode(): ApiSimulationMode {
+    return this.mode;
+  }
 
   setSimulationMode(mode: ApiSimulationMode): void {
     this.mode = mode;
@@ -54,7 +64,7 @@ export class AuthApiService {
       };
 
       if (this.mode === 'slow_success') {
-        return Effect.sleep('200 millis').pipe(Effect.map(() => user));
+        return Effect.sleep('300 millis').pipe(Effect.map(() => user));
       }
 
       return Effect.succeed(user);
