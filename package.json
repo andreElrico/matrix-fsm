@@ -2,7 +2,12 @@
   "name": "@matrix-fsm/source",
   "version": "0.0.0",
   "license": "MIT",
-  "scripts": {},
+  "scripts": {
+    "build": "nx run-many -t build",
+    "test": "vitest run",
+    "lint": "nx run-many -t lint",
+    "typecheck": "nx run-many -t typecheck"
+  },
   "private": true,
   "devDependencies": {
     "@eslint/js": "^9.8.0",
@@ -33,8 +38,10 @@
     "vitest": "^5.0.5"
   },
   "dependencies": {
+    "@angular/core": "^22.2.3",
     "@ngrx/signals": "^22.0.1",
-    "effect": "^4.0.5"
+    "effect": "^4.0.5",
+    "rxjs": "^7.8.2"
   },
   "nx": {
     "includedScripts": [],

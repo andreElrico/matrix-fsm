@@ -7,7 +7,16 @@
       "path": "./packages/core"
     },
     {
+      "path": "./packages/angular"
+    },
+    {
       "path": "./packages/eslint-plugin"
+    },
+    {
+      "path": "./packages/router"
+    },
+    {
+      "path": "./apps/playground"
     }
   ]
 }

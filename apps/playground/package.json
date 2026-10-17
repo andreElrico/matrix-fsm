@@ -1,0 +1,17 @@
+{
+  "name": "@matrix-fsm/playground",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "nx": {
+    "tags": [
+      "scope:playground",
+      "type:feature"
+    ]
+  },
+  "dependencies": {
+    "@matrix-fsm/core": "workspace:*",
+    "@matrix-fsm/angular": "workspace:*",
+    "@matrix-fsm/router": "workspace:*"
+  }
+}
