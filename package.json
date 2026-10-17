@@ -1,0 +1,16 @@
+{
+  "name": "@matrix-fsm/source",
+  "version": "0.0.0",
+  "license": "MIT",
+  "scripts": {},
+  "private": true,
+  "dependencies": {},
+  "devDependencies": {
+    "@nx/js": "23.3.0",
+    "@swc/helpers": "~0.5.18",
+    "nx": "23.3.0",
+    "prettier": "~3.6.2",
+    "tslib": "^2.3.0",
+    "typescript": "~6.0.3"
+  }
+}

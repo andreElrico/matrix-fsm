@@ -173,8 +173,8 @@ export type TransitionRow<TContext, TEvent TState,> = readonly [
 ### 5.1 Pure FSM Definition (`auth.machine.ts`)
 
 ```typescript
-import { createFSM, awaiting, stay, transitions } from "@ngx/flatstate";
-import { User, Credentials, UserEntitlements } from "@app/core/auth";
+import { createFSM, awaiting, stay, transitions } from '@ngx/flatstate';
+import { User, Credentials, UserEntitlements } from '@app/core/auth';
 
 export interface AuthContext {
   credentials: Credentials;
@@ -184,18 +184,18 @@ export interface AuthContext {
 }
 
 // Pure guards (0% DI, reads only ctx):
-const hasValidInput = (ctx: AuthContext) => ctx.credentials.email.includes("@");
+const hasValidInput = (ctx: AuthContext) => ctx.credentials.email.includes('@');
 const shouldShowPromo = (ctx: AuthContext) => ctx.policy.showUpsellAds;
 
 // Optional extracted transition group (100% typed & linted):
 const handleLoginSubmit = transitions<AuthContext>([
-  ["loginView", "LOGIN", awaiting("authenticating"), { guard: hasValidInput }],
-  ["loginView", "LOGIN", stay(), { patch: () => ({ error: "Invalid email" }) }],
+  ['loginView', 'LOGIN', awaiting('authenticating'), { guard: hasValidInput }],
+  ['loginView', 'LOGIN', stay(), { patch: () => ({ error: 'Invalid email' }) }],
 ]);
 
 export const authFSM = createFSM({
-  id: "auth",
-  initial: "loginView",
+  id: 'auth',
+  initial: 'loginView',
   events: {} as {
     LOGIN: void;
     DISMISS_PROMO: void;
@@ -203,7 +203,7 @@ export const authFSM = createFSM({
     NetworkTimeoutError: { message: string };
   },
   context: {
-    credentials: { email: "", password: "" },
+    credentials: { email: '', password: '' },
     user: null,
     policy: {
       showUpsellAds: true,
@@ -218,24 +218,24 @@ export const authFSM = createFSM({
     ...handleLoginSubmit,
 
     // User cancels in-flight request -> Engine automatically aborts Effect fiber / AbortSignal:
-    ["authenticating", "CANCEL", "loginView"],
+    ['authenticating', 'CANCEL', 'loginView'],
 
     // Task succeeded ('DONE') -> Task return value is already merged into ctx before guards run!
-    ["authenticating", "DONE", "proUpsellPromo", { guard: shouldShowPromo }],
-    ["authenticating", "DONE", "loggedIn"], // Mandatory unguarded fallback
+    ['authenticating', 'DONE', 'proUpsellPromo', { guard: shouldShowPromo }],
+    ['authenticating', 'DONE', 'loggedIn'], // Mandatory unguarded fallback
 
     // Task failed ('ERROR' or Effect TaggedError _tag):
-    ["authenticating", "NetworkTimeoutError", "offlineRetryView"],
+    ['authenticating', 'NetworkTimeoutError', 'offlineRetryView'],
     [
-      "authenticating",
-      "ERROR",
-      "loginView",
+      'authenticating',
+      'ERROR',
+      'loginView',
       {
         patch: (_ctx, err: Error) => ({ error: err.message }),
       },
     ],
 
-    ["proUpsellPromo", "DISMISS_PROMO", "loggedIn"],
+    ['proUpsellPromo', 'DISMISS_PROMO', 'loggedIn'],
   ],
 });
 ```
@@ -243,12 +243,12 @@ export const authFSM = createFSM({
 ### 5.2 SignalStore + DI + Effect-TS Integration (`auth.store.ts`)
 
 ```typescript
-import { Injectable, inject } from "@angular/core";
-import { signalStore } from "@ngrx/signals";
-import { Effect, Schedule } from "effect";
-import { withStateMachine } from "@ngx/flatstate-angular";
-import { GlobalAuthStore, AuthApiService } from "@app/core/auth";
-import { authFSM } from "./auth.machine";
+import { Injectable, inject } from '@angular/core';
+import { signalStore } from '@ngrx/signals';
+import { Effect, Schedule } from 'effect';
+import { withStateMachine } from '@ngx/flatstate-angular';
+import { GlobalAuthStore, AuthApiService } from '@app/core/auth';
+import { authFSM } from './auth.machine';
 
 @Injectable()
 export class AuthFeatureStore extends signalStore(
@@ -265,7 +265,7 @@ export class AuthFeatureStore extends signalStore(
         authApi.loginEffect(ctx.credentials).pipe(
           Effect.retry({
             times: 2,
-            schedule: Schedule.exponential("300 millis"),
+            schedule: Schedule.exponential('300 millis'),
           }),
           Effect.map((user) => ({ user, error: null })), // Auto-patched into ctx BEFORE 'DONE' guards evaluate!
         ),
