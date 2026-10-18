@@ -1,25 +1,38 @@
 /**
- * @matrix-fsm/angular - SignalStore Bridge & Dual Promise / Effect-TS Task Runner
+ * @matrix-fsm/angular - SignalStore Bridge (Promise, RxJS Observable & Pluggable Task Runners)
+ * 0% Hard Effect-TS Dependency
  */
 
-import { computed, DestroyRef, inject, isSignal, signal, untracked, ɵɵdefineInjectable, type Signal } from '@angular/core';
+import {
+  computed,
+  DestroyRef,
+  inject,
+  isSignal,
+  signal,
+  untracked,
+  ɵɵdefineInjectable,
+  type Signal,
+} from '@angular/core';
 import {
   deepComputed,
-  signalStoreFeature,
+  getState,
+  patchState,
   withProps,
   type DeepSignalOf,
   type EmptyFeatureResult,
   type SignalStoreFeature,
+  type SignalStoreFeatureResult,
 } from '@ngrx/signals';
-import { Cause, Effect, Exit, Fiber } from 'effect';
 import {
   createMachineInstance,
+  invokeCallSelector,
   type AnyFSMDefinition,
   type EachNode,
   type ExtractAwaitingNodes,
   type ExtractContext,
   type ExtractEventPayload,
   type ExtractEvents,
+  type ExtractMethods,
   type ExtractStates,
   type MachineInstance,
   type SubMachineRef,
@@ -29,10 +42,18 @@ function ensureJitCompilerFacade(): void {
   const g = globalThis as Record<string, any>;
   g['ng'] ??= {};
   g['ng'].ɵcompilerFacade ??= {
-    compileFactoryDeclaration(_env: unknown, _url: string, decl: { type: new (...args: any[]) => unknown }) {
+    compileFactoryDeclaration(
+      _env: unknown,
+      _url: string,
+      decl: { type: new (...args: any[]) => unknown },
+    ) {
       return (...args: any[]) => new decl.type(...args);
     },
-    compileInjectableDeclaration(_env: unknown, _url: string, decl: { type: new (...args: any[]) => unknown; providedIn?: any }) {
+    compileInjectableDeclaration(
+      _env: unknown,
+      _url: string,
+      decl: { type: new (...args: any[]) => unknown; providedIn?: any },
+    ) {
       return ɵɵdefineInjectable({
         token: decl.type,
         providedIn: decl.providedIn ?? null,
@@ -44,9 +65,59 @@ function ensureJitCompilerFacade(): void {
 
 ensureJitCompilerFacade();
 
+/**
+ * Structural interface matching RxJS `Observable<T>` without requiring `rxjs` at runtime.
+ */
+export interface Subscribable<T> {
+  subscribe(
+    observer?: {
+      next?: (value: T) => void;
+      error?: (err: unknown) => void;
+      complete?: () => void;
+    },
+  ): { unsubscribe(): void } | (() => void);
+}
+
+/**
+ * Structural interface matching Effect-TS `Effect.Effect<A, E, never>` without importing `'effect'`.
+ */
+export interface EffectLike<out A = any> {
+  readonly '~effect/Effect': any;
+  [Symbol.iterator](): Iterator<any, A, any>;
+}
+
+/**
+ * Pluggable task adapter interface (e.g., used by `@matrix-fsm/angular/effect`).
+ */
+export interface CustomTaskAdapter {
+  canHandle(result: unknown): boolean;
+  execute<TContext>(
+    result: unknown,
+    callbacks: {
+      onSuccess: (output: Partial<TContext> | void) => void;
+      onFailure: (err: unknown) => void;
+      isCancelled: () => boolean;
+    },
+  ): () => void;
+}
+
+const registeredTaskAdapters: CustomTaskAdapter[] = [];
+
+/**
+ * Registers a pluggable task execution adapter (such as `@matrix-fsm/angular/effect`).
+ */
+export function registerTaskAdapter(adapter: CustomTaskAdapter): void {
+  if (!registeredTaskAdapters.includes(adapter)) {
+    registeredTaskAdapters.unshift(adapter);
+  }
+}
+
 export type TaskResult<TContext> =
   | Promise<Partial<TContext> | void>
-  | Effect.Effect<Partial<TContext> | void, any, never>;
+  | Subscribable<Partial<TContext> | void>
+  | EffectLike<Partial<TContext> | void>
+  | Partial<TContext>
+  | void;
 
 export type TaskHandler<TContext> = (
   ctx: Readonly<TContext>,
@@ -73,6 +144,16 @@ export type StateMachineFeatureConfig<TFSM extends AnyFSMDefinition> = {
   readonly syncContext?:
     | (() => SyncContextMap<ExtractContext<TFSM>>)
     | SyncContextMap<ExtractContext<TFSM>>;
+  /**
+   * Optional explicit method dictionary for `{ call: (m) => m.methodName }` if not provided via `withMethods`.
+   */
+  readonly methods?:
+    | (() => Partial<ExtractMethods<TFSM>> & Record<string, (...args: any[]) => any>)
+    | (Partial<ExtractMethods<TFSM>> & Record<string, (...args: any[]) => any>);
+  /**
+   * Optional pluggable task runner adapter (e.g. `effectTaskAdapter` from `@matrix-fsm/angular/effect`).
+   */
+  readonly taskAdapter?: CustomTaskAdapter;
   /**
    * Optional lifecycle hooks invoked when entering a state.
    */
@@ -112,7 +193,12 @@ export interface ChildMachineSnapshot<TContext = any> {
 }
 
 export type SendFn<TFSM extends AnyFSMDefinition> = <
-  TEvent extends ExtractEvents<TFSM> | 'DONE' | 'ERROR' | 'ALL_DONE' | (string & {}),
+  TEvent extends
+    | ExtractEvents<TFSM>
+    | 'DONE'
+    | 'ERROR'
+    | 'ALL_DONE'
+    | (string & {}),
 >(
   ...args: ExtractEventPayload<TFSM, TEvent> extends void | undefined
     ? [event: TEvent, payload?: unknown]
@@ -126,7 +212,9 @@ export interface StateMachineStoreMembers<TFSM extends AnyFSMDefinition> {
   readonly fsmSubState: Signal<string | null>;
   readonly fsmContext: DeepSignalOf<ExtractContext<TFSM>>;
   readonly isPending: Signal<boolean>;
-  readonly childMachines: Signal<Record<string, ReadonlyArray<ChildMachineSnapshot>>>;
+  readonly childMachines: Signal<
+    Record<string, ReadonlyArray<ChildMachineSnapshot>>
+  >;
   readonly send: SendFn<TFSM>;
   readonly sendToChild: (
     key: string,
@@ -141,10 +229,12 @@ interface ActiveTaskHandle {
   readonly stateName: string;
   cancelled: boolean;
   readonly abortController: AbortController;
-  fiber: Fiber.Fiber<any, any> | null;
+  teardown: (() => void) | null;
 }
 
-function resolveFactoryOrValue<T>(input: (() => T) | T | undefined): T | undefined {
+function resolveFactoryOrValue<T>(
+  input: (() => T) | T | undefined,
+): T | undefined {
   if (typeof input === 'function') {
     return (input as () => T)();
   }
@@ -161,15 +251,29 @@ function extractItemId(item: unknown): string {
   return JSON.stringify(item);
 }
 
+function isSubscribable(
+  value: unknown,
+): value is Subscribable<any> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Subscribable<any>).subscribe === 'function'
+  );
+}
+
 /**
- * Custom `@ngrx/signals` feature that binds a flat-tuple `@matrix-fsm/core` state machine
- * with reactive `syncContext` mirroring and dual Promise / Effect-TS task execution.
+ * Custom `@ngrx/signals` feature that binds a `@matrix-fsm/core` state machine
+ * directly to SignalStore's `withState` and `withMethods`, with native Promise,
+ * RxJS Observable, and pluggable task runner support.
  */
-export function withStateMachine<TFSM extends AnyFSMDefinition>(
+export function withStateMachine<
+  TFSM extends AnyFSMDefinition,
+  Input extends SignalStoreFeatureResult = EmptyFeatureResult,
+>(
   fsm: TFSM,
   config?: StateMachineFeatureConfig<TFSM>,
 ): SignalStoreFeature<
-  EmptyFeatureResult,
+  Input,
   {
     state: {};
     props: StateMachineStoreMembers<TFSM>;
@@ -179,35 +283,48 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
   type TState = ExtractStates<TFSM>;
   type TContext = ExtractContext<TFSM>;
 
-  return signalStoreFeature(
-    withProps((): StateMachineStoreMembers<TFSM> => {
-      const syncedSignals = (resolveFactoryOrValue(config?.syncContext) ?? {}) as Record<
-        string,
-        Signal<unknown> | undefined
-      >;
-      const tasksMap = (resolveFactoryOrValue(config?.tasks as any) ?? {}) as Record<
-        string,
-        TaskHandler<TContext> | undefined
-      >;
-      const onEnterHooks = (resolveFactoryOrValue(config?.onEnter) ?? {}) as Record<
-        string,
-        ((ctx: Readonly<TContext>) => void) | undefined
-      >;
-      const onExitHooks = (resolveFactoryOrValue(config?.onExit) ?? {}) as Record<
-        string,
-        ((ctx: Readonly<TContext>) => void) | undefined
-      >;
+  return withProps<Input, StateMachineStoreMembers<TFSM>>(
+    (store): StateMachineStoreMembers<TFSM> => {
+      const syncedSignals = (resolveFactoryOrValue(config?.syncContext) ??
+        {}) as Record<string, Signal<unknown> | undefined>;
+      const explicitMethods = (resolveFactoryOrValue(config?.methods) ??
+        {}) as Record<string, (...args: any[]) => any>;
+      const tasksMap = (resolveFactoryOrValue(config?.tasks as any) ??
+        {}) as Record<string, TaskHandler<TContext> | undefined>;
+      const onEnterHooks = (resolveFactoryOrValue(config?.onEnter) ??
+        {}) as Record<string, ((ctx: Readonly<TContext>) => void) | undefined>;
+      const onExitHooks = (resolveFactoryOrValue(config?.onExit) ??
+        {}) as Record<string, ((ctx: Readonly<TContext>) => void) | undefined>;
+
+      const readStoreState = (): Record<string, unknown> => {
+        try {
+          return getState(store as any) as Record<string, unknown>;
+        } catch {
+          return {};
+        }
+      };
+
+      const initialStoreStateSnapshot = {
+        ...untracked(() => readStoreState()),
+      };
+      const storeStateKeys = new Set<string>(
+        Object.keys(initialStoreStateSnapshot),
+      );
 
       const fsmStateSig = signal<TState>(fsm.initial as TState);
       const fsmSubStateSig = signal<string | null>(null);
-      const rawContextSig = signal<TContext>({ ...fsm.context });
+      const rawContextSig = signal<TContext>({
+        ...(fsm.context ?? {}),
+        ...initialStoreStateSnapshot,
+      } as TContext);
       const childMachinesSig = signal<
         Record<string, ReadonlyArray<ChildMachineSnapshot>>
       >({});
 
-      // Reactive merged context: combines internal context with live synced signals
+      // Reactive merged context: combines internal context, SignalStore `withState`, and `syncContext` signals
       const fsmContext = deepComputed<TContext>(() => {
         const base = rawContextSig();
+        const storeState = readStoreState();
         const syncedPatch: Record<string, unknown> = {};
         for (const [key, sig] of Object.entries(syncedSignals)) {
           if (isSignal(sig)) {
@@ -216,16 +333,55 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
         }
         return {
           ...base,
+          ...storeState,
           ...syncedPatch,
-        };
+        } as TContext;
       });
 
-      const getEffectiveContext = (): TContext => untracked(() => fsmContext());
+      const getEffectiveContext = (): TContext =>
+        untracked(() => fsmContext());
+
+      const applyContextPatch = (patch: Partial<TContext>): void => {
+        if (!patch || typeof patch !== 'object') {
+          return;
+        }
+        rawContextSig.update((prev) => ({
+          ...prev,
+          ...patch,
+        }));
+        if (storeStateKeys.size > 0) {
+          const storeSlicePatch: Record<string, unknown> = {};
+          let hasMatchingStoreKey = false;
+          for (const [k, v] of Object.entries(patch)) {
+            if (storeStateKeys.has(k)) {
+              storeSlicePatch[k] = v;
+              hasMatchingStoreKey = true;
+            }
+          }
+          if (hasMatchingStoreKey) {
+            patchState(store as any, storeSlicePatch);
+          }
+        }
+      };
+
+      const getMethodsTarget = (): Record<string, any> =>
+        new Proxy(store as Record<string, any>, {
+          get(target, prop, receiver) {
+            if (typeof prop === 'string' && prop in explicitMethods) {
+              return explicitMethods[prop];
+            }
+            const val = Reflect.get(target, prop, receiver);
+            return typeof val === 'function' ? val.bind(target) : val;
+          },
+        });
 
       let activeTask: ActiveTaskHandle | null = null;
       let activeSubMachine: MachineInstance<any> | null = null;
       let activeSubRef: SubMachineRef<any, any> | null = null;
-      const eachRegistries = new Map<string, Map<string, MachineInstance<any>>>();
+      const eachRegistries = new Map<
+        string,
+        Map<string, MachineInstance<any>>
+      >();
 
       const cancelActiveTask = (): void => {
         if (!activeTask) {
@@ -235,10 +391,10 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
         activeTask = null;
         taskToCancel.cancelled = true;
         taskToCancel.abortController.abort();
-        if (taskToCancel.fiber) {
-          const fiberToInterrupt = taskToCancel.fiber;
-          taskToCancel.fiber = null;
-          Effect.runFork(Fiber.interrupt(fiberToInterrupt));
+        if (taskToCancel.teardown) {
+          const cleanup = taskToCancel.teardown;
+          taskToCancel.teardown = null;
+          cleanup();
         }
       };
 
@@ -270,12 +426,9 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
         }
         activeTask = null;
 
-        // 1. Pre-DONE context patching: merge task output into context BEFORE 'DONE' guards evaluate!
+        // 1. Pre-DONE context patching: merge task output into context/SignalStore BEFORE 'DONE' guards evaluate!
         if (output && typeof output === 'object') {
-          rawContextSig.update((prev) => ({
-            ...prev,
-            ...output,
-          }));
+          applyContextPatch(output);
         }
 
         // 2. Dispatch 'DONE' with output as payload
@@ -296,17 +449,28 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
           ? (fsmSubStateSig() ?? fsmStateSig())
           : fsmStateSig();
 
-        // Check if err is an Effect TaggedError (`'_tag' in err`) and machine defines `[currentState, err._tag]`
-        if (
-          typeof err === 'object' &&
-          err !== null &&
-          '_tag' in err &&
-          typeof (err as { _tag: unknown })._tag === 'string'
-        ) {
-          const tag = (err as { _tag: string })._tag;
-          if (activeMachine.hasTransitionFor(activeStateName, tag)) {
-            dispatchInternal(tag, err);
-            return;
+        // Check if err has a `_tag` (e.g. TaggedError) or custom Error `.name` matching a transition row
+        if (typeof err === 'object' && err !== null) {
+          if (
+            '_tag' in err &&
+            typeof (err as { _tag: unknown })._tag === 'string'
+          ) {
+            const tag = (err as { _tag: string })._tag;
+            if (activeMachine.hasTransitionFor(activeStateName, tag)) {
+              dispatchInternal(tag, err);
+              return;
+            }
+          }
+          if (
+            'name' in err &&
+            typeof (err as { name: unknown }).name === 'string' &&
+            (err as { name: string }).name !== 'Error'
+          ) {
+            const errName = (err as { name: string }).name;
+            if (activeMachine.hasTransitionFor(activeStateName, errName)) {
+              dispatchInternal(errName, err);
+              return;
+            }
           }
         }
 
@@ -326,7 +490,7 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
           stateName,
           cancelled: false,
           abortController,
-          fiber: null,
+          teardown: null,
         };
         activeTask = handle;
 
@@ -335,36 +499,62 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
         try {
           const result = taskFn(ctxSnapshot, abortController.signal);
 
-          if (Effect.isEffect(result)) {
-            const fiber = Effect.runFork(
-              result as Effect.Effect<Partial<TContext> | void, any, never>,
-            );
-            handle.fiber = fiber;
-            fiber.addObserver((exit) => {
-              if (handle.cancelled) {
-                return;
-              }
-              if (Exit.isSuccess(exit)) {
-                handleTaskSuccess(handle, exit.value);
-              } else {
-                if (Cause.hasInterruptsOnly(exit.cause)) {
-                  return;
-                }
-                const squashedError = Cause.squash(exit.cause);
-                handleTaskFailure(handle, squashedError);
-              }
+          // 1. Check explicit or registered custom task adapters (e.g. @matrix-fsm/angular/effect)
+          const adapters = config?.taskAdapter
+            ? [config.taskAdapter, ...registeredTaskAdapters]
+            : registeredTaskAdapters;
+          const matchingAdapter = adapters.find((a) => a.canHandle(result));
+
+          if (matchingAdapter) {
+            handle.teardown = matchingAdapter.execute<TContext>(result, {
+              onSuccess: (output) => handleTaskSuccess(handle, output),
+              onFailure: (err) => handleTaskFailure(handle, err),
+              isCancelled: () => handle.cancelled,
             });
-          } else if (result && typeof (result as Promise<unknown>).then === 'function') {
+            return;
+          }
+
+          // 2. Native Promise support
+          if (
+            result &&
+            typeof (result as Promise<unknown>).then === 'function'
+          ) {
             (result as Promise<Partial<TContext> | void>).then(
               (output) => handleTaskSuccess(handle, output),
               (err) => handleTaskFailure(handle, err),
             );
-          } else {
-            handleTaskSuccess(
-              handle,
-              result as unknown as Partial<TContext> | void,
-            );
+            return;
           }
+
+          // 3. Native RxJS Observable / Subscribable support with automatic unsubscribe on cancel
+          if (isSubscribable(result)) {
+            let emitted = false;
+            let lastValue: Partial<TContext> | void = undefined;
+            const sub = result.subscribe({
+              next: (val) => {
+                emitted = true;
+                lastValue = val;
+              },
+              error: (err) => handleTaskFailure(handle, err),
+              complete: () => {
+                handleTaskSuccess(handle, emitted ? lastValue : undefined);
+              },
+            });
+            handle.teardown = () => {
+              if (typeof sub === 'function') {
+                sub();
+              } else if (sub && typeof sub.unsubscribe === 'function') {
+                sub.unsubscribe();
+              }
+            };
+            return;
+          }
+
+          // 4. Synchronous return value
+          handleTaskSuccess(
+            handle,
+            result as unknown as Partial<TContext> | void,
+          );
         } catch (syncErr) {
           handleTaskFailure(handle, syncErr);
         }
@@ -373,7 +563,9 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
       const syncEachInstances = (eachNode: EachNode<any, any>): void => {
         const key = eachNode.key;
         const ctx = getEffectiveContext() as Record<string, unknown>;
-        const rawArray = Array.isArray(ctx[key]) ? (ctx[key] as unknown[]) : [];
+        const rawArray = Array.isArray(ctx[key])
+          ? (ctx[key] as unknown[])
+          : [];
 
         let registry = eachRegistries.get(key);
         if (!registry) {
@@ -386,7 +578,9 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
           const id = extractItemId(item);
           activeIds.add(id);
           if (!registry.has(id)) {
-            const childInstance = createMachineInstance(eachNode.machine);
+            const childInstance = createMachineInstance(eachNode.machine, {
+              methods: getMethodsTarget(),
+            });
             registry.set(id, childInstance);
           }
         }
@@ -451,15 +645,8 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
 
           if (subHasTransition) {
             const prevSubState = activeSubMachine.state();
-            activeSubMachine.patchContext(currentCtx);
+            activeSubMachine.patchContext(getEffectiveContext());
             activeSubMachine.send(event, payload);
-            const updatedSubCtx = activeSubMachine.context();
-            if (updatedSubCtx && typeof updatedSubCtx === 'object') {
-              rawContextSig.update((prev) => ({
-                ...prev,
-                ...(updatedSubCtx as Partial<TContext>),
-              }));
-            }
             const nextSubState = activeSubMachine.state();
             fsmSubStateSig.set(nextSubState);
 
@@ -472,7 +659,7 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
 
             if (activeSubMachine && activeSubMachine.isDone()) {
               const outcome = activeSubMachine.finalOutcome() ?? 'DONE';
-              const subCtx = activeSubMachine.context();
+              const subCtx = getEffectiveContext();
               const refId = activeSubRef.id;
               cancelActiveTask();
               activeSubMachine = null;
@@ -486,7 +673,7 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
             }
             return;
           } else if (parentHasInterrupt) {
-            // Parent group-interrupt (e.g. [paymentFSM, 'CANCEL', 'cart'])
+            // Parent group-interrupt (e.g. [baristaFSM, 'CANCEL', 'customerBrowsing'])
             cancelActiveTask();
             activeSubMachine = null;
             activeSubRef = null;
@@ -508,13 +695,19 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
         }
 
         if (evaluation.patchApplied) {
-          rawContextSig.update((prev) => ({
-            ...prev,
-            ...evaluation.patchApplied,
-          }));
+          applyContextPatch(evaluation.patchApplied);
         }
 
-        // In-place stay(): patch applied, keep current state, do NOT re-enter or interrupt tasks!
+        if (evaluation.callSelector) {
+          invokeCallSelector(
+            evaluation.callSelector,
+            getMethodsTarget(),
+            payload,
+            getEffectiveContext(),
+          );
+        }
+
+        // In-place stay(): patch/call applied, keep current state, do NOT re-enter or interrupt tasks!
         if (evaluation.stayed) {
           const activeEach = fsm.eachNodes.get(currentState);
           if (activeEach) {
@@ -534,6 +727,9 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
           activeSubRef = evaluation.enteredSubMachine;
           activeSubMachine = createMachineInstance(activeSubRef.machine, {
             initialContext: getEffectiveContext(),
+            methods: getMethodsTarget(),
+            getContext: getEffectiveContext,
+            onPatch: applyContextPatch,
           });
           const initialSubState = activeSubMachine.state();
           fsmSubStateSig.set(initialSubState);
@@ -555,7 +751,9 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
         }
       };
 
-      const send: SendFn<TFSM> = (...args: [event: string, payload?: unknown]) => {
+      const send: SendFn<TFSM> = (
+        ...args: [event: string, payload?: unknown]
+      ) => {
         const [event, payload] = args;
         dispatchInternal(event, payload);
       };
@@ -588,12 +786,18 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
         activeSubRef = null;
         eachRegistries.clear();
         fsmSubStateSig.set(null);
-        rawContextSig.set({ ...fsm.context });
+        rawContextSig.set({
+          ...(fsm.context ?? {}),
+          ...initialStoreStateSnapshot,
+        } as TContext);
+        if (storeStateKeys.size > 0) {
+          patchState(store as any, initialStoreStateSnapshot);
+        }
         fsmStateSig.set(fsm.initial as TState);
         childMachinesSig.set({});
       };
 
-      // If initial state itself is an awaiting node or each node, initialize it
+      // If initial state itself is an awaiting node, initialize it
       if (fsm.awaitingStates.has(fsm.initial)) {
         startAwaitingTaskIfNeeded(fsm.initial);
       }
@@ -608,6 +812,6 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
         sendToChild,
         reset,
       };
-    }),
+    },
   );
 }

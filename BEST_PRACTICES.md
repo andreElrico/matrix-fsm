@@ -1,94 +1,32 @@
-# `@matrix-fsm` Best Practices & Agent Rules
+# `@matrix-fsm` Best Practices & Agent Rules (V1 Architecture)
 
-Dieses Dokument definiert die verbindlichen Design-, Formatierungs- und Architekturregeln für alle State Machines (`*.machine.ts`), Stores (`*.store.ts`) und Komponenten im `@matrix-fsm`-Ökosystem. Jeder KI-Agent und Entwickler **muss** diese Regeln vor dem Erstellen oder Anpassen einer FSM befolgen.
-
----
-
-## 1. Matrix-Spalten-Alignment (Warum es `@matrix-fsm` heißt!)
-
-Das Kernprinzip von `@matrix-fsm` ist die **visuelle 2D-Matrix**. Eine Transitionstabelle ist **keine** vertikal umgebrochene JSON-/Array-Liste, sondern eine spaltenbasiert ausgerichtete Tabelle.
-
-### Verbindliche Formatierungsregeln für `transitions`:
-1. **Die ersten 3 Spalten (`FROM`, `VIA`, `TO`) stehen IMMER in einer Zeile** und sind über alle Zeilen der Tabelle hinweg **exakt vertikal spaltenbündig** ausgerichtet.
-2. **Die 4. Spalte (`OPTIONS`: `{ guard, patch }`)** darf entweder:
-   - rechts neben `TO` in derselben Zeile stehen (bei kurzen Guards wie `{ guard: hasSelectedDrink }`), **oder**
-   - auf der **Zeile direkt darunter** (`\n`) stehen und dort nach normalen TypeScript-/Prettier-Regeln formatiert werden (ideal für mehrzeilige `patch`-Objekte).
-3. **Schutz vor Standard-Formattern (Prettier):**
-   - `**/*.machine.ts` ist in [`.prettierignore`](file:///Users/andreellrich/private/matrix-fsm/.prettierignore) eingetragen.
-   - Zusätzlich wird über jedem `transitions: [`-Block `// prettier-ignore` sowie der Spalten-Header `/* FROM ... VIA ... TO */` platziert.
-   - Die ESLint-Regel `@matrix-fsm/align-matrix-columns` prüft und repariert (`eslint --fix`) das Spalten-Alignment der ersten drei Spalten automatisch.
-
-### ✅ Richtig (Echte Matrix-Formatierung):
-```typescript
-  // prettier-ignore
-  transitions: [
-    /* FROM                 VIA                         TO */
-    ['customerBrowsing',    'SELECT_DRINK',             stay(),
-      {
-        patch: (_ctx, payload: { drink: CoffeeDrink }) => ({
-          selectedDrink: payload.drink,
-          finalPrice: payload.drink.price,
-          error: null,
-        }),
-      }],
-    ['customerBrowsing',    'PLACE_ORDER',              awaiting('checkingLoyalty'),  { guard: hasSelectedDrink }],
-    ['customerBrowsing',    'PLACE_ORDER',              stay(),
-      { patch: () => ({ error: 'Please select a coffee first!' }) }],
-
-    ['checkingLoyalty',     'DONE',                     baristaFSM,                   { guard: isFreeDrink }],
-    ['checkingLoyalty',     'DONE',                     'awaitingPayment'],
-  ],
-```
-
-### ❌ Falsch (Durch Prettier vertikal zerstörte Tupel):
-```typescript
-  // NIEMALS FROM, VIA und TO auf einzelne Zeilen umbrechen!
-  transitions: [
-    [
-      'customerBrowsing',
-      'SELECT_DRINK',
-      stay(),
-      { patch: ... },
-    ],
-  ],
-```
+Dieses Dokument definiert die verbindlichen Design-, Formatierungs- und Architekturregeln für alle State Machines (`*.machine.ts`), Domain-Typen (`*.domain.ts`), Stores (`*.store.ts`) und Komponenten im `@matrix-fsm`-Ökosystem. Jeder KI-Agent und Entwickler **muss** diese Regeln vor dem Erstellen oder Anpassen einer FSM befolgen.
 
 ---
 
-## 2. Wann `transitions<TContext>([...])` ausgelagert werden darf (`> 3`-Fälle-Regel)
+## 1. Zero JSON Dummy Objects & Curried `createFSM` (ADR 1 & ADR 2)
 
-Der Helper `transitions<TContext>([...])` dient dazu, **große** Entscheidungsblöcke auszulagern.
-- **Verbindliche Schwellenwert-Regel:** Lagere eine `[FROM, VIA]`-Gruppe **nur dann** in eine eigene `transitions([...])`-Variable aus, wenn sie **mehr als 3 Fälle (`> 3` Zeilen, also mindestens 4 Zeilen)** umfasst!
-- Bei **2 oder 3 Zeilen** (z. B. ein einfacher `guard` + `stay()`-Fallback) **muss** die Gruppe direkt inline in der `transitions`-Matrix stehen. Das Auslagern von 2-Zeilen-Gruppen zwingt den Leser zum Hin- und Herspringen im Code und verschlechtert die Lesbarkeit der Matrix.
-- Diese Regel wird durch `@matrix-fsm/complete-extracted-groups` (`minRows: 4`) statisch per AST-Linter erzwungen.
-
----
-
-## 3. Hierarchische Strukturierung (`subMachine` statt riesiger flacher Listen)
-
-Vermeide es, unabhängige Rollen, Subsysteme oder mehrstufige Teilprozesse in eine einzige, endlose flache FSM zu quetschen.
-
-### Wann eine `subMachine({...})` Pflicht ist:
-1. **Eigene Rolle / eigener Akteur / eigene Station:** Wenn im Domänenmodell ein klar abgegrenzter Akteur übernimmt (z. B. im Coffee Shop: nach Bestellung & Kasse übernimmt der **Barista** an der Siebträgermaschine -> `baristaFSM`).
-2. **Gemeinsamer Gruppen-Abbruch (Group-Interrupt):** Wenn mehrere Schritte eines Teilprozesses durch ein einziges Eltern-Event abgebrochen werden können (`[baristaFSM, 'CANCEL', 'customerBrowsing']`).
-3. **Skalierbarkeit auf parallele Instanzen (`each()`):** Eine `subMachine` bildet einen sauberen Baumknoten. Wenn später statt einem Barista mehrere Baristas parallel arbeiten sollen, kann dieselbe `baristaFSM` ohne Umbau der internen Zustände mit `each('orders', baristaFSM)` parallelisiert werden.
+1. **Keine Dummy-Objekte (`events: {} as ...` oder `context: { ... }`):**
+   - Events, Context, States und Store-Methoden werden als reine TypeScript-Typen in `*.domain.ts` (oder am Dateianfang) definiert und über die **curried** Signatur `createFSM<TEvents, TContext, TStates, TMethods>()({ ... })` übergeben.
+2. **Unified `createFSM` (kein separates `subMachine()`):**
+   - Jede FSM wird einheitlich mit `createFSM` erstellt. Ob eine Maschine eine Root-FSM oder eine Sub-FSM ist, entscheidet sich **ausschließlich durch ihren Einsatzkontext** (z. B. wenn `baristaFSM` in Spalte 1 `FROM`, Spalte 3 `TO` oder in `each('orders', baristaFSM)` einer Eltern-Matrix übergeben wird).
+   - Terminale Ergebnisse einer Sub-FSM werden mit `finalState('OUTCOME_NAME')` markiert und in der Eltern-Matrix in Spalte 2 (`VIA`) gematcht: `[baristaFSM, 'COFFEE_READY', 'coffeeReady']`.
 
 ```typescript
-export const baristaFSM = subMachine({
+export const baristaFSM = createFSM<
+  BaristaEvents,
+  CoffeeShopContext,
+  BaristaStates,
+  CoffeeShopMethods
+>()({
   id: 'barista',
   initial: 'ticketQueued',
-  events: {} as {
-    START_BREWING: void;
-    RETRY_BREW: void;
-  },
-  context: {} as CoffeeShopContext,
   // prettier-ignore
   transitions: [
-    /* FROM                 VIA               TO */
+    /* FROM                 VIA               TO                            OPTIONS */
     ['ticketQueued',        'START_BREWING',  awaiting('brewingCoffee')],
     ['brewingCoffee',       'DONE',           finalState('COFFEE_READY')],
-    ['brewingCoffee',       'ERROR',          'machineMaintenance',
-      { patch: (_ctx, err: Error) => ({ error: err.message }) }],
+    ['brewingCoffee',       'ERROR',          'machineMaintenance',         { call: (m) => m._setBrewError }],
     ['machineMaintenance',  'RETRY_BREW',     awaiting('brewingCoffee')],
   ],
 });
@@ -96,17 +34,51 @@ export const baristaFSM = subMachine({
 
 ---
 
-## 4. Die 3-Schichten-Architektur & 8 Linter-Gesetze (`@matrix-fsm/eslint-plugin`)
+## 2. First-Class SignalStore Alignment: `withState` & `withMethods` (`call`) (ADR 3 & ADR 4)
 
-### Schichten-Trennung:
-- **Layer 1 (`core`):** Globale Stores, API-Services, Effect-TS `Data.TaggedError`-Klassen.
-- **Layer 2 (`domain`):** 100 % reine TypeScript-Funktionen, Berechnungen, Menüs und `Record<Enum, Policy>`-Tabellen (`0 % Angular DI`).
-- **Layer 3 (`features/<feature-name>/`):** Jedes Beispiel/Feature ist sauber in einem eigenen Ordner gekapselt:
-  - `*.machine.ts`: Reine FSM- und Sub-FSM-Definitionen (`0 % Angular DI`, keine Service-/Store-Imports).
-  - `*.store.ts`: `signalStore` mit `withStateMachine(fsm, { syncContext, tasks })`.
-  - `*-example.component.ts/.html/.css`: Dumb View mit `@switch (store.fsmState())` (und `@switch (store.fsmSubState())` für aktive Sub-Machines).
+1. **Keine doppelte State-Haltung:**
+   - Der initiale State lebt **nicht** in `*.machine.ts`, sondern wird im SignalStore nativ über `withState<MyContext>(initialContext)` registriert.
+   - Dadurch stehen alle State-Slices direkt als erstklassige SignalStore-Signale (`store.selectedDrink()`, `store.customerCard()`, etc.) sowie gebündelt über `store.fsmContext()` bereit.
+2. **Store-Methoden per `{ call: (m) => m._methodName }` statt riesiger Inline-`patch`-Lambdas:**
+   - Synchrone State-Mutationen werden in `withMethods((store) => ({ _selectDrink: ... }))` mit `patchState(store, ...)` definiert.
+   - Methoden mit führendem Unterstrich (`_selectDrink`, `_markPaid`) werden von `@ngrx/signals` automatisch nach außen hin privat gehalten, sind aber innerhalb des Stores für `withStateMachine` über `{ call: (m) => m._selectDrink }` typsicher aufrufbar.
+   - **Verboten (Anti-Pattern):** Niemals mehrere Methoden in einem `call`-Selektor aufrufen (`{ call: (m) => { m._a(); m._b(); } }`) oder HTTP-/Async-Side-Effects in `withMethods` verstecken. Asynchrone Operationen gehören ausschließlich in `tasks: { awaitingState: ... }`!
 
-### Alle 8 AST-Linter-Regeln (`@matrix-fsm/eslint-plugin`):
+---
+
+## 3. Entkoppelte Task-Runner: Promises, RxJS Observables & Optionales Effect-TS (ADR 5)
+
+- **`@matrix-fsm/angular` (Core Adapter, 0 % Effect-TS-Abhängigkeit):**
+  - Unterstützt nativ Standard-**Promises** (`async/await` + `AbortSignal`) sowie **RxJS `Observable`** (inkl. automatischem `unsubscribe()` beim Verlassen/Abbrechen eines `awaiting`-Zustands).
+  - Unterstützt Tagged-Error-Routing (`err._tag` oder benannte `Error`-Klassen) direkt in Spalte 2 (`VIA`) ohne Effect-TS-Zwang.
+- **`@matrix-fsm/angular/effect` (Optionaler Secondary Entrypoint):**
+  - Stellt `effectTaskAdapter` und `runEffect` für Teams bereit, die Effect-TS Fibers und `Data.TaggedError` einsetzen möchten.
+
+---
+
+## 4. Matrix-Spalten-Alignment (Warum es `@matrix-fsm` heißt!)
+
+Das Kernprinzip von `@matrix-fsm` ist die **visuelle 2D-Matrix**. Eine Transitionstabelle ist **keine** vertikal umgebrochene JSON-/Array-Liste, sondern eine spaltenbasiert ausgerichtete Tabelle.
+
+### Verbindliche Formatierungsregeln für `transitions`:
+1. **Die ersten 3 Spalten (`FROM`, `VIA`, `TO`) stehen IMMER in einer Zeile** und sind über alle Zeilen der Tabelle hinweg **exakt vertikal spaltenbündig** ausgerichtet.
+2. **Die 4. Spalte (`OPTIONS`: `{ guard, call, patch }`)** steht durch die schlanken `{ call: (m) => m._... }`-Referenzen im Regelfall direkt in derselben Zeile als 4. Spalte (oder darf bei Bedarf auf die Zeile direkt darunter umbrechen).
+3. **Schutz vor Standard-Formattern (Prettier):**
+   - `**/*.machine.ts` ist in [`.prettierignore`](file:///Users/andreellrich/private/matrix-fsm/.prettierignore) eingetragen.
+   - Zusätzlich wird über jedem `transitions: [`-Block `// prettier-ignore` sowie der Spalten-Header `/* FROM ... VIA ... TO ... OPTIONS */` platziert.
+   - Die ESLint-Regel `@matrix-fsm/align-matrix-columns` prüft und repariert (`eslint --fix`) das Spalten-Alignment der ersten drei Spalten automatisch.
+
+---
+
+## 5. Wann `transitions<TContext>([...])` ausgelagert werden darf (`> 3`-Fälle-Regel)
+
+- **Verbindliche Schwellenwert-Regel:** Lagere eine `[FROM, VIA]`-Gruppe **nur dann** in eine eigene `transitions([...])`-Variable aus, wenn sie **mehr als 3 Fälle (`> 3` Zeilen, also mindestens 4 Zeilen)** umfasst!
+- Bei **2 oder 3 Zeilen** (z. B. ein `guard` + `stay()`-Fallback) **muss** die Gruppe direkt inline in der `transitions`-Matrix stehen (`@matrix-fsm/complete-extracted-groups`, `minRows: 4`).
+
+---
+
+## 6. Alle 8 AST-Linter-Regeln (`@matrix-fsm/eslint-plugin`)
+
 | # | Regel | Beschreibung |
 |---|-------|--------------|
 | 1 | `align-matrix-columns` | Erzwingt, dass `[FROM, VIA, TO]` in einer Zeile stehen und über alle Zeilen vertikal spaltenbündig ausgerichtet sind (`OPTIONS` darf in derselben oder der nächsten Zeile stehen). |
@@ -116,4 +88,4 @@ export const baristaFSM = subMachine({
 | 5 | `require-awaiting-handlers` | Jeder `awaiting('x')`-Zustand benötigt mindestens einen `'DONE'`- und einen `'ERROR'`-Übergang. |
 | 6 | `awaiting-naming-convention` | Jeder Zustand in `awaiting('...')` muss auf `-ing` enden (z. B. `'checkingLoyalty'`, `'brewingCoffee'`). |
 | 7 | `complete-extracted-groups` | `transitions([...])`-Variablen dürfen eine `[FROM, VIA]`-Gruppe nicht aufteilen und sind erst ab **> 3 Zeilen** (`minRows: 4`) erlaubt. |
-| 8 | `pure-machine-definition` | Verbietet `@angular/*`, Service- oder Store-Imports sowie `inject()` in `*.machine.ts`. |
+| 8 | `pure-machine-definition` | Verbietet `@angular/*`, Service- oder Store-Imports sowie `inject()` in `*.machine.ts` und stellt sicher, dass `call` eine einzelne Methodenreferenz `(m) => m._method` ist. |

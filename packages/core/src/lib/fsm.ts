@@ -6,10 +6,12 @@ import {
   isAwaitingNode,
   isEachNode,
   isFinalNode,
+  isFSMDefinition,
   isStayNode,
   isSubMachineRef,
 } from './primitives.js';
 import type {
+  AnyFSMDefinition,
   AnyTransitionRow,
   EachNode,
   ExtractStatesFromConfig,
@@ -19,13 +21,30 @@ import type {
   SubMachineRef,
   TransitionEvaluation,
   TransitionOptions,
+  TransitionRow,
 } from './types.js';
+
+export function toSubMachineRef(
+  value: unknown,
+): SubMachineRef<AnyFSMDefinition, string> | null {
+  if (isSubMachineRef(value)) {
+    return value;
+  }
+  if (isFSMDefinition(value)) {
+    return Object.freeze({
+      __type: 'subMachine' as const,
+      id: value.id,
+      machine: value,
+    });
+  }
+  return null;
+}
 
 export function resolveSourceId(source: unknown): string {
   if (typeof source === 'string') {
     return source;
   }
-  if (isSubMachineRef(source)) {
+  if (isSubMachineRef(source) || isFSMDefinition(source)) {
     return source.id;
   }
   if (isEachNode(source)) {
@@ -75,13 +94,14 @@ export function resolveTargetId(
       eachNode: null,
     };
   }
-  if (isSubMachineRef(target)) {
+  const subRef = toSubMachineRef(target);
+  if (subRef) {
     return {
-      stateName: target.id,
+      stateName: subRef.id,
       stayed: false,
       isAwaiting: false,
       finalOutcome: null,
-      subMachine: target,
+      subMachine: subRef,
       eachNode: null,
     };
   }
@@ -105,24 +125,44 @@ export function resolveTargetId(
   };
 }
 
-/**
- * Creates a pure, statically analyzable flat tuple Finite State Machine definition.
- */
-export function createFSM<
+type ResolveContextGeneric<TSecond, TThird> = [TSecond] extends [string]
+  ? TThird extends object
+    ? TThird
+    : Record<string, any>
+  : TSecond extends object
+    ? TSecond
+    : Record<string, any>;
+
+type ResolveStatesGeneric<TSecond, TThird> = [TSecond] extends [string]
+  ? TSecond
+  : TThird extends string
+    ? TThird
+    : string;
+
+function buildFSM<
   const TId extends string,
   const TInitial extends string,
   TContext extends object,
-  TEvents extends Record<string, any> = Record<string, any>,
-  const TTransitions extends readonly AnyTransitionRow<TContext>[] =
-    readonly AnyTransitionRow<TContext>[],
+  TEvents extends Record<string, any>,
+  const TTransitions extends readonly AnyTransitionRow<TContext, any>[],
+  TMethods = Record<string, any>,
 >(
-  config: FSMConfig<TId, TInitial, TContext, TEvents, TTransitions>,
+  config: FSMConfig<
+    TId,
+    TInitial,
+    TContext,
+    TEvents,
+    TTransitions,
+    string,
+    TMethods
+  >,
 ): FSMDefinition<
   TId,
   TInitial,
   ResolveContext<TContext, TTransitions>,
   TEvents,
-  TTransitions
+  TTransitions,
+  TMethods
 > {
   type EffectiveContext = ResolveContext<TContext, TTransitions>;
   const states = new Set<string>([config.initial]);
@@ -131,11 +171,16 @@ export function createFSM<
   const eachNodes = new Map<string, EachNode<any, any>>();
 
   for (const row of config.transitions) {
-    const [from, via, to] = row as unknown as readonly [unknown, unknown, unknown];
+    const [from, via, to] = row as unknown as readonly [
+      unknown,
+      unknown,
+      unknown,
+    ];
 
-    if (isSubMachineRef(from)) {
-      states.add(from.id);
-      subMachines.set(from.id, from);
+    const fromSub = toSubMachineRef(from);
+    if (fromSub) {
+      states.add(fromSub.id);
+      subMachines.set(fromSub.id, fromSub);
     } else if (isEachNode(from)) {
       states.add(from.id);
       eachNodes.set(from.id, from);
@@ -146,14 +191,15 @@ export function createFSM<
       }
     }
 
+    const toSub = toSubMachineRef(to);
     if (isAwaitingNode(to)) {
       states.add(to.state);
       awaitingStates.add(to.state);
     } else if (isFinalNode(to)) {
       states.add(to.outcome);
-    } else if (isSubMachineRef(to)) {
-      states.add(to.id);
-      subMachines.set(to.id, to);
+    } else if (toSub) {
+      states.add(toSub.id);
+      subMachines.set(toSub.id, toSub);
     } else if (isEachNode(to)) {
       states.add(to.id);
       eachNodes.set(to.id, to);
@@ -179,14 +225,14 @@ export function createFSM<
     event: string,
     payload: unknown,
     currentContext: Readonly<EffectiveContext>,
-  ): TransitionEvaluation<StateUnion, EffectiveContext> => {
+  ): TransitionEvaluation<StateUnion, EffectiveContext, TMethods> => {
     // Evaluate top-to-bottom (First-Match-Wins)
     for (const row of config.transitions) {
       const [from, via, to, options] = row as unknown as readonly [
         unknown,
         unknown,
         unknown,
-        TransitionOptions<EffectiveContext, any> | undefined,
+        TransitionOptions<EffectiveContext, any, TMethods> | undefined,
       ];
 
       const fromId = resolveSourceId(from);
@@ -224,6 +270,7 @@ export function createFSM<
         nextState: resolved.stateName as StateUnion,
         nextContext,
         patchApplied,
+        callSelector: options?.call ?? null,
         stayed: resolved.stayed,
         isAwaiting: resolved.stayed
           ? awaitingStates.has(currentState)
@@ -242,6 +289,7 @@ export function createFSM<
       nextState: currentState as StateUnion,
       nextContext: { ...currentContext } as EffectiveContext,
       patchApplied: null,
+      callSelector: null,
       stayed: false,
       isAwaiting: awaitingStates.has(currentState),
       finalOutcome: null,
@@ -254,7 +302,7 @@ export function createFSM<
   return Object.freeze({
     id: config.id,
     initial: config.initial,
-    context: config.context as unknown as EffectiveContext,
+    context: (config.context ?? {}) as unknown as EffectiveContext,
     events: (config.events ?? {}) as TEvents,
     transitions: config.transitions,
     states,
@@ -264,4 +312,84 @@ export function createFSM<
     evaluate,
     hasTransitionFor,
   });
+}
+
+/**
+ * Curried FSM creator (Recommended V1 API):
+ * Zero dummy JSON objects (`events: {} as ...` or `context: { ... }` are not needed).
+ * Any machine created with `createFSM` can be mounted as a root machine or used
+ * directly as a hierarchical sub-machine in a parent matrix.
+ */
+export function createFSM<
+  TEvents extends Record<string, any> = Record<string, any>,
+  TContextOrStates = Record<string, any>,
+  TStates extends string = string,
+  TMethods = Record<string, any>,
+>(): <
+  const TId extends string,
+  const TInitial extends ResolveStatesGeneric<TContextOrStates, TStates>,
+  const TTransitions extends readonly TransitionRow<
+    ResolveContextGeneric<TContextOrStates, TStates>,
+    Extract<keyof TEvents, string>,
+    ResolveStatesGeneric<TContextOrStates, TStates>,
+    TMethods
+  >[],
+>(
+  config: FSMConfig<
+    TId,
+    TInitial,
+    ResolveContextGeneric<TContextOrStates, TStates>,
+    TEvents,
+    TTransitions,
+    ResolveStatesGeneric<TContextOrStates, TStates>,
+    TMethods
+  >,
+) => FSMDefinition<
+  TId,
+  TInitial,
+  ResolveContext<
+    ResolveContextGeneric<TContextOrStates, TStates>,
+    TTransitions
+  >,
+  TEvents,
+  TTransitions,
+  TMethods
+>;
+
+/**
+ * Direct uncurried FSM creator (Backwards-compatible overload).
+ */
+export function createFSM<
+  const TId extends string,
+  const TInitial extends string,
+  TContext extends object = Record<string, any>,
+  TEvents extends Record<string, any> = Record<string, any>,
+  const TTransitions extends readonly AnyTransitionRow<TContext, any>[] =
+    readonly AnyTransitionRow<TContext, any>[],
+  TMethods = Record<string, any>,
+>(
+  config: FSMConfig<
+    TId,
+    TInitial,
+    TContext,
+    TEvents,
+    TTransitions,
+    string,
+    TMethods
+  >,
+): FSMDefinition<
+  TId,
+  TInitial,
+  ResolveContext<TContext, TTransitions>,
+  TEvents,
+  TTransitions,
+  TMethods
+>;
+
+export function createFSM(config?: FSMConfig<any, any, any, any, any, any, any>): any {
+  if (config === undefined) {
+    return (curriedConfig: FSMConfig<any, any, any, any, any, any, any>) =>
+      buildFSM(curriedConfig);
+  }
+  return buildFSM(config);
 }

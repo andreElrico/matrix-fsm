@@ -6,6 +6,7 @@ import {
   isAwaitingNode,
   isEachNode,
   isFinalNode,
+  isFSMDefinition,
   isStayNode,
   isSubMachineRef,
 } from './primitives.js';
@@ -32,7 +33,7 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
     );
   }
 
-  // 3. Render composite subMachine blocks
+  // 3. Render composite sub-machine blocks
   for (const [, subRef] of fsm.subMachines) {
     const safeSubId = sanitizeMermaidId(subRef.id);
     lines.push(`${indent}state ${safeSubId} {`);
@@ -49,14 +50,15 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
       unknown,
       unknown,
       unknown,
-      TransitionOptions<any, any> | undefined,
+      TransitionOptions<any, any, any> | undefined,
     ];
 
-    const fromRaw = isSubMachineRef(from)
-      ? from.id
-      : isEachNode(from)
+    const fromRaw =
+      isSubMachineRef(from) || isFSMDefinition(from)
         ? from.id
-        : String(from);
+        : isEachNode(from)
+          ? from.id
+          : String(from);
     const fromId = sanitizeMermaidId(fromRaw);
     const viaLabel = String(via);
 
@@ -82,7 +84,7 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
 
     const toRaw = isAwaitingNode(to)
       ? to.state
-      : isSubMachineRef(to)
+      : isSubMachineRef(to) || isFSMDefinition(to)
         ? to.id
         : isEachNode(to)
           ? to.id
@@ -97,7 +99,7 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
 
 /**
  * Generates a static Mermaid `stateDiagram-v2` diagram from a pure FSM definition.
- * Renders `awaiting()` nodes with `⚡` badges and `subMachine()` as composite blocks.
+ * Renders `awaiting()` nodes with `⚡` badges and nested sub-machines as composite blocks.
  */
 export function toMermaid(fsm: AnyFSMDefinition): string {
   const lines: string[] = [

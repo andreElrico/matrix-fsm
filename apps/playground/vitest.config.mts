@@ -12,6 +12,10 @@ export default defineConfig(() => ({
         import.meta.dirname,
         '../../packages/core/src/index.ts',
       ),
+      '@matrix-fsm/angular/effect': path.resolve(
+        import.meta.dirname,
+        '../../packages/angular/src/effect/index.ts',
+      ),
       '@matrix-fsm/angular': path.resolve(
         import.meta.dirname,
         '../../packages/angular/src/index.ts',

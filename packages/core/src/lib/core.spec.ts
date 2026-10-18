@@ -6,11 +6,11 @@ import {
   each,
   finalState,
   stay,
-  subMachine,
   toMermaid,
   transitions,
   type ExtractAwaitingNodes,
   type ExtractContext,
+  type ExtractFinalOutcomes,
   type ExtractStates,
   type RequiredTasksMap,
 } from '../index.js';
@@ -27,54 +27,50 @@ interface AuthContext {
   error: string | null;
 }
 
+type AuthStates =
+  | 'loginView'
+  | 'authenticating'
+  | 'proUpsellPromo'
+  | 'offlineRetryView'
+  | 'loggedIn';
+
+type AuthEvents = {
+  LOGIN: void;
+  DISMISS_PROMO: void;
+  CANCEL: void;
+  NetworkTimeoutError: { message: string };
+};
+
+interface AuthMethods {
+  _setInvalidEmail(): void;
+  _setError(err: Error): void;
+}
+
 const hasValidInput = (ctx: AuthContext) => ctx.credentials.email.includes('@');
 const shouldShowPromo = (ctx: AuthContext) => ctx.policy.showUpsellAds;
 
-const handleLoginSubmit = transitions<AuthContext>([
-  ['loginView', 'LOGIN', awaiting('authenticating'), { guard: hasValidInput }],
-  ['loginView', 'LOGIN', stay(), { patch: () => ({ error: 'Invalid email' }) }],
-]);
-
-const authFSM = createFSM({
+const authFSM = createFSM<
+  AuthEvents,
+  AuthContext,
+  AuthStates,
+  AuthMethods
+>()({
   id: 'auth',
   initial: 'loginView',
-  events: {} as {
-    LOGIN: void;
-    DISMISS_PROMO: void;
-    CANCEL: void;
-    NetworkTimeoutError: { message: string };
-  },
-  context: {
-    credentials: { email: '', password: '' },
-    user: null,
-    policy: {
-      showUpsellAds: true,
-      canBypassApproval: false,
-      discountPercent: 0,
-      maxProjects: 3,
-    },
-    error: null,
-  } satisfies AuthContext,
   transitions: [
-    ...handleLoginSubmit,
-    ['authenticating', 'CANCEL', 'loginView'],
-    ['authenticating', 'DONE', 'proUpsellPromo', { guard: shouldShowPromo }],
-    ['authenticating', 'DONE', 'loggedIn'],
-    ['authenticating', 'NetworkTimeoutError', 'offlineRetryView'],
-    [
-      'authenticating',
-      'ERROR',
-      'loginView',
-      {
-        patch: (_ctx, err: Error) => ({ error: err.message }),
-      },
-    ],
-    ['proUpsellPromo', 'DISMISS_PROMO', 'loggedIn'],
+    ['loginView',         'LOGIN',                awaiting('authenticating'), { guard: hasValidInput }],
+    ['loginView',         'LOGIN',                stay(),                     { call: (m) => m._setInvalidEmail }],
+    ['authenticating',    'CANCEL',               'loginView'],
+    ['authenticating',    'DONE',                 'proUpsellPromo',           { guard: shouldShowPromo }],
+    ['authenticating',    'DONE',                 'loggedIn'],
+    ['authenticating',    'NetworkTimeoutError',  'offlineRetryView'],
+    ['authenticating',    'ERROR',                'loginView',                { call: (m) => m._setError }],
+    ['proUpsellPromo',    'DISMISS_PROMO',        'loggedIn'],
   ],
 });
 
 describe('@matrix-fsm/core', () => {
-  it('extracts states, awaiting nodes, and required tasks at compile time and runtime', () => {
+  it('extracts states, awaiting nodes, and required tasks from curried createFSM without dummy objects', () => {
     expect(authFSM.id).toBe('auth');
     expect(authFSM.initial).toBe('loginView');
     expect([...authFSM.awaitingStates]).toEqual(['authenticating']);
@@ -96,11 +92,33 @@ describe('@matrix-fsm/core', () => {
     expectTypeOf<'loggedIn'>().toExtend<States>();
   });
 
-  it('evaluates First-Match-Wins and handles stay() without changing state', () => {
-    const instance = createMachineInstance(authFSM);
+  it('evaluates First-Match-Wins, handles stay(), and executes call selectors on methods', () => {
+    const initialCtx: AuthContext = {
+      credentials: { email: '', password: '' },
+      user: null,
+      policy: {
+        showUpsellAds: true,
+        canBypassApproval: false,
+        discountPercent: 0,
+        maxProjects: 3,
+      },
+      error: null,
+    };
+
+    const instance = createMachineInstance(authFSM, {
+      initialContext: initialCtx,
+      methods: {
+        _setInvalidEmail: () => {
+          instance.patchContext({ error: 'Invalid email' });
+        },
+        _setError: (err: Error) => {
+          instance.patchContext({ error: err.message });
+        },
+      },
+    });
     expect(instance.state()).toBe('loginView');
 
-    // Invalid email -> matches 2nd row (stay() + patch error)
+    // Invalid email -> matches 2nd row (stay() + call _setInvalidEmail)
     instance.send('LOGIN');
     expect(instance.state()).toBe('loginView');
     expect(instance.context().error).toBe('Invalid email');
@@ -125,43 +143,49 @@ describe('@matrix-fsm/core', () => {
     expect(instance.state()).toBe('loggedIn');
   });
 
-  it('supports subMachine() and finalState() with group interrupts', () => {
-    const paymentSub = subMachine({
+  it('supports unified createFSM as a sub-machine directly in parent matrix and extracts finalState outcomes', () => {
+    // Notice: paymentSub is created with unified createFSM (no subMachine() wrapper!)
+    const paymentSub = createFSM<{ PAY: void }, { cardValid: boolean }>()({
       id: 'payment',
       initial: 'enteringCard',
-      context: { cardValid: true },
       transitions: [
-        ['enteringCard', 'PAY', awaiting('chargingCard')],
-        ['chargingCard', 'DONE', finalState('PAID')],
-        ['chargingCard', 'ERROR', 'enteringCard'],
+        ['enteringCard',  'PAY',    awaiting('chargingCard')],
+        ['chargingCard',  'DONE',   finalState('PAID')],
+        ['chargingCard',  'ERROR',  'enteringCard'],
       ],
     });
 
-    const uploadChild = createFSM({
+    type PaymentOutcomes = ExtractFinalOutcomes<typeof paymentSub>;
+    expectTypeOf<PaymentOutcomes>().toEqualTypeOf<'PAID'>();
+
+    const uploadChild = createFSM<{ START: void }, { progress: number }>()({
       id: 'uploadItem',
       initial: 'queued',
-      context: { progress: 0 },
       transitions: [
-        ['queued', 'START', awaiting('uploading')],
-        ['uploading', 'DONE', finalState('UPLOADED')],
-        ['uploading', 'ERROR', 'failed'],
+        ['queued',     'START',  awaiting('uploading')],
+        ['uploading',  'DONE',   finalState('UPLOADED')],
+        ['uploading',  'ERROR',  'failed'],
       ],
     });
 
-    const checkoutFSM = createFSM({
+    const checkoutFSM = createFSM<
+      { UPLOAD_FILES: void; CANCEL: void; PAID: void },
+      { files: string[] }
+    >()({
       id: 'checkout',
       initial: 'cart',
-      context: { files: ['f1', 'f2'] },
       transitions: [
-        ['cart', 'UPLOAD_FILES', each('files', uploadChild)],
-        [each('files', uploadChild), 'ALL_DONE', paymentSub],
-        [paymentSub, 'CANCEL', 'cart'],
-        [paymentSub, 'PAID', 'orderConfirmed'],
-        [paymentSub, 'DONE', 'orderConfirmed'],
+        ['cart',                     'UPLOAD_FILES',  each('files', uploadChild)],
+        [each('files', uploadChild), 'ALL_DONE',      paymentSub],
+        [paymentSub,                 'CANCEL',        'cart'],
+        [paymentSub,                 'PAID',          'orderConfirmed'],
+        [paymentSub,                 'DONE',          'orderConfirmed'],
       ],
     });
 
-    const instance = createMachineInstance(checkoutFSM);
+    const instance = createMachineInstance(checkoutFSM, {
+      initialContext: { files: ['f1', 'f2'] },
+    });
     expect(instance.state()).toBe('cart');
 
     instance.send('UPLOAD_FILES');
@@ -191,6 +215,17 @@ describe('@matrix-fsm/core', () => {
     expect(mermaid).toContain('state "⚡ chargingCard" as chargingCard');
     expect(mermaid).toContain('state payment {');
     expect(mermaid).toContain('each_files');
+  });
+
+  it('supports extracted transitions() groups (> 3 rows) with curried createFSM', () => {
+    const handleOrderSubmit = transitions<AuthContext>([
+      ['loginView', 'LOGIN', 'ssoRedirect',             { guard: hasValidInput }],
+      ['loginView', 'LOGIN', 'mfaChallenge',            { guard: shouldShowPromo }],
+      ['loginView', 'LOGIN', awaiting('authenticating'), { guard: hasValidInput }],
+      ['loginView', 'LOGIN', stay()],
+    ]);
+
+    expect(handleOrderSubmit).toHaveLength(4);
   });
 
   it('generates Mermaid diagram with ⚡ awaiting badges and stay labels', () => {

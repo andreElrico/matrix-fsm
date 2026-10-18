@@ -1,31 +1,17 @@
 /**
  * Layer 3 (Feature): Pure Coffee Shop & Barista Sub-FSM (coffee-shop.machine.ts)
- * 0% Angular DI, 100% static analyzability (Mermaid exportable), Strict Matrix Alignment
+ * 0% Angular DI, Zero JSON Dummy Objects, Unified createFSM, Strict Matrix Alignment
  */
 
-import {
-  awaiting,
-  createFSM,
-  finalState,
-  stay,
-  subMachine,
-} from '@matrix-fsm/core';
-import {
-  type BrewResult,
-  calculateNextStamps,
-  type CoffeeDrink,
-  type CustomerCard,
+import { awaiting, createFSM, finalState, stay } from '@matrix-fsm/core';
+import type {
+  BaristaEvents,
+  BaristaStates,
+  CoffeeShopContext,
+  CoffeeShopEvents,
+  CoffeeShopMethods,
+  CoffeeShopStates,
 } from './coffee-shop.domain';
-
-export interface CoffeeShopContext {
-  customerCard: CustomerCard;
-  selectedDrink: CoffeeDrink | null;
-  isFreeDrink: boolean;
-  finalPrice: number;
-  isPaid: boolean;
-  baristaResult: BrewResult | null;
-  error: string | null;
-}
 
 // Pure guards (0% DI, strictly reads ctx):
 const hasSelectedDrink = (ctx: CoffeeShopContext) => ctx.selectedDrink !== null;
@@ -33,85 +19,47 @@ const isFreeDrink = (ctx: CoffeeShopContext) => ctx.isFreeDrink === true;
 
 /**
  * Hierarchical Sub-FSM for the Barista Station.
- * Encapsulates ticket queueing, espresso extraction, and machine maintenance,
- * and can later be scaled to multiple parallel baristas via `each('baristas', baristaFSM)`.
+ * Created with the exact same `createFSM` as any root machine — becomes a sub-machine
+ * purely by usage in the parent `coffeeShopFSM` matrix!
  */
-export const baristaFSM = subMachine({
+export const baristaFSM = createFSM<
+  BaristaEvents,
+  CoffeeShopContext,
+  BaristaStates,
+  CoffeeShopMethods
+>()({
   id: 'barista',
   initial: 'ticketQueued',
-  events: {} as {
-    START_BREWING: void;
-    RETRY_BREW: void;
-  },
-  context: {} as CoffeeShopContext,
   // prettier-ignore
   transitions: [
-    /* FROM                 VIA               TO */
+    /* FROM                 VIA               TO                            OPTIONS */
     ['ticketQueued',        'START_BREWING',  awaiting('brewingCoffee')],
     ['brewingCoffee',       'DONE',           finalState('COFFEE_READY')],
-    ['brewingCoffee',       'ERROR',          'machineMaintenance',
-      { patch: (_ctx, err: Error) => ({ error: err.message }) }
-    ],
+    ['brewingCoffee',       'ERROR',          'machineMaintenance',         { call: (m) => m._setBrewError }],
     ['machineMaintenance',  'RETRY_BREW',     awaiting('brewingCoffee')],
   ],
 });
 
-export const coffeeShopFSM = createFSM({
+export const coffeeShopFSM = createFSM<
+  CoffeeShopEvents,
+  CoffeeShopContext,
+  CoffeeShopStates,
+  CoffeeShopMethods
+>()({
   id: 'coffeeShop',
   initial: 'customerBrowsing',
-  events: {} as {
-    SELECT_DRINK: { drink: CoffeeDrink };
-    SET_STAMPS: { stamps: number };
-    PLACE_ORDER: void;
-    CANCEL: void;
-    RETRY: void;
-    BYPASS_CARD: void;
-    PAY: void;
-    START_BREWING: void;
-    RETRY_BREW: void;
-    TAKE_COFFEE: void;
-    FINISH_COFFEE: void;
-    LoyaltyApiTimeoutError: { message: string };
-  },
-  context: {
-    customerCard: {
-      cardId: 'CARD-8842',
-      customerName: 'Sam CoffeeLover',
-      currentStamps: 3,
-    },
-    selectedDrink: null,
-    isFreeDrink: false,
-    finalPrice: 0,
-    isPaid: false,
-    baristaResult: null,
-    error: null,
-  } satisfies CoffeeShopContext as CoffeeShopContext,
   // prettier-ignore
   transitions: [
-    /* FROM                 VIA                         TO */
-    ['customerBrowsing',    'SELECT_DRINK',             stay(),
-      {
-        patch: (_ctx, payload: { drink: CoffeeDrink }) => ({
-          selectedDrink: payload.drink,
-          finalPrice: payload.drink.price,
-          error: null,
-        }),
-      }],
-    ['customerBrowsing',    'SET_STAMPS',               stay(),
-      {
-        patch: (ctx, payload: { stamps: number }) => ({ 
-          customerCard: { ...ctx.customerCard, currentStamps: payload.stamps },
-        }),
-      }],
+    /* FROM                 VIA                         TO                            OPTIONS */
+    ['customerBrowsing',    'SELECT_DRINK',             stay(),                       { call: (m) => m._selectDrink }],
+    ['customerBrowsing',    'SET_STAMPS',               stay(),                       { call: (m) => m._setStamps }],
     ['customerBrowsing',    'PLACE_ORDER',              awaiting('checkingLoyalty'),  { guard: hasSelectedDrink }],
-    ['customerBrowsing',    'PLACE_ORDER',              stay(),
-      { patch: () => ({ error: 'Please select a coffee first!' }) }],
+    ['customerBrowsing',    'PLACE_ORDER',              stay(),                       { call: (m) => m._setMissingDrinkError }],
 
     // Cashier checks loyalty card via API call:
     ['checkingLoyalty',     'CANCEL',                   'customerBrowsing'],
     ['checkingLoyalty',     'LoyaltyApiTimeoutError',   'loyaltyErrorView'],
-    ['checkingLoyalty',     'ERROR',                    'customerBrowsing',
-      { patch: (_ctx, err: Error) => ({ error: err.message }) }],
+    ['checkingLoyalty',     'ERROR',                    'customerBrowsing',           { call: (m) => m._setBrewError }],
     // 10th drink is FREE -> bypass payment and route directly into Barista Sub-FSM!
     ['checkingLoyalty',     'DONE',                     baristaFSM,                   { guard: isFreeDrink }],
     ['checkingLoyalty',     'DONE',                     'awaitingPayment'],
@@ -122,8 +70,7 @@ export const coffeeShopFSM = createFSM({
     ['loyaltyErrorView',    'CANCEL',                   'customerBrowsing'],
 
     // Customer payment at register -> enters Barista Sub-FSM:
-    ['awaitingPayment',     'PAY',                      baristaFSM,
-      { patch: () => ({ isPaid: true }) }],
+    ['awaitingPayment',     'PAY',                      baristaFSM,                   { call: (m) => m._markPaid }],
     ['awaitingPayment',     'CANCEL',                   'customerBrowsing'],
 
     // Barista Sub-FSM outcomes & group-interrupt:
@@ -133,22 +80,6 @@ export const coffeeShopFSM = createFSM({
 
     // Customer picks up coffee from counter and drinks it:
     ['coffeeReady',         'TAKE_COFFEE',              'drinkingCoffee'],
-    ['drinkingCoffee',      'FINISH_COFFEE',            'customerBrowsing',
-      {
-        patch: (ctx) => ({
-          customerCard: {
-            ...ctx.customerCard,
-            currentStamps: calculateNextStamps(
-              ctx.customerCard.currentStamps,
-              ctx.isFreeDrink,
-            ),
-          },
-          selectedDrink: null,
-          isPaid: false,
-          isFreeDrink: false,
-          baristaResult: null,
-          error: null,
-        }),
-      }],
+    ['drinkingCoffee',      'FINISH_COFFEE',            'customerBrowsing',           { call: (m) => m._finishCoffee }],
   ],
 });

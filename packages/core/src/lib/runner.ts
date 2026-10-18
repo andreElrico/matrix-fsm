@@ -5,8 +5,10 @@
 import type {
   AnyFSMDefinition,
   ExtractContext,
+  ExtractMethods,
   ExtractStates,
   SubMachineRef,
+  TransitionCallSelector,
 } from './types.js';
 
 export interface MachineInstance<TFSM extends AnyFSMDefinition = AnyFSMDefinition> {
@@ -24,6 +26,21 @@ export interface MachineInstance<TFSM extends AnyFSMDefinition = AnyFSMDefinitio
 
 export interface MachineInstanceHooks<TFSM extends AnyFSMDefinition> {
   readonly initialContext?: Partial<ExtractContext<TFSM>>;
+  /**
+   * Optional method map or store reference used to resolve `{ call: (m) => m.methodName }`
+   * during transitions.
+   */
+  readonly methods?:
+    | Partial<ExtractMethods<TFSM>>
+    | Record<string, (...args: any[]) => any>;
+  /**
+   * Optional dynamic context provider (e.g., SignalStore's live state getter).
+   */
+  readonly getContext?: () => ExtractContext<TFSM>;
+  /**
+   * Optional callback invoked whenever a transition applies a pure `patch`.
+   */
+  readonly onPatch?: (patch: Partial<ExtractContext<TFSM>>) => void;
   readonly onStateChange?: (
     state: ExtractStates<TFSM>,
     context: Readonly<ExtractContext<TFSM>>,
@@ -42,6 +59,24 @@ export interface MachineInstanceHooks<TFSM extends AnyFSMDefinition> {
   readonly onExit?: Partial<
     Record<string, (ctx: Readonly<ExtractContext<TFSM>>) => void>
   >;
+}
+
+export function invokeCallSelector<TContext>(
+  callSelector: TransitionCallSelector<any, any, TContext> | null,
+  methodsTarget: Record<string, any> | undefined,
+  payload: unknown,
+  context: Readonly<TContext>,
+): void {
+  if (!callSelector || !methodsTarget) {
+    return;
+  }
+  const fn =
+    typeof callSelector === 'function'
+      ? callSelector(methodsTarget)
+      : methodsTarget[callSelector];
+  if (typeof fn === 'function') {
+    fn.call(methodsTarget, payload, context);
+  }
 }
 
 /**
@@ -63,6 +98,13 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
   let activeSubRef: SubMachineRef<any, any> | null = null;
   let doneOutcome: string | null = null;
 
+  const readEffectiveContext = (): TContext => {
+    if (hooks?.getContext) {
+      return hooks.getContext();
+    }
+    return currentContext;
+  };
+
   const isPending = (): boolean => {
     if (activeSubMachine) {
       return activeSubMachine.isPending();
@@ -78,6 +120,13 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     }
     activeSubRef = subRef;
     activeSubMachine = createMachineInstance(subRef.machine, {
+      initialContext: readEffectiveContext(),
+      methods: hooks?.methods,
+      getContext: () => readEffectiveContext(),
+      onPatch: (patch) => {
+        currentContext = { ...currentContext, ...patch };
+        hooks?.onPatch?.(patch);
+      },
       onStateChange: (_childState, childCtx, childInfo) => {
         if (childInfo.isDone) {
           const outcome = childInfo.finalOutcome ?? 'DONE';
@@ -109,6 +158,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       } else if (
         activeSubRef.machine.hasTransitionFor(activeSubMachine.state(), event)
       ) {
+        activeSubMachine.patchContext(readEffectiveContext());
         activeSubMachine.send(event, payload);
         return;
       } else if (fsm.hasTransitionFor(activeSubRef.id, event)) {
@@ -120,11 +170,12 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     }
 
     const prevState = currentState;
+    const effectiveCtx = readEffectiveContext();
     const evaluation = fsm.evaluate(
       currentState,
       event,
       payload,
-      currentContext,
+      effectiveCtx,
     );
 
     if (!evaluation.matched) {
@@ -132,9 +183,24 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     }
 
     currentContext = evaluation.nextContext;
+    if (evaluation.patchApplied) {
+      hooks?.onPatch?.(evaluation.patchApplied);
+    }
+
+    if (evaluation.callSelector) {
+      invokeCallSelector(
+        evaluation.callSelector,
+        hooks?.methods as Record<string, any> | undefined,
+        payload,
+        readEffectiveContext(),
+      );
+      if (hooks?.getContext) {
+        currentContext = hooks.getContext();
+      }
+    }
 
     if (evaluation.stayed) {
-      hooks?.onStateChange?.(currentState, currentContext, {
+      hooks?.onStateChange?.(currentState, readEffectiveContext(), {
         stayed: true,
         isPending: isPending(),
         isDone: isDone(),
@@ -146,7 +212,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     }
 
     // Standard state transition
-    hooks?.onExit?.[prevState]?.(currentContext);
+    hooks?.onExit?.[prevState]?.(readEffectiveContext());
     currentState = evaluation.nextState;
 
     if (evaluation.finalOutcome !== null) {
@@ -157,8 +223,8 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       enterSubMachineIfNeeded(evaluation.enteredSubMachine);
     }
 
-    hooks?.onEnter?.[currentState]?.(currentContext);
-    hooks?.onStateChange?.(currentState, currentContext, {
+    hooks?.onEnter?.[currentState]?.(readEffectiveContext());
+    hooks?.onStateChange?.(currentState, readEffectiveContext(), {
       stayed: false,
       isPending: isPending(),
       isDone: isDone(),
@@ -187,7 +253,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     id: fsm.id,
     state: () => currentState,
     subState: () => (activeSubMachine ? activeSubMachine.state() : null),
-    context: () => currentContext,
+    context: () => readEffectiveContext(),
     isPending,
     isDone,
     finalOutcome: () => doneOutcome,

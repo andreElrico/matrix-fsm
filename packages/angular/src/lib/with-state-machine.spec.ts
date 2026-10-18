@@ -1,5 +1,10 @@
 import { signal } from '@angular/core';
-import { signalStore } from '@ngrx/signals';
+import {
+  patchState,
+  signalStore,
+  withMethods,
+  withState,
+} from '@ngrx/signals';
 import { Data, Effect } from 'effect';
 import { describe, expect, it } from 'vitest';
 import {
@@ -8,9 +13,9 @@ import {
   each,
   finalState,
   stay,
-  transitions,
 } from '@matrix-fsm/core';
-import { withStateMachine } from '../index.js';
+import { withStateMachine, type Subscribable } from '../index.js';
+import { effectTaskAdapter } from '../effect/index.js';
 
 class NetworkTimeoutError extends Data.TaggedError('NetworkTimeoutError')<{
   readonly message: string;
@@ -35,81 +40,66 @@ interface AuthContext {
   error: string | null;
 }
 
+type AuthStates =
+  | 'loginView'
+  | 'authenticating'
+  | 'proUpsellPromo'
+  | 'offlineRetryView'
+  | 'loggedIn';
+
+type AuthEvents = {
+  SET_EMAIL: { email: string };
+  LOGIN: void;
+  DISMISS_PROMO: void;
+  CANCEL: void;
+  NetworkTimeoutError: { message: string };
+};
+
+interface AuthMethods {
+  _setEmail(payload: { email: string }): void;
+  _setInvalidEmail(): void;
+  _setError(err: Error): void;
+}
+
+const initialAuthState: AuthContext = {
+  credentials: { email: '', password: '' },
+  user: null,
+  policy: {
+    showUpsellAds: true,
+    canBypassApproval: false,
+    discountPercent: 0,
+    maxProjects: 3,
+  },
+  error: null,
+};
+
 const hasValidInput = (ctx: AuthContext) => ctx.credentials.email.includes('@');
 const shouldShowPromo = (ctx: AuthContext) =>
   ctx.user !== null && ctx.policy.showUpsellAds;
 
-const handleLoginSubmit = transitions<AuthContext>([
-  [
-    'loginView',
-    'LOGIN',
-    awaiting('authenticating'),
-    {
-      guard: hasValidInput,
-    },
-  ],
-  [
-    'loginView',
-    'LOGIN',
-    stay(),
-    {
-      patch: () => ({ error: 'Invalid email' }),
-    },
-  ],
-]);
-
-const authFSM = createFSM({
+const authFSM = createFSM<
+  AuthEvents,
+  AuthContext,
+  AuthStates,
+  AuthMethods
+>()({
   id: 'auth',
   initial: 'loginView',
-  events: {} as {
-    SET_EMAIL: { email: string };
-    LOGIN: void;
-    DISMISS_PROMO: void;
-    CANCEL: void;
-    NetworkTimeoutError: { message: string };
-  },
-  context: {
-    credentials: { email: '', password: '' },
-    user: null,
-    policy: {
-      showUpsellAds: true,
-      canBypassApproval: false,
-      discountPercent: 0,
-      maxProjects: 3,
-    },
-    error: null,
-  } satisfies AuthContext,
   transitions: [
-    [
-      'loginView',
-      'SET_EMAIL',
-      stay(),
-      {
-        patch: (ctx, payload: { email: string }) => ({
-          credentials: { ...ctx.credentials, email: payload.email },
-          error: null,
-        }),
-      },
-    ],
-    ...handleLoginSubmit,
-    ['authenticating', 'CANCEL', 'loginView'],
-    ['authenticating', 'DONE', 'proUpsellPromo', { guard: shouldShowPromo }],
-    ['authenticating', 'DONE', 'loggedIn'],
-    ['authenticating', 'NetworkTimeoutError', 'offlineRetryView'],
-    [
-      'authenticating',
-      'ERROR',
-      'loginView',
-      {
-        patch: (_ctx, err: Error) => ({ error: err.message }),
-      },
-    ],
-    ['proUpsellPromo', 'DISMISS_PROMO', 'loggedIn'],
+    ['loginView',         'SET_EMAIL',            stay(),                      { call: (m) => m._setEmail }],
+    ['loginView',         'LOGIN',                awaiting('authenticating'),  { guard: hasValidInput }],
+    ['loginView',         'LOGIN',                stay(),                      { call: (m) => m._setInvalidEmail }],
+    ['authenticating',    'CANCEL',               'loginView'],
+    ['authenticating',    'DONE',                 'proUpsellPromo',            { guard: shouldShowPromo }],
+    ['authenticating',    'DONE',                 'loggedIn'],
+    ['authenticating',    'NetworkTimeoutError',  'offlineRetryView'],
+    ['authenticating',    'ERROR',                'loginView',                 { call: (m) => m._setError }],
+    ['proUpsellPromo',    'DISMISS_PROMO',        'loggedIn'],
   ],
 });
 
 describe('@matrix-fsm/angular - withStateMachine', () => {
-  it('syncs external signals into fsmContext, patches context BEFORE DONE guards, and runs Effect-TS tasks', async () => {
+  it('aligns with SignalStore withState & withMethods (call), syncContext, and patches state BEFORE DONE guards', async () => {
     const policySignal = signal<UserEntitlements>({
       showUpsellAds: true,
       canBypassApproval: false,
@@ -118,16 +108,36 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     });
 
     const AuthStore = signalStore(
+      withState<AuthContext>(initialAuthState),
+      withMethods(
+        (store): AuthMethods => ({
+          _setEmail: ({ email }) =>
+            patchState(store, {
+              credentials: { ...store.credentials(), email },
+              error: null,
+            }),
+          _setInvalidEmail: () =>
+            patchState(store, {
+              error: 'Invalid email',
+            }),
+          _setError: (err) =>
+            patchState(store, {
+              error: err.message,
+            }),
+        }),
+      ),
       withStateMachine(authFSM, {
         syncContext: () => ({
           policy: policySignal,
         }),
         tasks: () => ({
-          authenticating: (ctx) =>
-            Effect.succeed({
+          authenticating: async (ctx) => ({
+            user: {
               id: 'u1',
               email: ctx.credentials.email,
-            }).pipe(Effect.map((user) => ({ user, error: null }))),
+            },
+            error: null,
+          }),
         }),
       }),
     );
@@ -136,22 +146,24 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     expect(store.fsmState()).toBe('loginView');
     expect(store.isPending()).toBe(false);
 
-    // 1. Invalid email -> stay() and patch error
+    // 1. Invalid email -> stay() and call _setInvalidEmail on store
     store.send('LOGIN');
     expect(store.fsmState()).toBe('loginView');
+    // Both native SignalStore withState signal (`store.error()`) and `store.fsmContext().error` update!
+    expect(store.error()).toBe('Invalid email');
     expect(store.fsmContext().error).toBe('Invalid email');
 
-    // 2. Set valid email and login with showUpsellAds: true
+    // 2. Set valid email via call: (m) => m._setEmail and login with showUpsellAds: true
     store.send('SET_EMAIL', { email: 'alice@matrix.dev' });
+    expect(store.credentials().email).toBe('alice@matrix.dev');
     store.send('LOGIN');
 
     await new Promise((r) => setTimeout(r, 15));
 
     // Notice shouldShowPromo checks `ctx.user !== null && ctx.policy.showUpsellAds`!
-    // Because task output `{ user }` is patched into ctx BEFORE 'DONE' guards evaluate,
-    // `shouldShowPromo` sees both `ctx.user` and synced `ctx.policy`!
+    // Task output `{ user }` is patched into SignalStore state BEFORE 'DONE' guards evaluate!
     expect(store.fsmState()).toBe('proUpsellPromo');
-    expect(store.fsmContext().user).toEqual({
+    expect(store.user()).toEqual({
       id: 'u1',
       email: 'alice@matrix.dev',
     });
@@ -161,6 +173,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
 
     // 3. Reactive syncContext: switch user role policy to Pro (showUpsellAds: false)
     store.reset();
+    expect(store.user()).toBeNull();
     policySignal.set({
       showUpsellAds: false,
       canBypassApproval: false,
@@ -177,11 +190,75 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     expect(store.fsmState()).toBe('loggedIn');
   });
 
-  it('routes Effect TaggedError via _tag to matching matrix row or falls back to ERROR', async () => {
+  it('supports RxJS Observable / Subscribable tasks natively and unsubscribes on state exit', async () => {
+    let unsubscribed = false;
+
+    const createSlowObservable = (): Subscribable<Partial<AuthContext>> => ({
+      subscribe(observer) {
+        const timer = setTimeout(() => {
+          observer?.next?.({
+            user: { id: 'rx-1', email: 'rxjs@matrix.dev' },
+            error: null,
+          });
+          observer?.complete?.();
+        }, 40);
+        return {
+          unsubscribe() {
+            clearTimeout(timer);
+            unsubscribed = true;
+          },
+        };
+      },
+    });
+
+    const RxStore = signalStore(
+      withState<AuthContext>({
+        ...initialAuthState,
+        credentials: { email: 'rxjs@matrix.dev', password: 'pw' },
+      }),
+      withMethods(
+        (store): AuthMethods => ({
+          _setEmail: ({ email }) =>
+            patchState(store, { credentials: { ...store.credentials(), email } }),
+          _setInvalidEmail: () => patchState(store, { error: 'Invalid email' }),
+          _setError: (err) => patchState(store, { error: err.message }),
+        }),
+      ),
+      withStateMachine(authFSM, {
+        tasks: () => ({
+          authenticating: () => createSlowObservable(),
+        }),
+      }),
+    );
+
+    const store = new RxStore();
+    store.send('LOGIN');
+    expect(store.fsmState()).toBe('authenticating');
+
+    // Cancel before observable completes -> triggers unsubscribe()!
+    store.send('CANCEL');
+    expect(store.fsmState()).toBe('loginView');
+    expect(unsubscribed).toBe(true);
+  });
+
+  it('routes Effect TaggedError via _tag to matching matrix row or falls back to ERROR via @matrix-fsm/angular/effect', async () => {
     let failMode: 'tagged' | 'generic' = 'tagged';
 
     const AuthStore = signalStore(
+      withState<AuthContext>(initialAuthState),
+      withMethods(
+        (store): AuthMethods => ({
+          _setEmail: ({ email }) =>
+            patchState(store, {
+              credentials: { ...store.credentials(), email },
+              error: null,
+            }),
+          _setInvalidEmail: () => patchState(store, { error: 'Invalid email' }),
+          _setError: (err) => patchState(store, { error: err.message }),
+        }),
+      ),
       withStateMachine(authFSM, {
+        taskAdapter: effectTaskAdapter,
         tasks: () => ({
           authenticating: () =>
             failMode === 'tagged'
@@ -208,7 +285,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
 
     await new Promise((r) => setTimeout(r, 15));
     expect(store.fsmState()).toBe('loginView');
-    expect(store.fsmContext().error).toBe('Invalid credentials');
+    expect(store.error()).toBe('Invalid credentials');
   });
 
   it('aborts AbortSignal and interrupts Effect Fiber when leaving awaiting state on CANCEL', async () => {
@@ -216,7 +293,20 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     let abortSignalTriggered = false;
 
     const AuthStore = signalStore(
+      withState<AuthContext>(initialAuthState),
+      withMethods(
+        (store): AuthMethods => ({
+          _setEmail: ({ email }) =>
+            patchState(store, {
+              credentials: { ...store.credentials(), email },
+              error: null,
+            }),
+          _setInvalidEmail: () => patchState(store, { error: 'Invalid email' }),
+          _setError: (err) => patchState(store, { error: err.message }),
+        }),
+      ),
       withStateMachine(authFSM, {
+        taskAdapter: effectTaskAdapter,
         tasks: () => ({
           authenticating: (_ctx, abortSignal) => {
             abortSignal.addEventListener('abort', () => {
@@ -252,14 +342,13 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
 
     await new Promise((r) => setTimeout(r, 25));
     expect(wasInterrupted).toBe(true);
-    expect(store.fsmContext().user).toBeNull();
+    expect(store.user()).toBeNull();
   });
 
   it('orchestrates parallel child machines via each() and dispatches ALL_DONE when all finish', () => {
-    const itemFSM = createFSM({
+    const itemFSM = createFSM<{ COMPLETE: void }, { done: boolean }>()({
       id: 'uploadItem',
       initial: 'uploading',
-      context: { done: false },
       transitions: [
         [
           'uploading',
@@ -270,17 +359,19 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       ],
     });
 
-    const batchFSM = createFSM({
+    const batchFSM = createFSM<{ START_BATCH: void }, { fileIds: string[] }>()({
       id: 'batchUpload',
       initial: 'idle',
-      context: { fileIds: ['file-1', 'file-2'] },
       transitions: [
-        ['idle', 'START_BATCH', each('fileIds', itemFSM)],
-        [each('fileIds', itemFSM), 'ALL_DONE', 'completed'],
+        ['idle',                   'START_BATCH',  each('fileIds', itemFSM)],
+        [each('fileIds', itemFSM), 'ALL_DONE',     'completed'],
       ],
     });
 
-    const BatchStore = signalStore(withStateMachine(batchFSM));
+    const BatchStore = signalStore(
+      withState({ fileIds: ['file-1', 'file-2'] }),
+      withStateMachine(batchFSM),
+    );
     const store = new BatchStore();
 
     expect(store.fsmState()).toBe('idle');
@@ -295,7 +386,6 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     // Complete second child -> automatically dispatches ALL_DONE -> 'completed'!
     store.sendToChild('fileIds', 'file-2', 'COMPLETE');
     expect(store.fsmState()).toBe('completed');
-    // Instances remain visible in childMachines for split-view UI inspection
     expect(store.childMachines()['fileIds']).toHaveLength(2);
     expect(store.childMachines()['fileIds'].every((c) => c.isDone)).toBe(true);
   });

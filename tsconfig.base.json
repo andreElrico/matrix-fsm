@@ -20,6 +20,7 @@
     "baseUrl": ".",
     "paths": {
       "@matrix-fsm/core": ["packages/core/src/index.ts"],
+      "@matrix-fsm/angular/effect": ["packages/angular/src/effect/index.ts"],
       "@matrix-fsm/angular": ["packages/angular/src/index.ts"],
       "@matrix-fsm/eslint-plugin": ["packages/eslint-plugin/src/index.ts"],
       "@matrix-fsm/router": ["packages/router/src/index.ts"]

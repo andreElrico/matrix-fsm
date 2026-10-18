@@ -20,7 +20,9 @@ export interface ParsedTransitionRow {
   } | null;
 }
 
-export function extractNodeKey(node: TSESTree.Node | null | undefined): string | null {
+export function extractNodeKey(
+  node: TSESTree.Node | null | undefined,
+): string | null {
   if (!node) {
     return null;
   }
@@ -53,7 +55,10 @@ export function extractNodeKey(node: TSESTree.Node | null | undefined): string |
 
 export function extractAwaitingCall(
   node: TSESTree.Node | null | undefined,
-): { readonly callNode: TSESTree.CallExpression; readonly stateName: string } | null {
+): {
+  readonly callNode: TSESTree.CallExpression;
+  readonly stateName: string;
+} | null {
   if (!node || node.type !== AST_NODE_TYPES.CallExpression) {
     return null;
   }
@@ -73,7 +78,9 @@ export function extractAwaitingCall(
   return null;
 }
 
-export function hasGuardOption(optionsNode: TSESTree.Node | null | undefined): boolean {
+export function hasGuardOption(
+  optionsNode: TSESTree.Node | null | undefined,
+): boolean {
   if (!optionsNode || optionsNode.type !== AST_NODE_TYPES.ObjectExpression) {
     return false;
   }
@@ -137,17 +144,32 @@ export function parseTransitionRow(
   };
 }
 
+function isMachineCreatorCallee(node: TSESTree.CallExpression): boolean {
+  if (
+    node.callee.type === AST_NODE_TYPES.Identifier &&
+    (node.callee.name === 'createFSM' || node.callee.name === 'subMachine')
+  ) {
+    return true;
+  }
+  if (
+    node.callee.type === AST_NODE_TYPES.CallExpression &&
+    node.callee.callee.type === AST_NODE_TYPES.Identifier &&
+    (node.callee.callee.name === 'createFSM' ||
+      node.callee.callee.name === 'subMachine')
+  ) {
+    return true;
+  }
+  return false;
+}
+
 /**
- * Checks if a CallExpression is `createFSM({ ... })` or `subMachine({ ... })`
- * and returns its `transitions` ArrayExpression if present.
+ * Checks if a CallExpression is `createFSM({ ... })`, `createFSM<...>()({ ... })`,
+ * or `subMachine({ ... })` and returns its `transitions` ArrayExpression if present.
  */
 export function getMachineTransitionsArray(
   node: TSESTree.CallExpression,
 ): TSESTree.ArrayExpression | null {
-  if (
-    node.callee.type !== AST_NODE_TYPES.Identifier ||
-    (node.callee.name !== 'createFSM' && node.callee.name !== 'subMachine')
-  ) {
+  if (!isMachineCreatorCallee(node)) {
     return null;
   }
   const configArg = node.arguments[0];

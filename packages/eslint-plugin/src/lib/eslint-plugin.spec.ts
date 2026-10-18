@@ -31,16 +31,15 @@ function verifyRule(
   };
 }
 
-describe('@matrix-fsm/eslint-plugin (7 AST Rules)', () => {
+describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
   describe('1. group-contiguous-transitions', () => {
-    it('allows contiguous [FROM, VIA] transition groups', () => {
+    it('allows contiguous [FROM, VIA] transition groups in curried createFSM', () => {
       const { messages } = verifyRule(
         'group-contiguous-transitions',
         `
-        createFSM({
+        createFSM<AuthEvents, AuthContext, AuthStates>()({
           id: 'auth',
           initial: 'loginView',
-          context: {},
           transitions: [
             ['loginView', 'LOGIN', 'authenticating', { guard: isValid }],
             ['loginView', 'LOGIN', stay()],
@@ -52,13 +51,12 @@ describe('@matrix-fsm/eslint-plugin (7 AST Rules)', () => {
       expect(messages).toHaveLength(0);
     });
 
-    it('reports and auto-fixes non-contiguous [FROM, VIA] transition rows', () => {
+    it('reports and auto-fixes non-contiguous [FROM, VIA] transition rows in curried createFSM', () => {
       const { messages, fixed } = verifyRule(
         'group-contiguous-transitions',
-        `createFSM({
+        `createFSM<AuthEvents, AuthContext, AuthStates>()({
   id: 'auth',
   initial: 'loginView',
-  context: {},
   transitions: [
     ['loginView', 'LOGIN', 'authenticating', { guard: isValid }],
     ['authenticating', 'CANCEL', 'loginView'],
@@ -78,10 +76,9 @@ describe('@matrix-fsm/eslint-plugin (7 AST Rules)', () => {
       const { messages } = verifyRule(
         'group-contiguous-transitions',
         `
-        createFSM({
+        createFSM()({
           id: 'auth',
           initial: 'a',
-          context: {},
           transitions: [
             [['a', 'b'], 'CANCEL', 'idle'],
           ],
@@ -98,13 +95,12 @@ describe('@matrix-fsm/eslint-plugin (7 AST Rules)', () => {
       const { messages } = verifyRule(
         'require-fallback-transition',
         `
-        createFSM({
+        createFSM()({
           id: 'auth',
           initial: 'loginView',
-          context: {},
           transitions: [
             ['loginView', 'LOGIN', awaiting('authenticating'), { guard: hasValidInput }],
-            ['loginView', 'LOGIN', stay(), { patch: setError }],
+            ['loginView', 'LOGIN', stay(), { call: (m) => m._setError }],
           ],
         });
         `,
@@ -116,10 +112,9 @@ describe('@matrix-fsm/eslint-plugin (7 AST Rules)', () => {
       const { messages } = verifyRule(
         'require-fallback-transition',
         `
-        createFSM({
+        createFSM()({
           id: 'auth',
           initial: 'loginView',
-          context: {},
           transitions: [
             ['loginView', 'LOGIN', awaiting('authenticating'), { guard: hasValidInput }],
           ],
@@ -168,10 +163,9 @@ describe('@matrix-fsm/eslint-plugin (7 AST Rules)', () => {
         const handleLoginSubmit = transitions([
           ['loginView', 'LOGIN', awaiting('authenticating')],
         ]);
-        createFSM({
+        createFSM()({
           id: 'auth',
           initial: 'loginView',
-          context: {},
           transitions: [
             ...handleLoginSubmit,
             ['authenticating', 'DONE', 'loggedIn'],
@@ -187,10 +181,9 @@ describe('@matrix-fsm/eslint-plugin (7 AST Rules)', () => {
       const { messages } = verifyRule(
         'require-awaiting-handlers',
         `
-        createFSM({
+        createFSM()({
           id: 'auth',
           initial: 'loginView',
-          context: {},
           transitions: [
             ['loginView', 'LOGIN', awaiting('authenticating')],
             ['authenticating', 'DONE', 'loggedIn'],
@@ -234,10 +227,9 @@ describe('@matrix-fsm/eslint-plugin (7 AST Rules)', () => {
           ['loginView', 'LOGIN', awaiting('authenticating'), { guard: isValid }],
           ['loginView', 'LOGIN', stay()],
         ]);
-        createFSM({
+        createFSM()({
           id: 'auth',
           initial: 'loginView',
-          context: {},
           transitions: [
             ...handleLogin,
             ['authenticating', 'DONE', 'loggedIn'],
@@ -273,10 +265,9 @@ describe('@matrix-fsm/eslint-plugin (7 AST Rules)', () => {
           ['loginView', 'LOGIN', awaiting('authenticating'), { guard: isValid }],
           ['loginView', 'LOGIN', 'rateLimited',             { guard: isRateLimited }],
         ]);
-        createFSM({
+        createFSM()({
           id: 'auth',
           initial: 'loginView',
-          context: {},
           transitions: [
             ...handleLogin,
             ['loginView', 'LOGIN', stay()],
@@ -290,17 +281,42 @@ describe('@matrix-fsm/eslint-plugin (7 AST Rules)', () => {
   });
 
   describe('7. pure-machine-definition', () => {
-    it('passes for pure *.machine.ts files without Angular DI or service/store imports', () => {
+    it('passes for pure *.machine.ts files with valid `{ call: (m) => m._selectDrink }` selectors', () => {
       const { messages } = verifyRule(
         'pure-machine-definition',
         `
         import { createFSM, awaiting, stay } from '@matrix-fsm/core';
         import type { AuthStore } from './auth.store';
-        export const authFSM = createFSM({ id: 'auth', initial: 'idle', context: {}, transitions: [] });
+        export const authFSM = createFSM()({
+          id: 'auth',
+          initial: 'idle',
+          transitions: [
+            ['idle', 'SELECT', stay(), { call: (m) => m._selectDrink }],
+          ],
+        });
         `,
         'auth.machine.ts',
       );
       expect(messages).toHaveLength(0);
+    });
+
+    it('forbids calling multiple methods or invoking a method directly inside `{ call: ... }`', () => {
+      const { messages } = verifyRule(
+        'pure-machine-definition',
+        `
+        import { createFSM, stay } from '@matrix-fsm/core';
+        export const authFSM = createFSM()({
+          id: 'auth',
+          initial: 'idle',
+          transitions: [
+            ['idle', 'SELECT', stay(), { call: (m) => { m._a(); m._b(); } }],
+          ],
+        });
+        `,
+        'auth.machine.ts',
+      );
+      expect(messages).toHaveLength(1);
+      expect(messages[0].messageId).toBe('invalidTransitionCallSelector');
     });
 
     it('forbids importing @angular/core, services, stores, or calling inject() in *.machine.ts', () => {
@@ -329,14 +345,12 @@ describe('@matrix-fsm/eslint-plugin (7 AST Rules)', () => {
       const { messages } = verifyRule(
         'align-matrix-columns',
         `
-        createFSM({
+        createFSM()({
           id: 'auth',
           initial: 'loginView',
-          context: {},
           transitions: [
             ['loginView',       'LOGIN',   awaiting('authenticating'), { guard: hasValidInput }],
-            ['loginView',       'LOGIN',   stay(),
-              { patch: () => ({ error: 'Invalid email' }) }],
+            ['loginView',       'LOGIN',   stay(),                     { call: (m) => m._setInvalidEmail }],
             ['authenticating',  'CANCEL',  'loginView'],
           ],
         });
@@ -348,10 +362,9 @@ describe('@matrix-fsm/eslint-plugin (7 AST Rules)', () => {
     it('reports and auto-fixes unaligned or broken [FROM, VIA, TO] triplets into aligned columns', () => {
       const { messages, fixed } = verifyRule(
         'align-matrix-columns',
-        `createFSM({
+        `createFSM()({
   id: 'auth',
   initial: 'loginView',
-  context: {},
   transitions: [
     ['loginView', 'LOGIN', awaiting('authenticating'), { guard: hasValidInput }],
     [

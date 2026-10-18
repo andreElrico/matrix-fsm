@@ -1,9 +1,9 @@
 /**
- * Layer 1 (Core/Services): Coffee Loyalty API & Barista Service with Effect-TS
+ * Layer 1 (Core/Services): Coffee Loyalty API & Barista Service
+ * Pure Promise + AbortSignal implementation (0% Effect-TS dependency)
  */
 
 import { Injectable } from '@angular/core';
-import { Data, Effect } from 'effect';
 import {
   type BrewResult,
   type CoffeeDrink,
@@ -11,13 +11,21 @@ import {
   isTenthDrinkEligible,
 } from './coffee-shop.domain';
 
-export class LoyaltyApiTimeoutError extends Data.TaggedError('LoyaltyApiTimeoutError')<{
-  readonly message: string;
-}> {}
+export class LoyaltyApiTimeoutError extends Error {
+  readonly _tag = 'LoyaltyApiTimeoutError' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'LoyaltyApiTimeoutError';
+  }
+}
 
-export class BaristaMachineGlitchError extends Data.TaggedError('BaristaMachineGlitchError')<{
-  readonly message: string;
-}> {}
+export class BaristaMachineGlitchError extends Error {
+  readonly _tag = 'BaristaMachineGlitchError' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'BaristaMachineGlitchError';
+  }
+}
 
 export type LoyaltySimulationMode =
   | 'normal'
@@ -29,6 +37,24 @@ export interface LoyaltyCheckResponse {
   readonly card: CustomerCard;
   readonly isFreeDrink: boolean;
   readonly message: string;
+}
+
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 @Injectable({ providedIn: 'root' })
@@ -46,62 +72,59 @@ export class CoffeeShopApiService {
   }
 
   /**
-   * Cashier API call to check customer loyalty card status
+   * Cashier API call to check customer loyalty card status via standard Promise + AbortSignal
    */
-  checkLoyaltyEffect(
+  async checkLoyalty(
     cardId: string,
     customerName: string,
     currentStamps: number,
-  ): Effect.Effect<LoyaltyCheckResponse, LoyaltyApiTimeoutError | Error> {
-    return Effect.suspend(() => {
-      this.loyaltyCallCount++;
+    signal?: AbortSignal,
+  ): Promise<LoyaltyCheckResponse> {
+    this.loyaltyCallCount++;
 
-      if (this.mode === 'timeout') {
-        return Effect.fail(
-          new LoyaltyApiTimeoutError({
-            message: 'Loyalty API gateway timed out (504 Gateway Timeout)',
-          }),
-        );
-      }
+    if (this.mode === 'timeout') {
+      throw new LoyaltyApiTimeoutError(
+        'Loyalty API gateway timed out (504 Gateway Timeout)',
+      );
+    }
 
-      // If mode is tenth_free, override current stamps to 9 so it's the 10th drink:
-      const stamps = this.mode === 'tenth_free' ? 9 : currentStamps;
-      const isFree = isTenthDrinkEligible(stamps);
+    // If mode is tenth_free, override current stamps to 9 so it's the 10th drink:
+    const stamps = this.mode === 'tenth_free' ? 9 : currentStamps;
+    const isFree = isTenthDrinkEligible(stamps);
 
-      const response: LoyaltyCheckResponse = {
-        card: {
-          cardId,
-          customerName,
-          currentStamps: stamps,
-        },
-        isFreeDrink: isFree,
-        message: isFree
-          ? '🎉 Congratulations! This is your 10th drink — IT IS ON THE HOUSE!'
-          : `Loyalty card confirmed: ${stamps}/10 stamps collected.`,
-      };
+    const response: LoyaltyCheckResponse = {
+      card: {
+        cardId,
+        customerName,
+        currentStamps: stamps,
+      },
+      isFreeDrink: isFree,
+      message: isFree
+        ? '🎉 Congratulations! This is your 10th drink — IT IS ON THE HOUSE!'
+        : `Loyalty card confirmed: ${stamps}/10 stamps collected.`,
+    };
 
-      // Add a small 150ms latency to demonstrate the awaiting state in UI
-      return Effect.sleep('150 millis').pipe(Effect.map(() => response));
-    });
+    // Add a small 150ms latency to demonstrate the awaiting state in UI
+    await abortableDelay(150, signal);
+    return response;
   }
 
   /**
-   * Barista brewing task simulation with Fiber cancellation support
+   * Barista brewing task simulation with AbortSignal cancellation support
    */
-  brewCoffeeEffect(
+  async brewCoffee(
     drink: CoffeeDrink,
-  ): Effect.Effect<BrewResult, BaristaMachineGlitchError | Error> {
-    return Effect.suspend(() => {
-      this.brewCallCount++;
+    signal?: AbortSignal,
+  ): Promise<BrewResult> {
+    this.brewCallCount++;
 
-      const brewDuration = this.mode === 'slow_brewing' ? '1200 millis' : '450 millis';
+    const brewDuration = this.mode === 'slow_brewing' ? 1200 : 450;
 
-      const result: BrewResult = {
-        baristaNote: `Freshly steamed ${drink.name} crafted with artisanal latte art!`,
-        temperatureCelsius: 67,
-      };
+    await abortableDelay(brewDuration, signal);
 
-      return Effect.sleep(brewDuration).pipe(Effect.map(() => result));
-    });
+    return {
+      baristaNote: `Freshly steamed ${drink.name} crafted with artisanal latte art!`,
+      temperatureCelsius: 67,
+    };
   }
 }

@@ -1,49 +1,97 @@
 /**
- * Layer 3 (Feature): Coffee Shop SignalStore + DI + Effect-TS Integration
+ * Layer 3 (Feature): Coffee Shop SignalStore (`withState` + `withMethods` + `withStateMachine`)
+ * Zero Effect-TS dependency — uses native Promises, AbortSignal, and SignalStore `patchState`.
  */
 
 import { inject, Injectable } from '@angular/core';
-import { signalStore } from '@ngrx/signals';
-import { Effect } from 'effect';
+import {
+  patchState,
+  signalStore,
+  withMethods,
+  withState,
+} from '@ngrx/signals';
 import { withStateMachine } from '@matrix-fsm/angular';
 import { CoffeeShopApiService } from './coffee-shop-api.service';
+import {
+  calculateNextStamps,
+  COFFEE_MENU,
+  type CoffeeShopContext,
+  type CoffeeShopMethods,
+  initialCoffeeShopContext,
+} from './coffee-shop.domain';
 import { coffeeShopFSM } from './coffee-shop.machine';
 
 @Injectable()
 export class CoffeeShopStore extends signalStore(
+  withState<CoffeeShopContext>(initialCoffeeShopContext),
+  withMethods(
+    (store): CoffeeShopMethods => ({
+      _selectDrink: ({ drink }) =>
+        patchState(store, {
+          selectedDrink: drink,
+          finalPrice: drink.price,
+          error: null,
+        }),
+      _setStamps: ({ stamps }) =>
+        patchState(store, {
+          customerCard: {
+            ...store.customerCard(),
+            currentStamps: stamps,
+          },
+        }),
+      _setMissingDrinkError: () =>
+        patchState(store, {
+          error: 'Please select a coffee first!',
+        }),
+      _setBrewError: (err) =>
+        patchState(store, {
+          error: err.message,
+        }),
+      _markPaid: () =>
+        patchState(store, {
+          isPaid: true,
+        }),
+      _finishCoffee: () =>
+        patchState(store, {
+          customerCard: {
+            ...store.customerCard(),
+            currentStamps: calculateNextStamps(
+              store.customerCard().currentStamps,
+              store.isFreeDrink(),
+            ),
+          },
+          selectedDrink: null,
+          isPaid: false,
+          isFreeDrink: false,
+          baristaResult: null,
+          error: null,
+        }),
+    }),
+  ),
   withStateMachine(coffeeShopFSM, {
     tasks: (api = inject(CoffeeShopApiService)) => ({
-      checkingLoyalty: (ctx) =>
-        api
-          .checkLoyaltyEffect(
-            ctx.customerCard.cardId,
-            ctx.customerCard.customerName,
-            ctx.customerCard.currentStamps,
-          )
-          .pipe(
-            Effect.map((res) => ({
-              isFreeDrink: res.isFreeDrink,
-              customerCard: res.card,
-              finalPrice: res.isFreeDrink ? 0 : (ctx.selectedDrink?.price ?? 0),
-              error: null,
-            })),
-          ),
-
-      brewingCoffee: (ctx) => {
-        const drink = ctx.selectedDrink ?? {
-          id: 'espresso',
-          name: 'House Blend Espresso',
-          price: 3.5,
-          emoji: '☕',
-          description: 'Default roast',
-        };
-
-        return api.brewCoffeeEffect(drink).pipe(
-          Effect.map((baristaResult) => ({
-            baristaResult,
-            error: null,
-          })),
+      checkingLoyalty: async (ctx, signal) => {
+        const res = await api.checkLoyalty(
+          ctx.customerCard.cardId,
+          ctx.customerCard.customerName,
+          ctx.customerCard.currentStamps,
+          signal,
         );
+        return {
+          isFreeDrink: res.isFreeDrink,
+          customerCard: res.card,
+          finalPrice: res.isFreeDrink ? 0 : (ctx.selectedDrink?.price ?? 0),
+          error: null,
+        };
+      },
+
+      brewingCoffee: async (ctx, signal) => {
+        const drink = ctx.selectedDrink ?? COFFEE_MENU[0];
+        const baristaResult = await api.brewCoffee(drink, signal);
+        return {
+          baristaResult,
+          error: null,
+        };
       },
     }),
   }),

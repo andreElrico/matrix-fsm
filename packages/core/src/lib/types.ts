@@ -55,14 +55,41 @@ export type PatchResult<TContext> = [0] extends [1 & TContext]
       readonly [K in keyof TContext]?: unknown;
     };
 
-export interface TransitionOptions<TContext = any, TPayload = any> {
+export type TransitionMethod<TPayload = any, TContext = any> = (
+  payload: TPayload,
+  ctx: ReadonlyContext<TContext>,
+) => void;
+
+export type TransitionCallSelector<
+  TMethods = Record<string, any>,
+  TPayload = any,
+  TContext = any,
+> =
+  | ((
+      methods: TMethods,
+    ) => (payload: TPayload, ctx: ReadonlyContext<TContext>) => void)
+  | Extract<keyof TMethods, string>;
+
+export interface TransitionOptions<
+  TContext = any,
+  TPayload = any,
+  TMethods = any,
+> {
   readonly guard?: (
     ctx: ReadonlyContext<TContext>,
-    eventPayload?: TPayload,
+    eventPayload: TPayload,
   ) => boolean;
+  /**
+   * Store method selector invoked synchronously when this transition fires.
+   * Example: `{ call: (m) => m._selectDrink }`
+   */
+  readonly call?: TransitionCallSelector<TMethods, TPayload, TContext>;
+  /**
+   * Pure context reducer function returning a partial context patch.
+   */
   readonly patch?: (
     ctx: ReadonlyContext<TContext>,
-    eventPayload?: TPayload,
+    eventPayload: TPayload,
   ) => PatchResult<TContext>;
 }
 
@@ -71,6 +98,7 @@ export type TransitionFrom<
   TContext = any,
 > =
   | TState
+  | AnyFSMDefinition
   | SubMachineRef<any, any>
   | EachNode<any, any>
   | ExtractedMarker<TContext>;
@@ -91,9 +119,10 @@ export type TransitionTo<
   TContext = any,
 > =
   | TState
-  | AwaitingNode<string>
+  | AwaitingNode<TState>
   | StayNode
   | FinalNode<string>
+  | AnyFSMDefinition
   | SubMachineRef<any, any>
   | EachNode<any, any>
   | ExtractedMarker<TContext>;
@@ -102,36 +131,42 @@ export type TransitionRow<
   TContext = any,
   TEvent extends string = string,
   TState extends string = string,
+  TMethods = any,
 > = readonly [
   from: TransitionFrom<TState, TContext>,
   via: TransitionVia<TEvent, TContext>,
   to: TransitionTo<TState, TContext>,
-  options?: TransitionOptions<TContext, any>,
+  options?: TransitionOptions<TContext, any, TMethods>,
 ];
 
-export type ExtractedTransitionRow<TContext = any> = readonly [
+export type ExtractedTransitionRow<
+  TContext = any,
+  TMethods = any,
+> = readonly [
   from: ExtractedMarker<TContext>,
   via: ExtractedMarker<TContext>,
   to: ExtractedMarker<TContext>,
-  options?: TransitionOptions<TContext, any>,
+  options?: TransitionOptions<TContext, any, TMethods>,
 ];
 
-export type AnyTransitionRow<TContext = any> = TransitionRow<
-  TContext,
-  any,
-  any
->;
+export type AnyTransitionRow<
+  TContext = any,
+  TMethods = any,
+> = TransitionRow<TContext, any, any, TMethods>;
 
 export interface FSMConfig<
   TId extends string,
-  TInitial extends string,
-  TContext extends object,
-  TEvents extends Record<string, any>,
-  TTransitions extends readonly AnyTransitionRow<TContext>[],
+  TInitial extends TStates,
+  TContext extends object = Record<string, any>,
+  TEvents extends Record<string, any> = Record<string, any>,
+  TTransitions extends readonly AnyTransitionRow<TContext, any>[] =
+    readonly AnyTransitionRow<TContext, any>[],
+  TStates extends string = string,
+  TMethods = Record<string, any>,
 > {
   readonly id: TId;
   readonly initial: TInitial;
-  readonly context: TContext;
+  readonly context?: TContext;
   readonly events?: TEvents;
   readonly transitions: TTransitions;
 }
@@ -139,6 +174,7 @@ export interface FSMConfig<
 export interface TransitionEvaluation<
   TState extends string = string,
   TContext extends object = Record<string, unknown>,
+  TMethods = any,
 > {
   readonly matched: boolean;
   readonly from: string;
@@ -146,6 +182,7 @@ export interface TransitionEvaluation<
   readonly nextState: TState;
   readonly nextContext: TContext;
   readonly patchApplied: Partial<TContext> | null;
+  readonly callSelector: TransitionCallSelector<TMethods, any, TContext> | null;
   readonly stayed: boolean;
   readonly isAwaiting: boolean;
   readonly finalOutcome: string | null;
@@ -159,13 +196,16 @@ export interface FSMDefinition<
   TInitial extends string = string,
   TContext extends object = any,
   TEvents extends Record<string, any> = Record<string, any>,
-  TTransitions extends readonly AnyTransitionRow<any>[] = readonly AnyTransitionRow<any>[],
+  TTransitions extends readonly AnyTransitionRow<any, any>[] =
+    readonly AnyTransitionRow<any, any>[],
+  TMethods = any,
 > {
   readonly id: TId;
   readonly initial: TInitial;
   readonly context: TContext;
   readonly events: TEvents;
   readonly transitions: TTransitions;
+  readonly __methodsBrand?: TMethods;
   readonly states: ReadonlySet<string>;
   readonly awaitingStates: ReadonlySet<string>;
   readonly subMachines: ReadonlyMap<string, SubMachineRef<any, any>>;
@@ -177,12 +217,13 @@ export interface FSMDefinition<
     currentContext: Readonly<TContext>,
   ): TransitionEvaluation<
     ExtractStatesFromConfig<TInitial, TTransitions>,
-    TContext
+    TContext,
+    TMethods
   >;
   hasTransitionFor(state: string, event: string): boolean;
 }
 
-export type AnyFSMDefinition = FSMDefinition<any, any, any, any, any>;
+export type AnyFSMDefinition = FSMDefinition<any, any, any, any, any, any>;
 
 // ============================================================================
 // Type-Level Extractors
@@ -190,18 +231,40 @@ export type AnyFSMDefinition = FSMDefinition<any, any, any, any, any>;
 
 type UnwrapReadonly<T> = T extends Readonly<infer U> ? U : T;
 
+type IsConcreteFSM<T> =
+  [0] extends [1 & T]
+    ? false
+    : T extends FSMDefinition<infer TId, any, any, any, any, any>
+      ? [0] extends [1 & TId]
+        ? false
+        : string extends TId
+          ? false
+          : true
+      : false;
+
 type ExtractContextFromRow<Row> =
   Row extends readonly [ExtractedMarker<infer C>, ...any[]]
     ? C extends object
       ? C
       : never
-    : Row extends readonly [any, any, SubMachineRef<FSMDefinition<any, any, infer C, any, any>, any>, ...any[]]
+    : Row extends readonly [
+          any,
+          any,
+          | SubMachineRef<FSMDefinition<any, any, infer C, any, any, any>, any>
+          | FSMDefinition<any, any, infer C, any, any, any>,
+          ...any[],
+        ]
       ? [0] extends [1 & C]
         ? never
         : C extends object
           ? C
           : never
-      : Row extends readonly [any, any, any, { readonly guard: (ctx: infer C, ...args: any[]) => boolean }]
+      : Row extends readonly [
+            any,
+            any,
+            any,
+            { readonly guard: (ctx: infer C, ...args: any[]) => boolean },
+          ]
         ? [0] extends [1 & C]
           ? never
           : UnwrapReadonly<C> extends object
@@ -217,9 +280,15 @@ type ExtractContextFromTransitions<TTransitions extends readonly any[]> =
 export type ResolveContext<
   TContext extends object,
   TTransitions extends readonly any[],
-> = [ExtractContextFromTransitions<TTransitions>] extends [never]
-  ? TContext
-  : ExtractContextFromTransitions<TTransitions>;
+> = [0] extends [1 & TContext]
+  ? [ExtractContextFromTransitions<TTransitions>] extends [never]
+    ? Record<string, any>
+    : ExtractContextFromTransitions<TTransitions>
+  : keyof TContext extends never
+    ? [ExtractContextFromTransitions<TTransitions>] extends [never]
+      ? TContext
+      : ExtractContextFromTransitions<TTransitions>
+    : TContext;
 
 type ExtractFromTarget<T> = T extends ExtractedMarker<any>
   ? never
@@ -229,27 +298,35 @@ type ExtractFromTarget<T> = T extends ExtractedMarker<any>
       ? O
       : T extends SubMachineRef<any, infer Id>
         ? Id
-        : T extends EachNode<infer K, any>
-          ? `each:${K}`
-          : T extends StayNode
-            ? never
-            : T extends string
-              ? T
-              : never;
+        : IsConcreteFSM<T> extends true
+          ? T extends FSMDefinition<infer Id, any, any, any, any, any>
+            ? Id
+            : never
+          : T extends EachNode<infer K, any>
+            ? `each:${K}`
+            : T extends StayNode
+              ? never
+              : T extends string
+                ? T
+                : never;
 
 type ExtractFromSource<T> = T extends ExtractedMarker<any>
   ? never
   : T extends SubMachineRef<any, infer Id>
     ? Id
-    : T extends EachNode<infer K, any>
-      ? `each:${K}`
-      : T extends string
-        ? T
-        : never;
+    : IsConcreteFSM<T> extends true
+      ? T extends FSMDefinition<infer Id, any, any, any, any, any>
+        ? Id
+        : never
+      : T extends EachNode<infer K, any>
+        ? `each:${K}`
+        : T extends string
+          ? T
+          : never;
 
 export type ExtractStatesFromConfig<
   TInitial extends string,
-  TTransitions extends readonly AnyTransitionRow<any>[],
+  TTransitions extends readonly AnyTransitionRow<any, any>[],
 > =
   | TInitial
   | ExtractFromSource<TTransitions[number][0]>
@@ -261,33 +338,83 @@ export type ExtractStates<TFSM> =
     infer TInitial,
     any,
     any,
-    infer TTransitions
+    infer TTransitions,
+    any
   >
     ? ExtractStatesFromConfig<TInitial, TTransitions>
     : never;
 
 export type ExtractContext<TFSM> =
-  TFSM extends FSMDefinition<any, any, infer TContext, any, any>
+  TFSM extends FSMDefinition<any, any, infer TContext, any, any, any>
     ? TContext
     : never;
 
+export type ExtractMethods<TFSM> =
+  TFSM extends FSMDefinition<any, any, any, any, any, infer TMethods>
+    ? TMethods
+    : Record<string, any>;
+
 export type ExtractEventsMap<TFSM> =
-  TFSM extends FSMDefinition<any, any, any, infer TEvents, any>
+  TFSM extends FSMDefinition<any, any, any, infer TEvents, any, any>
     ? TEvents
     : Record<string, any>;
 
-type ExtractSubMachinesFromTransitions<
-  TTransitions extends readonly AnyTransitionRow<any>[],
+export type ExtractFinalOutcomesFromTransitions<
+  TTransitions extends readonly AnyTransitionRow<any, any>[],
 > = TTransitions[number] extends infer Row
-  ? Row extends readonly [infer From, any, infer To, ...any[]]
-    ?
-        | (From extends SubMachineRef<infer Sub1, any> ? Sub1 : never)
-        | (To extends SubMachineRef<infer Sub2, any> ? Sub2 : never)
+  ? Row extends readonly [any, any, FinalNode<infer O>, ...any[]]
+    ? O
     : never
   : never;
 
-export type ExtractEvents<TFSM> =
-  TFSM extends FSMDefinition<any, any, any, infer TEvents, infer TTransitions>
+/**
+ * Extracts all `finalState('OUTCOME_NAME')` string literals from an FSM definition.
+ */
+export type ExtractFinalOutcomes<TFSM> =
+  TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any>
+    ? ExtractFinalOutcomesFromTransitions<TTransitions>
+    : TFSM extends SubMachineRef<infer Inner, any>
+      ? ExtractFinalOutcomes<Inner>
+      : never;
+
+export type OutcomesOf<TFSM> = ExtractFinalOutcomes<TFSM>;
+
+type ExtractSubMachineFromNode<Node> =
+  [0] extends [1 & Node]
+    ? never
+    : Node extends SubMachineRef<infer Sub, any>
+      ? IsConcreteFSM<Sub> extends true
+        ? Sub
+        : never
+      : IsConcreteFSM<Node> extends true
+        ? Node
+        : Node extends EachNode<any, infer EachSub>
+          ? IsConcreteFSM<EachSub> extends true
+            ? EachSub
+            : never
+          : never;
+
+type ExtractSubMachinesFromTransitions<
+  TTransitions extends readonly AnyTransitionRow<any, any>[],
+> = [0] extends [1 & TTransitions]
+  ? never
+  : TTransitions[number] extends infer Row
+    ? [0] extends [1 & Row]
+      ? never
+      : Row extends readonly [infer From, any, infer To, ...any[]]
+        ? ExtractSubMachineFromNode<From> | ExtractSubMachineFromNode<To>
+        : never
+    : never;
+
+type ExtractShallowEvents<TFSM> =
+  TFSM extends FSMDefinition<
+    any,
+    any,
+    any,
+    infer TEvents,
+    infer TTransitions,
+    any
+  >
     ?
         | Extract<keyof TEvents, string>
         | Exclude<
@@ -300,19 +427,39 @@ export type ExtractEvents<TFSM> =
               : never,
             BuiltInLifecycleEvent
           >
-        | ExtractEvents<ExtractSubMachinesFromTransitions<TTransitions>>
+    : never;
+
+export type ExtractEvents<TFSM> =
+  TFSM extends FSMDefinition<
+    any,
+    any,
+    any,
+    any,
+    infer TTransitions,
+    any
+  >
+    ?
+        | ExtractShallowEvents<TFSM>
+        | ExtractShallowEvents<ExtractSubMachinesFromTransitions<TTransitions>>
     : never;
 
 export type ExtractEventPayload<
   TFSM,
   TEvent extends string,
-> = TFSM extends FSMDefinition<any, any, any, infer TEvents, infer TTransitions>
+> = TFSM extends FSMDefinition<
+  any,
+  any,
+  any,
+  infer TEvents,
+  infer TTransitions,
+  any
+>
   ? TEvent extends keyof TEvents
     ? TEvents[TEvent]
     : ExtractSubMachinesFromTransitions<TTransitions> extends infer Sub
       ? [Sub] extends [never]
         ? unknown
-        : Sub extends FSMDefinition<any, any, any, infer TSubEvents, any>
+        : Sub extends FSMDefinition<any, any, any, infer TSubEvents, any, any>
           ? TEvent extends keyof TSubEvents
             ? TSubEvents[TEvent]
             : unknown
@@ -321,42 +468,64 @@ export type ExtractEventPayload<
   : unknown;
 
 /**
- * Extracts all `awaiting('stateName')` states from an FSM definition (including nested `subMachine`s).
+ * Extracts all `awaiting('stateName')` states from an FSM definition (including nested child machines).
  * Detects both direct `AwaitingNode<S>` in Column 3 AND states in Column 1 that
  * transition via `'DONE'` or `'ERROR'` (so extracted `transitions<TContext>([...])` groups
  * still preserve compile-time task enforcement).
  */
-type ExtractDirectAwaiting<TTransitions extends readonly AnyTransitionRow<any>[]> =
-  TTransitions[number] extends infer Row
+type ExtractDirectAwaiting<
+  TTransitions extends readonly AnyTransitionRow<any, any>[],
+> = [0] extends [1 & TTransitions]
+  ? never
+  : TTransitions[number] extends infer Row
     ? Row extends readonly [any, any, AwaitingNode<infer S>, ...any[]]
-      ? S
+      ? string extends S
+        ? never
+        : S
       : never
     : never;
 
-type ExtractDoneSourceStates<TTransitions extends readonly AnyTransitionRow<any>[]> =
-  TTransitions[number] extends infer Row
+type ExtractDoneSourceStates<
+  TTransitions extends readonly AnyTransitionRow<any, any>[],
+> = [0] extends [1 & TTransitions]
+  ? never
+  : TTransitions[number] extends infer Row
     ? Row extends readonly [infer From, 'DONE' | 'ERROR', ...any[]]
       ? From extends ExtractedMarker<any>
         ? never
         : From extends SubMachineRef<any, any>
           ? never
-          : From extends EachNode<any, any>
+          : From extends FSMDefinition<any, any, any, any, any, any>
             ? never
-            : From extends string
-              ? From
-              : never
+            : From extends EachNode<any, any>
+              ? never
+              : From extends string
+                ? string extends From
+                  ? never
+                  : From
+                : never
       : never
     : never;
 
-export type ExtractAwaitingNodesFromTransitions<
-  TTransitions extends readonly AnyTransitionRow<any>[],
+type ExtractShallowAwaitingFromTransitions<
+  TTransitions extends readonly AnyTransitionRow<any, any>[],
 > =
   | ExtractDirectAwaiting<TTransitions>
-  | ExtractDoneSourceStates<TTransitions>
-  | ExtractAwaitingNodes<ExtractSubMachinesFromTransitions<TTransitions>>;
+  | ExtractDoneSourceStates<TTransitions>;
+
+type ExtractShallowAwaiting<TFSM> =
+  TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any>
+    ? ExtractShallowAwaitingFromTransitions<TTransitions>
+    : never;
+
+export type ExtractAwaitingNodesFromTransitions<
+  TTransitions extends readonly AnyTransitionRow<any, any>[],
+> =
+  | ExtractShallowAwaitingFromTransitions<TTransitions>
+  | ExtractShallowAwaiting<ExtractSubMachinesFromTransitions<TTransitions>>;
 
 export type ExtractAwaitingNodes<TFSM> =
-  TFSM extends FSMDefinition<any, any, any, any, infer TTransitions>
+  TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any>
     ? ExtractAwaitingNodesFromTransitions<TTransitions>
     : never;
 

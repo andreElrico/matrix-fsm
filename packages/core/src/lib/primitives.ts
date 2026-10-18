@@ -36,7 +36,7 @@ const STAY_INSTANCE: StayNode = Object.freeze({
 
 /**
  * Used in Column 3 (`TO`) for gatekeeper fallbacks.
- * Executes `patch`, keeps the machine in the current state, and does NOT trigger
+ * Executes `call` or `patch`, keeps the machine in the current state, and does NOT trigger
  * `onExit` / `onEnter` or interrupt running tasks.
  */
 export function stay(): StayNode {
@@ -44,7 +44,7 @@ export function stay(): StayNode {
 }
 
 /**
- * Terminal state marker for `subMachine` or workflow outcomes.
+ * Terminal state marker for sub-machine or workflow outcomes.
  */
 export function finalState<const TOutcome extends string>(
   outcome: TOutcome,
@@ -56,18 +56,18 @@ export function finalState<const TOutcome extends string>(
 }
 
 /**
- * Zero-cost identity macro wrapper (`x => x`) used to extract large transition groups
+ * Zero-cost identity macro wrapper (`x => x`) used to extract large transition groups (> 3 rows)
  * into a variable or separate file while preserving full TypeScript context inference
  * and ESLint AST detection.
  */
 export function transitions<
-  const TRows extends readonly TransitionRow<any, any, any>[],
+  const TRows extends readonly TransitionRow<any, any, any, any>[],
 >(rows: TRows): TRows;
-export function transitions<TContext>(
-  rows: readonly TransitionRow<TContext, any, any>[],
-): readonly ExtractedTransitionRow<TContext>[];
-export function transitions<TContext>(): <
-  const TRows extends readonly TransitionRow<TContext, any, any>[],
+export function transitions<TContext, TMethods = any>(
+  rows: readonly TransitionRow<TContext, any, any, TMethods>[],
+): readonly ExtractedTransitionRow<TContext, TMethods>[];
+export function transitions<TContext, TMethods = any>(): <
+  const TRows extends readonly TransitionRow<TContext, any, any, TMethods>[],
 >(
   rows: TRows,
 ) => TRows;
@@ -79,22 +79,24 @@ export function transitions(rows?: unknown): unknown {
 }
 
 /**
- * Wraps a child FSM definition or config as a hierarchical `SubMachineRef`
- * that can be used in Column 1 (`FROM`) or Column 3 (`TO`) of a parent matrix.
+ * Compatibility helper for wrapping a child FSM definition or config as a `SubMachineRef`.
+ * Note: In Matrix-FSM V1, `createFSM` definitions can be passed directly into
+ * Column 1 (`FROM`), Column 3 (`TO`), or `each()` without needing `subMachine()`.
  */
 export function subMachine<
   TId extends string,
   TInitial extends string,
-  TContext extends object,
+  TContext extends object = Record<string, any>,
   TEvents extends Record<string, any> = Record<string, any>,
-  const TTransitions extends readonly AnyTransitionRow<TContext>[] =
-    readonly AnyTransitionRow<TContext>[],
+  const TTransitions extends readonly AnyTransitionRow<TContext, any>[] =
+    readonly AnyTransitionRow<TContext, any>[],
+  TMethods = Record<string, any>,
 >(
   configOrFSM:
-    | FSMDefinition<TId, TInitial, TContext, TEvents, TTransitions>
-    | FSMConfig<TId, TInitial, TContext, TEvents, TTransitions>,
+    | FSMDefinition<TId, TInitial, TContext, TEvents, TTransitions, TMethods>
+    | FSMConfig<TId, TInitial, TContext, TEvents, TTransitions, string, TMethods>,
 ): SubMachineRef<
-  FSMDefinition<TId, TInitial, TContext, TEvents, TTransitions>,
+  FSMDefinition<TId, TInitial, TContext, TEvents, TTransitions, TMethods>,
   TId
 > {
   const machine = isFSMDefinition(configOrFSM)

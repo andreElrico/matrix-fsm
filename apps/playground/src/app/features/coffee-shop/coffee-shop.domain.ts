@@ -1,5 +1,5 @@
 /**
- * Layer 2 (Domain): Pure Coffee Shop & Loyalty Business Logic
+ * Layer 2 (Domain): Pure Coffee Shop & Loyalty Business Logic + Types
  * STRICT RULE: 0% Angular DI (`inject` forbidden!)
  */
 
@@ -38,7 +38,8 @@ export const COFFEE_MENU: readonly CoffeeDrink[] = [
     name: 'Artisan Caramel Macchiato',
     price: 5.5,
     emoji: '🍯',
-    description: 'Vanilla-infused milk stained with dark espresso and artisan caramel drizzle',
+    description:
+      'Vanilla-infused milk stained with dark espresso and artisan caramel drizzle',
   },
 ] as const;
 
@@ -53,12 +54,79 @@ export interface BrewResult {
   readonly temperatureCelsius: number;
 }
 
+export interface CoffeeShopContext {
+  customerCard: CustomerCard;
+  selectedDrink: CoffeeDrink | null;
+  isFreeDrink: boolean;
+  finalPrice: number;
+  isPaid: boolean;
+  baristaResult: BrewResult | null;
+  error: string | null;
+}
+
+export const initialCoffeeShopContext: CoffeeShopContext = {
+  customerCard: {
+    cardId: 'CARD-8842',
+    customerName: 'Sam CoffeeLover',
+    currentStamps: 3,
+  },
+  selectedDrink: null,
+  isFreeDrink: false,
+  finalPrice: 0,
+  isPaid: false,
+  baristaResult: null,
+  error: null,
+};
+
+export type BaristaStates =
+  | 'ticketQueued'
+  | 'brewingCoffee'
+  | 'machineMaintenance'
+  | 'COFFEE_READY';
+
+export type BaristaEvents = {
+  START_BREWING: void;
+  RETRY_BREW: void;
+};
+
+export type CoffeeShopStates =
+  | 'customerBrowsing'
+  | 'checkingLoyalty'
+  | 'loyaltyErrorView'
+  | 'awaitingPayment'
+  | 'barista'
+  | 'coffeeReady'
+  | 'drinkingCoffee';
+
+export type CoffeeShopEvents = {
+  SELECT_DRINK: { drink: CoffeeDrink };
+  SET_STAMPS: { stamps: number };
+  PLACE_ORDER: void;
+  CANCEL: void;
+  RETRY: void;
+  BYPASS_CARD: void;
+  PAY: void;
+  START_BREWING: void;
+  RETRY_BREW: void;
+  COFFEE_READY: void;
+  TAKE_COFFEE: void;
+  FINISH_COFFEE: void;
+  LoyaltyApiTimeoutError: { message: string };
+};
+
+export type CoffeeShopMethods = {
+  _selectDrink(payload: { drink: CoffeeDrink }): void;
+  _setStamps(payload: { stamps: number }): void;
+  _setMissingDrinkError(): void;
+  _setBrewError(err: Error): void;
+  _markPaid(): void;
+  _finishCoffee(): void;
+};
+
 /**
  * Pure calculation to determine if the next ordered drink is the 10th free drink
  */
 export function isTenthDrinkEligible(currentStamps: number): boolean {
-  // If customer currently has 9 stamps, the 10th drink is free!
-  // Or every multiple of 10:
   return (currentStamps + 1) % 10 === 0;
 }
 
@@ -66,13 +134,19 @@ export function isTenthDrinkEligible(currentStamps: number): boolean {
  * Calculates the next stamp count after completing an order:
  * If it was the 10th free drink, stamps reset to 0; otherwise increments by 1.
  */
-export function calculateNextStamps(currentStamps: number, isFreeDrink: boolean): number {
+export function calculateNextStamps(
+  currentStamps: number,
+  isFreeDrink: boolean,
+): number {
   return isFreeDrink ? 0 : currentStamps + 1;
 }
 
 /**
  * Calculates final price to be charged at the register.
  */
-export function calculateFinalPrice(drinkPrice: number, isFreeDrink: boolean): number {
+export function calculateFinalPrice(
+  drinkPrice: number,
+  isFreeDrink: boolean,
+): number {
   return isFreeDrink ? 0 : drinkPrice;
 }

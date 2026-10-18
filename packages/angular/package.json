@@ -12,6 +12,12 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./effect": {
+      "@matrix-fsm/source": "./src/effect/index.ts",
+      "types": "./dist/effect/index.d.ts",
+      "import": "./dist/effect/index.js",
+      "default": "./dist/effect/index.js"
     }
   },
   "files": [
@@ -30,6 +36,15 @@
   "peerDependencies": {
     "@angular/core": "~22.1.0",
     "@ngrx/signals": "^22.0.0",
-    "effect": "^4.0.0"
+    "effect": "^4.0.0",
+    "rxjs": "^7.4.0"
+  },
+  "peerDependenciesMeta": {
+    "effect": {
+      "optional": true
+    },
+    "rxjs": {
+      "optional": true
+    }
   }
 }
