@@ -4,12 +4,7 @@
  */
 
 import { inject, Injectable } from '@angular/core';
-import {
-  patchState,
-  signalStore,
-  withMethods,
-  withState,
-} from '@ngrx/signals';
+import { patchState, signalStore, withMethods, withState } from '@ngrx/signals';
 import { withStateMachine } from '@matrix-fsm/angular';
 import { CoffeeShopApiService } from './coffee-shop-api.service';
 import {
@@ -84,7 +79,6 @@ export class CoffeeShopStore extends signalStore(
           error: null,
         };
       },
-
       brewingCoffee: async (ctx, signal) => {
         const drink = ctx.selectedDrink ?? COFFEE_MENU[0];
         const baristaResult = await api.brewCoffee(drink, signal);
