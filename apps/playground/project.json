@@ -4,7 +4,7 @@
   "projectType": "application",
   "prefix": "app",
   "sourceRoot": "apps/playground/src",
-  "tags": [],
+  "tags": ["type:feature", "scope:playground"],
   "targets": {
     "build": {
       "executor": "@angular/build:application",

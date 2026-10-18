@@ -2,18 +2,5 @@
   "extends": "./tsconfig.base.json",
   "compileOnSave": false,
   "files": [],
-  "references": [
-    {
-      "path": "./packages/core"
-    },
-    {
-      "path": "./packages/angular"
-    },
-    {
-      "path": "./packages/eslint-plugin"
-    },
-    {
-      "path": "./packages/router"
-    }
-  ]
+  "references": []
 }

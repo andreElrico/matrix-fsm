@@ -94,7 +94,7 @@ export function subMachine<
     | FSMDefinition<TId, TInitial, TContext, TEvents, TTransitions>
     | FSMConfig<TId, TInitial, TContext, TEvents, TTransitions>,
 ): SubMachineRef<
-  FSMDefinition<TId, TInitial, any, TEvents, TTransitions>,
+  FSMDefinition<TId, TInitial, TContext, TEvents, TTransitions>,
   TId
 > {
   const machine = isFSMDefinition(configOrFSM)

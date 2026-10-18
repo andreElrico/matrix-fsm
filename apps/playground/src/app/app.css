@@ -1,8 +1,8 @@
 .playground-shell {
-  max-width: 1120px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 2rem;
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   color: #f8fafc;
 }
 
@@ -24,122 +24,159 @@
   border-radius: 999px;
   font-size: 0.75rem;
   font-weight: 600;
+  margin-bottom: 0.35rem;
 }
 
 .hero h1 {
-  margin: 0.4rem 0 0;
-  font-size: 1.35rem;
+  margin: 0;
+  font-size: 1.5rem;
+  letter-spacing: -0.02em;
+  color: #ffffff;
 }
 
-.status-pill {
-  background: #1e293b;
-  border: 1px solid #334155;
-  padding: 0.5rem 1rem;
-  border-radius: 0.5rem;
+.hero-desc {
+  margin: 0.35rem 0 0;
+  color: #94a3b8;
+  font-size: 0.9rem;
 }
 
-.status-pill.pending {
-  border-color: #f59e0b;
-  color: #fde68a;
-}
-
-.controls-grid,
-.main-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-  gap: 1.25rem;
-  margin-bottom: 1.25rem;
-}
-
-.card {
-  background: #0f172a;
+/* Decision Tree Card */
+.decision-tree-card {
+  background: #0b1329;
   border: 1px solid #1e293b;
   border-radius: 0.75rem;
   padding: 1.25rem;
+  margin-bottom: 2rem;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
 }
 
-.card h2 {
-  margin-top: 0;
-  font-size: 1rem;
-  color: #93c5fd;
+.tree-header {
+  margin-bottom: 1rem;
 }
 
-.hint {
+.tree-title {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.tree-icon {
+  font-size: 1.8rem;
+}
+
+.tree-title h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: #f8fafc;
+}
+
+.tree-title p {
+  margin: 0.2rem 0 0;
   color: #94a3b8;
   font-size: 0.85rem;
-  margin-top: -0.25rem;
 }
 
-.btn-group {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-top: 0.75rem;
+.tree-branches {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1rem;
 }
 
-button {
-  background: #1e293b;
-  color: #e2e8f0;
-  border: 1px solid #334155;
-  padding: 0.5rem 0.85rem;
-  border-radius: 0.5rem;
+.branch-node {
+  background: #0f172a;
+  border: 2px solid #1e293b;
+  border-radius: 0.6rem;
+  padding: 1rem 1.25rem;
+  text-align: left;
   cursor: pointer;
-  font-weight: 500;
-}
-
-button.active,
-button.primary-btn {
-  background: #4f46e5;
-  border-color: #6366f1;
-  color: #ffffff;
-}
-
-button.danger-btn {
-  background: #dc2626;
-  border-color: #ef4444;
-  color: #ffffff;
-}
-
-.policy-summary {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 1rem;
-  padding-top: 0.75rem;
-  border-top: 1px solid #1e293b;
-  font-size: 0.875rem;
-}
-
-.field {
+  transition: all 0.2s ease-in-out;
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
-  margin-bottom: 0.85rem;
-  font-size: 0.85rem;
 }
 
-.field input {
-  background: #020617;
-  border: 1px solid #334155;
+.branch-node:hover {
+  border-color: #38bdf8;
+  background: #131d38;
+  transform: translateY(-2px);
+}
+
+.branch-node.active {
+  border-color: #6366f1;
+  background: linear-gradient(145deg, #181f3d, #0f172a);
+  box-shadow: 0 0 15px rgba(99, 102, 241, 0.2);
+}
+
+.branch-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.branch-icon {
+  font-size: 1.5rem;
+}
+
+.branch-badge {
+  font-size: 0.7rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: #1e293b;
+  color: #cbd5e1;
+  font-weight: 600;
+}
+
+.branch-node.active .branch-badge {
+  background: #4338ca;
+  color: #e0e7ff;
+}
+
+.branch-title {
+  font-size: 1rem;
   color: #f8fafc;
-  padding: 0.55rem 0.75rem;
-  border-radius: 0.4rem;
+  margin-bottom: 0.2rem;
 }
 
-.error-banner {
-  background: rgba(239, 68, 68, 0.15);
-  border: 1px solid #ef4444;
-  color: #fca5a5;
-  padding: 0.6rem 0.8rem;
-  border-radius: 0.4rem;
-  margin-bottom: 0.85rem;
+.branch-cat {
+  font-size: 0.75rem;
+  color: #38bdf8;
+  font-weight: 500;
+  margin-bottom: 0.5rem;
 }
 
-.code-box {
+.branch-desc {
+  font-size: 0.825rem;
+  color: #94a3b8;
+  margin: 0 0 0.85rem;
+  line-height: 1.35;
+  flex-grow: 1;
+}
+
+.branch-patterns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.pattern-tag {
   background: #020617;
   border: 1px solid #1e293b;
-  padding: 0.85rem;
-  border-radius: 0.5rem;
-  font-size: 0.8rem;
-  overflow-x: auto;
   color: #a5b4fc;
+  font-size: 0.7rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 0.25rem;
+}
+
+.branch-node.active .pattern-tag {
+  border-color: #3730a3;
+  color: #c7d2fe;
+}
+
+.branch-content {
+  animation: fadeIn 0.25s ease-in-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
 }

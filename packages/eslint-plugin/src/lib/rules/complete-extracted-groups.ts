@@ -1,7 +1,9 @@
 /**
  * Rule: complete-extracted-groups
- * A `[FROM, VIA]` pair defined inside a `transitions([...])` variable must not be split
- * across both the variable and the parent `createFSM` / `subMachine` array.
+ * 1. A `[FROM, VIA]` pair defined inside a `transitions([...])` variable must not be split
+ *    across both the variable and the parent `createFSM` / `subMachine` array.
+ * 2. Only extract transition groups into a `transitions([...])` variable when there are
+ *    more than 3 cases (`minRows: 4` by default). Smaller groups (<= 3 rows) must stay inline.
  */
 
 import { AST_NODE_TYPES, ESLintUtils, type TSESTree } from '@typescript-eslint/utils';
@@ -15,24 +17,42 @@ const createRule = ESLintUtils.RuleCreator(
   (name) => `https://matrix-fsm.dev/rules/${name}`,
 );
 
-export type MessageIds = 'splitExtractedGroup';
+export interface CompleteExtractedGroupsOptions {
+  readonly minRows?: number;
+}
 
-export const completeExtractedGroups = createRule<[], MessageIds>({
+export type MessageIds = 'splitExtractedGroup' | 'tooFewRowsToExtract';
+
+export const completeExtractedGroups = createRule<
+  [CompleteExtractedGroupsOptions?],
+  MessageIds
+>({
   name: 'complete-extracted-groups',
   meta: {
     type: 'problem',
     docs: {
       description:
-        'Disallow splitting a [FROM, VIA] transition group across a transitions([...]) variable and a parent createFSM array.',
+        'Disallow splitting a [FROM, VIA] transition group across a transitions([...]) variable and a parent createFSM array, and require > 3 rows to justify extraction.',
     },
-    schema: [],
+    schema: [
+      {
+        type: 'object',
+        properties: {
+          minRows: { type: 'integer', minimum: 1 },
+        },
+        additionalProperties: false,
+      },
+    ],
     messages: {
       splitExtractedGroup:
         "Transition group '[{{from}}, {{via}}]' is split between extracted variable '{{varName}}' and the parent machine. Extracted groups must be complete.",
+      tooFewRowsToExtract:
+        "Extracted transition group '{{varName}}' only has {{count}} row(s) (minimum is {{minRows}}, i.e. > 3 cases). Keep small groups inline in the matrix for readability.",
     },
   },
-  defaultOptions: [],
-  create(context) {
+  defaultOptions: [{ minRows: 4 }],
+  create(context, [userOptions]) {
+    const minRows = userOptions?.minRows ?? 4;
     const extractedGroupsByVar = new Map<string, Set<string>>();
 
     return {
@@ -44,13 +64,29 @@ export const completeExtractedGroups = createRule<[], MessageIds>({
           const arr = getExtractedTransitionsArray(node.init);
           if (arr) {
             const keys = new Set<string>();
+            let validRowCount = 0;
             for (const el of arr.elements) {
               const parsed = parseTransitionRow(el);
-              if (parsed?.groupKey) {
-                keys.add(parsed.groupKey);
+              if (parsed) {
+                validRowCount++;
+                if (parsed.groupKey) {
+                  keys.add(parsed.groupKey);
+                }
               }
             }
             extractedGroupsByVar.set(node.id.name, keys);
+
+            if (validRowCount < minRows) {
+              context.report({
+                node: node.init,
+                messageId: 'tooFewRowsToExtract',
+                data: {
+                  varName: node.id.name,
+                  count: String(validRowCount),
+                  minRows: String(minRows),
+                },
+              });
+            }
           }
         }
       },
@@ -61,7 +97,10 @@ export const completeExtractedGroups = createRule<[], MessageIds>({
         }
 
         // Map groupKey -> varName for all spread extracted variables in this machine
-        const spreadGroupOwners = new Map<string, { varName: string; spreadNode: TSESTree.SpreadElement }>();
+        const spreadGroupOwners = new Map<
+          string,
+          { varName: string; spreadNode: TSESTree.SpreadElement }
+        >();
 
         for (const el of arrayNode.elements) {
           if (

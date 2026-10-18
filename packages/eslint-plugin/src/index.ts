@@ -1,3 +1,4 @@
+import { alignMatrixColumns } from './lib/rules/align-matrix-columns.js';
 import { awaitingNamingConvention } from './lib/rules/awaiting-naming-convention.js';
 import { completeExtractedGroups } from './lib/rules/complete-extracted-groups.js';
 import { groupContiguousTransitions } from './lib/rules/group-contiguous-transitions.js';
@@ -7,6 +8,7 @@ import { requireAwaitingHandlers } from './lib/rules/require-awaiting-handlers.j
 import { requireFallbackTransition } from './lib/rules/require-fallback-transition.js';
 
 export const rules = {
+  'align-matrix-columns': alignMatrixColumns,
   'group-contiguous-transitions': groupContiguousTransitions,
   'require-fallback-transition': requireFallbackTransition,
   'no-unreachable-transitions': noUnreachableTransitions,
@@ -30,6 +32,7 @@ export const configs = {
       '@matrix-fsm': plugin,
     },
     rules: {
+      '@matrix-fsm/align-matrix-columns': 'error',
       '@matrix-fsm/group-contiguous-transitions': 'error',
       '@matrix-fsm/require-fallback-transition': 'error',
       '@matrix-fsm/no-unreachable-transitions': 'error',
@@ -44,6 +47,7 @@ export const configs = {
 export default plugin;
 
 export {
+  alignMatrixColumns,
   awaitingNamingConvention,
   completeExtractedGroups,
   groupContiguousTransitions,

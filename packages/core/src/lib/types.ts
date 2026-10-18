@@ -188,13 +188,30 @@ export type AnyFSMDefinition = FSMDefinition<any, any, any, any, any>;
 // Type-Level Extractors
 // ============================================================================
 
+type UnwrapReadonly<T> = T extends Readonly<infer U> ? U : T;
+
+type ExtractContextFromRow<Row> =
+  Row extends readonly [ExtractedMarker<infer C>, ...any[]]
+    ? C extends object
+      ? C
+      : never
+    : Row extends readonly [any, any, SubMachineRef<FSMDefinition<any, any, infer C, any, any>, any>, ...any[]]
+      ? [0] extends [1 & C]
+        ? never
+        : C extends object
+          ? C
+          : never
+      : Row extends readonly [any, any, any, { readonly guard: (ctx: infer C, ...args: any[]) => boolean }]
+        ? [0] extends [1 & C]
+          ? never
+          : UnwrapReadonly<C> extends object
+            ? UnwrapReadonly<C>
+            : never
+        : never;
+
 type ExtractContextFromTransitions<TTransitions extends readonly any[]> =
   TTransitions[number] extends infer Row
-    ? Row extends readonly [ExtractedMarker<infer C>, ...any[]]
-      ? C extends object
-        ? C
-        : never
-      : never
+    ? ExtractContextFromRow<Row>
     : never;
 
 export type ResolveContext<
@@ -259,6 +276,16 @@ export type ExtractEventsMap<TFSM> =
     ? TEvents
     : Record<string, any>;
 
+type ExtractSubMachinesFromTransitions<
+  TTransitions extends readonly AnyTransitionRow<any>[],
+> = TTransitions[number] extends infer Row
+  ? Row extends readonly [infer From, any, infer To, ...any[]]
+    ?
+        | (From extends SubMachineRef<infer Sub1, any> ? Sub1 : never)
+        | (To extends SubMachineRef<infer Sub2, any> ? Sub2 : never)
+    : never
+  : never;
+
 export type ExtractEvents<TFSM> =
   TFSM extends FSMDefinition<any, any, any, infer TEvents, infer TTransitions>
     ?
@@ -273,19 +300,28 @@ export type ExtractEvents<TFSM> =
               : never,
             BuiltInLifecycleEvent
           >
+        | ExtractEvents<ExtractSubMachinesFromTransitions<TTransitions>>
     : never;
 
 export type ExtractEventPayload<
   TFSM,
   TEvent extends string,
-> = TFSM extends FSMDefinition<any, any, any, infer TEvents, any>
+> = TFSM extends FSMDefinition<any, any, any, infer TEvents, infer TTransitions>
   ? TEvent extends keyof TEvents
     ? TEvents[TEvent]
-    : unknown
+    : ExtractSubMachinesFromTransitions<TTransitions> extends infer Sub
+      ? [Sub] extends [never]
+        ? unknown
+        : Sub extends FSMDefinition<any, any, any, infer TSubEvents, any>
+          ? TEvent extends keyof TSubEvents
+            ? TSubEvents[TEvent]
+            : unknown
+          : unknown
+      : unknown
   : unknown;
 
 /**
- * Extracts all `awaiting('stateName')` states from an FSM definition.
+ * Extracts all `awaiting('stateName')` states from an FSM definition (including nested `subMachine`s).
  * Detects both direct `AwaitingNode<S>` in Column 3 AND states in Column 1 that
  * transition via `'DONE'` or `'ERROR'` (so extracted `transitions<TContext>([...])` groups
  * still preserve compile-time task enforcement).
@@ -316,7 +352,8 @@ export type ExtractAwaitingNodesFromTransitions<
   TTransitions extends readonly AnyTransitionRow<any>[],
 > =
   | ExtractDirectAwaiting<TTransitions>
-  | ExtractDoneSourceStates<TTransitions>;
+  | ExtractDoneSourceStates<TTransitions>
+  | ExtractAwaitingNodes<ExtractSubMachinesFromTransitions<TTransitions>>;
 
 export type ExtractAwaitingNodes<TFSM> =
   TFSM extends FSMDefinition<any, any, any, any, infer TTransitions>

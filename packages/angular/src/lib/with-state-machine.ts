@@ -451,7 +451,15 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
 
           if (subHasTransition) {
             const prevSubState = activeSubMachine.state();
+            activeSubMachine.patchContext(currentCtx);
             activeSubMachine.send(event, payload);
+            const updatedSubCtx = activeSubMachine.context();
+            if (updatedSubCtx && typeof updatedSubCtx === 'object') {
+              rawContextSig.update((prev) => ({
+                ...prev,
+                ...(updatedSubCtx as Partial<TContext>),
+              }));
+            }
             const nextSubState = activeSubMachine.state();
             fsmSubStateSig.set(nextSubState);
 
@@ -524,7 +532,9 @@ export function withStateMachine<TFSM extends AnyFSMDefinition>(
 
         if (evaluation.enteredSubMachine) {
           activeSubRef = evaluation.enteredSubMachine;
-          activeSubMachine = createMachineInstance(activeSubRef.machine);
+          activeSubMachine = createMachineInstance(activeSubRef.machine, {
+            initialContext: getEffectiveContext(),
+          });
           const initialSubState = activeSubMachine.state();
           fsmSubStateSig.set(initialSubState);
           if (activeSubRef.machine.awaitingStates.has(initialSubState)) {

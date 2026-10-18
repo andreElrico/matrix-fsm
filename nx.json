@@ -2,6 +2,9 @@
   "$schema": "./node_modules/nx/schemas/nx-schema.json",
   "analytics": false,
   "useDaemonProcess": false,
+  "sync": {
+    "applyChanges": true
+  },
   "namedInputs": {
     "default": ["{projectRoot}/**/*", "sharedGlobals"],
     "production": [

@@ -1,0 +1,363 @@
+<div class="example-container">
+  <div class="example-header">
+    <div>
+      <span class="badge">Branch: Coffee Shop &amp; Loyalty Workflow</span>
+      <h2>☕ Third Wave Coffee Shop &amp; Loyalty Program</h2>
+      <p class="subtitle">
+        Showcases multi-role collaboration (👤 Customer &bull; 🧑‍💼 Cashier &bull; ☕ Barista),
+        async Effect-TS Loyalty API check (10th drink FREE), and machine-state flow.
+      </p>
+    </div>
+    <div class="status-pill" [class.pending]="store.isPending()">
+      State: <strong>{{ store.fsmState() }}</strong>
+      @if (store.fsmSubState(); as sub) {
+        <span> / <strong>{{ sub }}</strong></span>
+      }
+      @if (store.isPending()) {
+        <span class="pulse">⚡ awaiting</span>
+      }
+    </div>
+  </div>
+
+  <!-- Role & Entity Summary Bar -->
+  <section class="roles-banner">
+    <div class="role-pill">
+      <span class="role-icon">👤</span>
+      <div class="role-meta">
+        <strong>Customer: {{ store.fsmContext().customerCard.customerName }}</strong>
+        <small>Card ID: {{ store.fsmContext().customerCard.cardId }}</small>
+      </div>
+    </div>
+    <div class="role-pill">
+      <span class="role-icon">🧑‍💼</span>
+      <div class="role-meta">
+        <strong>Cashier Station</strong>
+        <small>POS &amp; Loyalty API Scanner</small>
+      </div>
+    </div>
+    <div class="role-pill">
+      <span class="role-icon">☕</span>
+      <div class="role-meta">
+        <strong>Barista Espresso Bar</strong>
+        <small>La Marzocco Linea PB &bull; Steam Station</small>
+      </div>
+    </div>
+  </section>
+
+  <!-- Control & Simulation Grid -->
+  <section class="controls-grid">
+    <!-- Card 1: Customer Loyalty Stamp Card -->
+    <div class="card">
+      <h3>1. Customer Loyalty Card (Every 10th Drink is Free!)</h3>
+      <p class="hint">Adjust current stamps to test the 10th free drink logic:</p>
+      
+      <div class="stamps-container">
+        @for (slot of stampSlots; track slot) {
+          <div
+            class="stamp-slot"
+            [class.filled]="slot <= store.fsmContext().customerCard.currentStamps"
+            [class.tenth]="slot === 10"
+            (click)="setStampCount(slot === 10 ? 9 : slot)"
+            [title]="slot === 10 ? '10th Drink (FREE!)' : 'Stamp ' + slot"
+          >
+            @if (slot === 10) {
+              <span>⭐ FREE</span>
+            } @else {
+              <span>{{ slot }}</span>
+            }
+          </div>
+        }
+      </div>
+
+      <div class="stamp-controls">
+        <span class="stamp-info">
+          Current Stamps: <strong>{{ store.fsmContext().customerCard.currentStamps }}/10</strong>
+          @if (isNextDrinkFreePreview()) {
+            <span class="free-badge">🎉 Next Drink is FREE!</span>
+          }
+        </span>
+        <div class="quick-stamp-btns">
+          <button type="button" (click)="setStampCount(0)">Reset (0)</button>
+          <button type="button" (click)="setStampCount(5)">5 Stamps</button>
+          <button type="button" class="accent-btn" (click)="setStampCount(9)">9 Stamps (10th Free)</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Card 2: Effect-TS API Simulation -->
+    <div class="card">
+      <h3>2. Loyalty API &amp; Barista Simulation</h3>
+      <p class="hint">Controls Effect-TS behavior for the cashier API call and barista fiber:</p>
+      <div class="btn-group">
+        <button
+          type="button"
+          [class.active]="api.getSimulationMode() === 'normal'"
+          (click)="setApiMode('normal')"
+        >
+          Normal API (Instant)
+        </button>
+        <button
+          type="button"
+          [class.active]="api.getSimulationMode() === 'tenth_free'"
+          (click)="setApiMode('tenth_free')"
+        >
+          🎁 Trigger 10th Free Drink
+        </button>
+        <button
+          type="button"
+          [class.active]="api.getSimulationMode() === 'timeout'"
+          (click)="setApiMode('timeout')"
+        >
+          💥 API Gateway Timeout (_tag)
+        </button>
+        <button
+          type="button"
+          [class.active]="api.getSimulationMode() === 'slow_brewing'"
+          (click)="setApiMode('slow_brewing')"
+        >
+          ⏳ Slow Brewing (Test Cancel)
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Main View Area with @switch -->
+  <main class="main-grid">
+    <section class="card view-card">
+      <h3>3. Interactive Role Workflow <code>&#64;switch (store.fsmState())</code></h3>
+
+      @switch (store.fsmState()) {
+        @case ('customerBrowsing') {
+          <div class="state-view">
+            <div class="step-badge">Phase 1: Customer Ordering</div>
+            <h4>👤 Select your Coffee Beverage</h4>
+
+            @if (store.fsmContext().error; as err) {
+              <div class="error-banner" role="alert">{{ err }}</div>
+            }
+
+            <div class="menu-grid">
+              @for (item of menu; track item.id) {
+                <div
+                  class="menu-item"
+                  [class.selected]="store.fsmContext().selectedDrink?.id === item.id"
+                  (click)="selectDrink(item)"
+                >
+                  <div class="menu-item-emoji">{{ item.emoji }}</div>
+                  <div class="menu-item-details">
+                    <div class="menu-item-title">
+                      <strong>{{ item.name }}</strong>
+                      <span class="price">${{ item.price.toFixed(2) }}</span>
+                    </div>
+                    <p class="menu-item-desc">{{ item.description }}</p>
+                  </div>
+                </div>
+              }
+            </div>
+
+            <div class="order-action-bar">
+              <span class="selected-summary">
+                Selected:
+                <strong>{{ store.fsmContext().selectedDrink?.name ?? 'None' }}</strong>
+              </span>
+              <button type="button" class="primary-btn" (click)="placeOrder()">
+                🧑‍💼 Hand Order to Cashier (PLACE_ORDER)
+              </button>
+            </div>
+          </div>
+        }
+
+        @case ('checkingLoyalty') {
+          <div class="state-view pending-view">
+            <div class="step-badge">Phase 2: Cashier Scanning</div>
+            <h4>🧑‍💼 Cashier scanning loyalty card... (<code>awaiting('checkingLoyalty')</code>)</h4>
+            <p>
+              Calling Loyalty Microservice to verify customer account and calculate if this order
+              qualifies for the <strong>10th Drink Free Promotion</strong>...
+            </p>
+            <button type="button" class="danger-btn" (click)="cancel()">
+              Cancel Order (Interrupt API Fiber)
+            </button>
+          </div>
+        }
+
+        @case ('loyaltyErrorView') {
+          <div class="state-view error-view">
+            <div class="step-badge error">Loyalty Network Issue</div>
+            <h4>📡 Loyalty API Gateway Timeout (<code>loyaltyErrorView</code>)</h4>
+            <p>
+              TaggedError <code>LoyaltyApiTimeoutError</code> was caught.
+              The cashier can retry or bypass the loyalty check:
+            </p>
+            <div class="btn-group">
+              <button type="button" class="primary-btn" (click)="retry()">
+                🔄 Retry API Call
+              </button>
+              <button type="button" (click)="bypassCard()">
+                🧑‍💼 Cashier Override: Bypass Loyalty Card
+              </button>
+              <button type="button" class="danger-btn" (click)="cancel()">
+                Cancel Order
+              </button>
+            </div>
+          </div>
+        }
+
+        @case ('awaitingPayment') {
+          <div class="state-view payment-view">
+            <div class="step-badge">Phase 3: Payment Register</div>
+            <h4>🧑‍💼 Payment Due at Cashier Register</h4>
+            <div class="receipt-box">
+              <div class="receipt-row">
+                <span>Beverage:</span>
+                <strong>{{ store.fsmContext().selectedDrink?.name }}</strong>
+              </div>
+              <div class="receipt-row">
+                <span>Loyalty Stamps:</span>
+                <span>{{ store.fsmContext().customerCard.currentStamps }}/10 (Next is not 10th yet)</span>
+              </div>
+              <div class="receipt-divider"></div>
+              <div class="receipt-row total">
+                <span>Total Due:</span>
+                <strong>${{ store.fsmContext().finalPrice.toFixed(2) }}</strong>
+              </div>
+            </div>
+            <div class="btn-group">
+              <button type="button" class="primary-btn" (click)="pay()">
+                💳 Customer: Pay ${{ store.fsmContext().finalPrice.toFixed(2) }} (PAY)
+              </button>
+              <button type="button" (click)="cancel()">
+                Cancel Order
+              </button>
+            </div>
+          </div>
+        }
+
+        @case ('barista') {
+          <div class="state-view queue-view">
+            <div class="step-badge">Sub-FSM: <code>baristaFSM ({{ store.fsmSubState() }})</code></div>
+
+            @switch (store.fsmSubState()) {
+              @case ('ticketQueued') {
+                <h4>☕ Order Ticket Queued at Barista Counter (<code>barista / ticketQueued</code>)</h4>
+
+                @if (store.fsmContext().isFreeDrink) {
+                  <div class="free-celebration-banner">
+                    🎉 <strong>10TH DRINK FREE PROMOTION!</strong>
+                    <p>The Loyalty API validated that this is your 10th drink! No payment required!</p>
+                  </div>
+                } @else {
+                  <div class="paid-confirmation">
+                    ✅ Payment of ${{ store.fsmContext().finalPrice.toFixed(2) }} confirmed by cashier.
+                  </div>
+                }
+
+                <div class="ticket-box">
+                  <div class="ticket-header">ORDER TICKET #{{ store.fsmContext().customerCard.cardId }}</div>
+                  <div class="ticket-item">
+                    <span class="emoji">{{ store.fsmContext().selectedDrink?.emoji }}</span>
+                    <span><strong>{{ store.fsmContext().selectedDrink?.name }}</strong></span>
+                  </div>
+                  <small>Special: Artisanal Extraction (Hierarchical Sub-FSM)</small>
+                </div>
+
+                <div class="btn-group">
+                  <button type="button" class="primary-btn" (click)="startBrewing()">
+                    ☕ Barista: Start Brewing (START_BREWING)
+                  </button>
+                  <button type="button" (click)="cancel()">
+                    Cancel Order (Parent Group-Interrupt)
+                  </button>
+                </div>
+              }
+
+              @case ('brewingCoffee') {
+                <h4>☕ Barista Brewing Coffee (<code>barista / awaiting('brewingCoffee')</code>)</h4>
+                <p>
+                  Grinding beans, tamping with 20kg pressure, pulling a 28s double shot, and texturing milk...
+                </p>
+                <div class="steaming-animation">
+                  <span class="steam">♨️</span> Brewing in progress inside <code>baristaFSM</code>...
+                </div>
+                <button type="button" class="danger-btn" (click)="cancel()">
+                  Customer Cancels (Group-Interrupts Barista Sub-FSM &amp; Fiber)
+                </button>
+              }
+
+              @case ('machineMaintenance') {
+                <h4>🔧 Espresso Machine Maintenance (<code>barista / machineMaintenance</code>)</h4>
+                @if (store.fsmContext().error; as err) {
+                  <div class="error-banner" role="alert">{{ err }}</div>
+                }
+                <div class="btn-group">
+                  <button type="button" class="primary-btn" (click)="store.send('RETRY_BREW')">
+                    🔄 Barista: Retry Extraction (RETRY_BREW)
+                  </button>
+                  <button type="button" class="danger-btn" (click)="cancel()">
+                    Cancel Order
+                  </button>
+                </div>
+              }
+            }
+          </div>
+        }
+
+        @case ('coffeeReady') {
+          <div class="state-view ready-view">
+            <div class="step-badge success">Pickup Counter</div>
+            <h4>🛎️ Ding! Order Ready for Pickup!</h4>
+            <div class="ready-drink-card">
+              <div class="drink-cup-icon">{{ store.fsmContext().selectedDrink?.emoji }}</div>
+              <div>
+                <strong>{{ store.fsmContext().selectedDrink?.name }}</strong>
+                <p class="barista-quote">"{{ store.fsmContext().baristaResult?.baristaNote }}"</p>
+                <small class="temp">Served at: {{ store.fsmContext().baristaResult?.temperatureCelsius }}°C</small>
+              </div>
+            </div>
+            <button type="button" class="primary-btn" (click)="takeCoffee()">
+              👤 Customer: Take Drink (TAKE_COFFEE)
+            </button>
+          </div>
+        }
+
+        @case ('drinkingCoffee') {
+          <div class="state-view drinking-view">
+            <div class="step-badge success">Enjoying</div>
+            <h4>😋 Customer Savoring Fresh Coffee</h4>
+            <p>
+              Enjoying every sip of the freshly prepared {{ store.fsmContext().selectedDrink?.name }}.
+            </p>
+            @if (store.fsmContext().isFreeDrink) {
+              <div class="free-drink-enjoy-note">
+                ✨ Free coffee always tastes sweetest! Your loyalty stamp card will reset to 0 upon completion.
+              </div>
+            } @else {
+              <div class="paid-drink-enjoy-note">
+                Your loyalty card will be stamped (+1) upon completion!
+              </div>
+            }
+            <button type="button" class="primary-btn" (click)="finishCoffee()">
+              ✨ Finish Coffee &amp; Return to Counter (FINISH_COFFEE)
+            </button>
+          </div>
+        }
+      }
+    </section>
+
+    <!-- Inspector Card -->
+    <section class="card inspector-card">
+      <h3>4. Live <code>toMermaid(coffeeShopFSM)</code> &amp; State Context</h3>
+      <div class="context-snapshot">
+        <div><strong>Parent State:</strong> <code>{{ store.fsmState() }}</code></div>
+        <div><strong>Barista Sub-State:</strong> <code>{{ store.fsmSubState() ?? '—' }}</code></div>
+        <div><strong>Pending Fiber:</strong> {{ store.isPending() ? 'YES ⚡' : 'NO' }}</div>
+        <div><strong>Selected Drink:</strong> {{ store.fsmContext().selectedDrink?.name ?? 'None' }}</div>
+        <div><strong>Is 10th Free Drink:</strong> {{ store.fsmContext().isFreeDrink ? 'YES 🎉' : 'NO' }}</div>
+        <div><strong>Final Price:</strong> ${{ store.fsmContext().finalPrice.toFixed(2) }}</div>
+        <div><strong>Is Paid:</strong> {{ store.fsmContext().isPaid ? 'YES' : 'NO' }}</div>
+        <div><strong>Loyalty Stamps:</strong> {{ store.fsmContext().customerCard.currentStamps }}/10</div>
+      </div>
+      <pre class="code-box">{{ mermaidDiagram }}</pre>
+    </section>
+  </main>
+</div>

@@ -224,11 +224,13 @@ describe('@matrix-fsm/eslint-plugin (7 AST Rules)', () => {
   });
 
   describe('6. complete-extracted-groups', () => {
-    it('passes when extracted transitions([...]) group is not split across parent createFSM', () => {
+    it('passes when extracted transitions([...]) group has > 3 rows and is not split across parent createFSM', () => {
       const { messages } = verifyRule(
         'complete-extracted-groups',
         `
         const handleLogin = transitions([
+          ['loginView', 'LOGIN', 'ssoRedirect',             { guard: isSsoDomain }],
+          ['loginView', 'LOGIN', 'mfaChallenge',            { guard: requiresMfa }],
           ['loginView', 'LOGIN', awaiting('authenticating'), { guard: isValid }],
           ['loginView', 'LOGIN', stay()],
         ]);
@@ -247,12 +249,29 @@ describe('@matrix-fsm/eslint-plugin (7 AST Rules)', () => {
       expect(messages).toHaveLength(0);
     });
 
-    it('reports error when [FROM, VIA] is split between transitions([...]) variable and parent createFSM', () => {
+    it('reports error when extracted transitions([...]) variable has 3 or fewer rows', () => {
       const { messages } = verifyRule(
         'complete-extracted-groups',
         `
         const handleLogin = transitions([
           ['loginView', 'LOGIN', awaiting('authenticating'), { guard: isValid }],
+          ['loginView', 'LOGIN', stay()],
+        ]);
+        `,
+      );
+      expect(messages).toHaveLength(1);
+      expect(messages[0].messageId).toBe('tooFewRowsToExtract');
+    });
+
+    it('reports error when [FROM, VIA] is split between transitions([...]) variable and parent createFSM', () => {
+      const { messages } = verifyRule(
+        'complete-extracted-groups',
+        `
+        const handleLogin = transitions([
+          ['loginView', 'LOGIN', 'ssoRedirect',             { guard: isSsoDomain }],
+          ['loginView', 'LOGIN', 'mfaChallenge',            { guard: requiresMfa }],
+          ['loginView', 'LOGIN', awaiting('authenticating'), { guard: isValid }],
+          ['loginView', 'LOGIN', 'rateLimited',             { guard: isRateLimited }],
         ]);
         createFSM({
           id: 'auth',
@@ -302,6 +321,52 @@ describe('@matrix-fsm/eslint-plugin (7 AST Rules)', () => {
         'forbiddenServiceOrStoreImport',
       );
       expect(messages.map((m) => m.messageId)).toContain('forbiddenInjectCall');
+    });
+  });
+
+  describe('8. align-matrix-columns', () => {
+    it('passes when [FROM, VIA, TO] columns are vertically aligned (with OPTIONS on same line or next line)', () => {
+      const { messages } = verifyRule(
+        'align-matrix-columns',
+        `
+        createFSM({
+          id: 'auth',
+          initial: 'loginView',
+          context: {},
+          transitions: [
+            ['loginView',       'LOGIN',   awaiting('authenticating'), { guard: hasValidInput }],
+            ['loginView',       'LOGIN',   stay(),
+              { patch: () => ({ error: 'Invalid email' }) }],
+            ['authenticating',  'CANCEL',  'loginView'],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(0);
+    });
+
+    it('reports and auto-fixes unaligned or broken [FROM, VIA, TO] triplets into aligned columns', () => {
+      const { messages, fixed } = verifyRule(
+        'align-matrix-columns',
+        `createFSM({
+  id: 'auth',
+  initial: 'loginView',
+  context: {},
+  transitions: [
+    ['loginView', 'LOGIN', awaiting('authenticating'), { guard: hasValidInput }],
+    [
+      'authenticating',
+      'CANCEL',
+      'loginView',
+    ],
+  ],
+});`,
+      );
+      expect(messages.length).toBeGreaterThanOrEqual(1);
+      expect(fixed.fixed).toBe(true);
+      expect(fixed.output).toContain(
+        `    ['loginView',       'LOGIN',   awaiting('authenticating'), { guard: hasValidInput }],\n    ['authenticating',  'CANCEL',  'loginView'],`,
+      );
     });
   });
 });

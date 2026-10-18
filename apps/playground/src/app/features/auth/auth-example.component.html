@@ -1,0 +1,178 @@
+<div class="example-container">
+  <div class="example-header">
+    <div>
+      <span class="badge">Branch: Authentication</span>
+      <h2>User Authentication & Entitlements Flow</h2>
+      <p class="subtitle">Demonstrates 3-layer architecture, reactive policy mirroring, Effect-TS retry, TaggedErrors, and fiber cancellation.</p>
+    </div>
+    <div class="status-pill" [class.pending]="store.isPending()">
+      State: <strong>{{ store.fsmState() }}</strong>
+      @if (store.isPending()) {
+        <span class="pulse">⚡ awaiting</span>
+      }
+    </div>
+  </div>
+
+  <section class="controls-grid">
+    <div class="card">
+      <h3>1. Layer 1 Policy Controls (GlobalAuthStore)</h3>
+      <p class="hint">Reactive Signal synced into <code>fsmContext.policy</code> via <code>syncContext</code></p>
+      <div class="btn-group">
+        <button
+          type="button"
+          [class.active]="globalAuth.role() === UserRole.Free"
+          (click)="setRole(UserRole.Free)"
+        >
+          Free (Ads: ON)
+        </button>
+        <button
+          type="button"
+          [class.active]="globalAuth.role() === UserRole.Pro"
+          (click)="setRole(UserRole.Pro)"
+        >
+          Pro (-10%, Ads: OFF)
+        </button>
+        <button
+          type="button"
+          [class.active]="globalAuth.role() === UserRole.Admin"
+          (click)="setRole(UserRole.Admin)"
+        >
+          Admin (-100%, Ads: OFF)
+        </button>
+      </div>
+      <div class="policy-summary">
+        <span>Upsell Promo: <strong>{{ store.fsmContext().policy.showUpsellAds ? 'Yes' : 'No' }}</strong></span>
+        <span>Calculated Price: <strong>${{ monthlyPrice() }}/mo</strong></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>2. Effect-TS API Simulation (AuthApiService)</h3>
+      <p class="hint">Simulates <code>Effect.retry</code>, <code>NetworkTimeoutError</code> (<code>_tag</code>), and Fiber interruption</p>
+      <div class="btn-group">
+        <button
+          type="button"
+          [class.active]="authApi.getSimulationMode() === 'success'"
+          (click)="setApiMode('success')"
+        >
+          Instant Success
+        </button>
+        <button
+          type="button"
+          [class.active]="authApi.getSimulationMode() === 'slow_success'"
+          (click)="setApiMode('slow_success')"
+        >
+          Slow (300ms, Test Cancel)
+        </button>
+        <button
+          type="button"
+          [class.active]="authApi.getSimulationMode() === 'timeout'"
+          (click)="setApiMode('timeout')"
+        >
+          NetworkTimeoutError (_tag)
+        </button>
+        <button
+          type="button"
+          [class.active]="authApi.getSimulationMode() === 'invalid_credentials'"
+          (click)="setApiMode('invalid_credentials')"
+        >
+          Generic Error
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <main class="main-grid">
+    <section class="card view-card">
+      <h3>3. Dumb View with <code>&#64;switch (store.fsmState())</code></h3>
+
+      @switch (store.fsmState()) {
+        @case ('loginView') {
+          <div class="state-view">
+            <h4>Sign In (<code>loginView</code>)</h4>
+            @if (store.fsmContext().error; as err) {
+              <div class="error-banner" role="alert">{{ err }}</div>
+            }
+            <label class="field">
+              <span>Email (must include &#64; for <code>hasValidInput</code> guard)</span>
+              <input
+                type="email"
+                [value]="store.fsmContext().credentials.email"
+                (input)="updateEmail($any($event.target).value)"
+                placeholder="architect&#64;matrix-fsm.dev"
+              />
+            </label>
+            <label class="field">
+              <span>Password</span>
+              <input
+                type="password"
+                [value]="store.fsmContext().credentials.password"
+                (input)="updatePassword($any($event.target).value)"
+                placeholder="••••••••"
+              />
+            </label>
+            <button type="button" class="primary-btn" (click)="store.send('LOGIN')">
+              Dispatch LOGIN
+            </button>
+          </div>
+        }
+
+        @case ('authenticating') {
+          <div class="state-view pending-view">
+            <h4>⚡ Authenticating (<code>awaiting('authenticating')</code>)</h4>
+            <p>Running Effect-TS task with exponential retry &amp; Fiber cancellation support...</p>
+            <button type="button" class="danger-btn" (click)="store.send('CANCEL')">
+              Dispatch CANCEL (Interrupt Effect Fiber)
+            </button>
+          </div>
+        }
+
+        @case ('proUpsellPromo') {
+          <div class="state-view promo-view">
+            <h4>🚀 Upgrade to Pro (<code>proUpsellPromo</code>)</h4>
+            <p>
+              Guard <code>shouldShowPromo</code> matched because your role policy has
+              <code>showUpsellAds: true</code>!
+            </p>
+            <button type="button" class="primary-btn" (click)="store.send('DISMISS_PROMO')">
+              Dispatch DISMISS_PROMO
+            </button>
+          </div>
+        }
+
+        @case ('offlineRetryView') {
+          <div class="state-view error-view">
+            <h4>📡 Offline / Gateway Timeout (<code>offlineRetryView</code>)</h4>
+            <p>
+              Effect <code>NetworkTimeoutError</code> was routed directly via its
+              <code>_tag</code> after 2 exponential retries!
+            </p>
+            <div class="btn-group">
+              <button type="button" class="primary-btn" (click)="store.send('RETRY')">
+                Dispatch RETRY
+              </button>
+              <button type="button" (click)="store.send('CANCEL')">
+                Back to Login (CANCEL)
+              </button>
+            </div>
+          </div>
+        }
+
+        @case ('loggedIn') {
+          <div class="state-view success-view">
+            <h4>✅ Welcome, {{ store.fsmContext().user?.email }} (<code>loggedIn</code>)</h4>
+            <p>Max Projects: {{ store.fsmContext().policy.maxProjects }}</p>
+            <button type="button" (click)="store.send('LOGOUT')">
+              Dispatch LOGOUT
+            </button>
+          </div>
+        }
+      }
+    </section>
+
+    <section class="card inspector-card">
+      <h3>4. Live <code>toMermaid(authFSM)</code> &amp; Context</h3>
+      <pre class="code-box">{{ mermaidDiagram }}</pre>
+    </section>
+  </main>
+</div>
