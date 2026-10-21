@@ -8,10 +8,13 @@ import type {
   AnyTransitionRow,
   AwaitingNode,
   EachNode,
+  EmptyObject,
   ExtractedTransitionRow,
   FinalNode,
   FSMConfig,
   FSMDefinition,
+  ResolveTransitionsContext,
+  ResolveTransitionsMethods,
   StayNode,
   SubMachineRef,
   TransitionRow,
@@ -57,17 +60,30 @@ export function finalState<const TOutcome extends string>(
 
 /**
  * Zero-cost identity macro wrapper (`x => x`) used to extract large transition groups (> 3 rows)
- * into a variable or separate file while preserving full TypeScript context inference
+ * into a variable or separate file while preserving full TypeScript context/method inference
  * and ESLint AST detection.
  */
 export function transitions<
   const TRows extends readonly TransitionRow<any, any, any, any>[],
 >(rows: TRows): TRows;
-export function transitions<TContext, TMethods = any>(
-  rows: readonly TransitionRow<TContext, any, any, TMethods>[],
-): readonly ExtractedTransitionRow<TContext, TMethods>[];
-export function transitions<TContext, TMethods = any>(): <
-  const TRows extends readonly TransitionRow<TContext, any, any, TMethods>[],
+export function transitions<TContractOrContext, TMethods = never>(
+  rows: readonly TransitionRow<
+    ResolveTransitionsContext<TContractOrContext, TMethods>,
+    any,
+    any,
+    ResolveTransitionsMethods<TContractOrContext, TMethods>
+  >[],
+): readonly ExtractedTransitionRow<
+  ResolveTransitionsContext<TContractOrContext, TMethods>,
+  ResolveTransitionsMethods<TContractOrContext, TMethods>
+>[];
+export function transitions<TContractOrContext, TMethods = never>(): <
+  const TRows extends readonly TransitionRow<
+    ResolveTransitionsContext<TContractOrContext, TMethods>,
+    any,
+    any,
+    ResolveTransitionsMethods<TContractOrContext, TMethods>
+  >[],
 >(
   rows: TRows,
 ) => TRows;
@@ -86,11 +102,11 @@ export function transitions(rows?: unknown): unknown {
 export function subMachine<
   TId extends string,
   TInitial extends string,
-  TContext extends object = Record<string, any>,
+  TContext extends object = EmptyObject,
   TEvents extends Record<string, any> = Record<string, any>,
   const TTransitions extends readonly AnyTransitionRow<TContext, any>[] =
     readonly AnyTransitionRow<TContext, any>[],
-  TMethods = Record<string, any>,
+  TMethods = EmptyObject,
 >(
   configOrFSM:
     | FSMDefinition<TId, TInitial, TContext, TEvents, TTransitions, TMethods>
@@ -101,11 +117,22 @@ export function subMachine<
 > {
   const machine = isFSMDefinition(configOrFSM)
     ? configOrFSM
-    : createFSM(configOrFSM);
+    : createFSM<{
+        events: TEvents;
+        context: TContext;
+        methods: TMethods extends object ? TMethods : EmptyObject;
+      }>()(configOrFSM as any);
   return Object.freeze({
     __type: 'subMachine' as const,
     id: machine.id,
-    machine,
+    machine: machine as FSMDefinition<
+      TId,
+      TInitial,
+      TContext,
+      TEvents,
+      TTransitions,
+      TMethods
+    >,
   });
 }
 

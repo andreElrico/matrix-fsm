@@ -13,15 +13,22 @@ import {
 import type {
   AnyFSMDefinition,
   AnyTransitionRow,
+  ContractContext,
+  ContractEvents,
+  ContractMethods,
+  ContractStates,
   EachNode,
+  EmptyObject,
   ExtractStatesFromConfig,
   FSMConfig,
+  FSMContract,
   FSMDefinition,
   ResolveContext,
   SubMachineRef,
   TransitionEvaluation,
   TransitionOptions,
   TransitionRow,
+  ValidateTransitionRows,
 } from './types.js';
 
 export function toSubMachineRef(
@@ -125,27 +132,13 @@ export function resolveTargetId(
   };
 }
 
-type ResolveContextGeneric<TSecond, TThird> = [TSecond] extends [string]
-  ? TThird extends object
-    ? TThird
-    : Record<string, any>
-  : TSecond extends object
-    ? TSecond
-    : Record<string, any>;
-
-type ResolveStatesGeneric<TSecond, TThird> = [TSecond] extends [string]
-  ? TSecond
-  : TThird extends string
-    ? TThird
-    : string;
-
 function buildFSM<
   const TId extends string,
   const TInitial extends string,
   TContext extends object,
   TEvents extends Record<string, any>,
   const TTransitions extends readonly AnyTransitionRow<TContext, any>[],
-  TMethods = Record<string, any>,
+  TMethods = EmptyObject,
 >(
   config: FSMConfig<
     TId,
@@ -315,81 +308,46 @@ function buildFSM<
 }
 
 /**
- * Curried FSM creator (Recommended V1 API):
+ * Curried FSM creator with Named `FSMContract` (Single Canonical API):
  * Zero dummy JSON objects (`events: {} as ...` or `context: { ... }` are not needed).
  * Any machine created with `createFSM` can be mounted as a root machine or used
  * directly as a hierarchical sub-machine in a parent matrix.
  */
 export function createFSM<
-  TEvents extends Record<string, any> = Record<string, any>,
-  TContextOrStates = Record<string, any>,
-  TStates extends string = string,
-  TMethods = Record<string, any>,
+  TContract extends FSMContract = EmptyObject,
 >(): <
   const TId extends string,
-  const TInitial extends ResolveStatesGeneric<TContextOrStates, TStates>,
+  const TInitial extends ContractStates<TContract>,
   const TTransitions extends readonly TransitionRow<
-    ResolveContextGeneric<TContextOrStates, TStates>,
-    Extract<keyof TEvents, string>,
-    ResolveStatesGeneric<TContextOrStates, TStates>,
-    TMethods
+    ContractContext<TContract>,
+    Extract<keyof ContractEvents<TContract>, string>,
+    ContractStates<TContract>,
+    ContractMethods<TContract>
   >[],
 >(
   config: FSMConfig<
     TId,
     TInitial,
-    ResolveContextGeneric<TContextOrStates, TStates>,
-    TEvents,
-    TTransitions,
-    ResolveStatesGeneric<TContextOrStates, TStates>,
-    TMethods
+    ContractContext<TContract>,
+    ContractEvents<TContract>,
+    TTransitions &
+      ValidateTransitionRows<
+        TTransitions,
+        ContractContext<TContract>,
+        Extract<keyof ContractEvents<TContract>, string>,
+        ContractMethods<TContract>
+      >,
+    ContractStates<TContract>,
+    ContractMethods<TContract>
   >,
 ) => FSMDefinition<
   TId,
   TInitial,
-  ResolveContext<
-    ResolveContextGeneric<TContextOrStates, TStates>,
-    TTransitions
-  >,
-  TEvents,
+  ResolveContext<ContractContext<TContract>, TTransitions>,
+  ContractEvents<TContract>,
   TTransitions,
-  TMethods
->;
-
-/**
- * Direct uncurried FSM creator (Backwards-compatible overload).
- */
-export function createFSM<
-  const TId extends string,
-  const TInitial extends string,
-  TContext extends object = Record<string, any>,
-  TEvents extends Record<string, any> = Record<string, any>,
-  const TTransitions extends readonly AnyTransitionRow<TContext, any>[] =
-    readonly AnyTransitionRow<TContext, any>[],
-  TMethods = Record<string, any>,
->(
-  config: FSMConfig<
-    TId,
-    TInitial,
-    TContext,
-    TEvents,
-    TTransitions,
-    string,
-    TMethods
-  >,
-): FSMDefinition<
-  TId,
-  TInitial,
-  ResolveContext<TContext, TTransitions>,
-  TEvents,
-  TTransitions,
-  TMethods
->;
-
-export function createFSM(config?: FSMConfig<any, any, any, any, any, any, any>): any {
-  if (config === undefined) {
-    return (curriedConfig: FSMConfig<any, any, any, any, any, any, any>) =>
-      buildFSM(curriedConfig);
-  }
-  return buildFSM(config);
+  ContractMethods<TContract>
+> {
+  return (curriedConfig: FSMConfig<any, any, any, any, any, any, any>) =>
+    buildFSM(curriedConfig) as any;
 }

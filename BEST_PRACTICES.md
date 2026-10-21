@@ -4,21 +4,23 @@ Dieses Dokument definiert die verbindlichen Design-, Formatierungs- und Architek
 
 ---
 
-## 1. Zero JSON Dummy Objects & Curried `createFSM` (ADR 1 & ADR 2)
+## 1. Zero JSON Dummy Objects & Named `FSMContract` in `createFSM` (ADR 1 & ADR 2)
 
-1. **Keine Dummy-Objekte (`events: {} as ...` oder `context: { ... }`):**
-   - Events, Context, States und Store-Methoden werden als reine TypeScript-Typen in `*.domain.ts` (oder am Dateianfang) definiert und über die **curried** Signatur `createFSM<TEvents, TContext, TStates, TMethods>()({ ... })` übergeben.
-2. **Unified `createFSM` (kein separates `subMachine()`):**
+1. **Keine Dummy-Objekte (`events: {} as ...` oder `context: { ... }`) & Named `FSMContract`:**
+   - Events, Context, States und Store-Methoden werden als reine TypeScript-Typen in `*.domain.ts` (oder am Dateianfang) definiert und über die **curried** Signatur `createFSM<{ events?: ...; states?: ...; context?: ...; methods?: ... }>()({ ... })` übergeben.
+   - Nach dem **Interface Segregation Principle (ISP)** deklariert jede Maschine nur die Facetten (`events`, `states`, `context`, `methods`), die sie tatsächlich direkt benötigt.
+2. **Unified `createFSM` & Entkoppelte Sub-Maschinen (DIP & ISP):**
    - Jede FSM wird einheitlich mit `createFSM` erstellt. Ob eine Maschine eine Root-FSM oder eine Sub-FSM ist, entscheidet sich **ausschließlich durch ihren Einsatzkontext** (z. B. wenn `baristaFSM` in Spalte 1 `FROM`, Spalte 3 `TO` oder in `each('orders', baristaFSM)` einer Eltern-Matrix übergeben wird).
-   - Terminale Ergebnisse einer Sub-FSM werden mit `finalState('OUTCOME_NAME')` markiert und in der Eltern-Matrix in Spalte 2 (`VIA`) gematcht: `[baristaFSM, 'COFFEE_READY', 'coffeeReady']`.
+   - **Strikte Entkopplung:** Sub-Maschinen (`barista.machine.ts`, `barista.domain.ts`, `barista.store.ts`) dürfen **niemals** Typen aus der Eltern-Maschine (`coffee-shop.*`) importieren. `@matrix-fsm/core` aggregiert und schneidet (`UnionToIntersection`) `Context`, `Methods`, `States`, `Events` und `Tasks` aller eingebetteten Sub-Maschinen automatisch rekursiv zur Compile-Zeit.
+   - Terminale Ergebnisse einer Sub-FSM werden mit `finalState('OUTCOME_NAME')` markiert und in der Eltern-Matrix in Spalte 2 (`VIA`) typsicher über `ExtractFinalOutcomes<typeof subFSM>` gematcht (`[baristaFSM, 'COFFEE_READY', 'coffeeReady']`), ohne dass `'COFFEE_READY'` in den Eltern-Events dupliziert werden muss.
 
 ```typescript
-export const baristaFSM = createFSM<
-  BaristaEvents,
-  CoffeeShopContext,
-  BaristaStates,
-  CoffeeShopMethods
->()({
+export const baristaFSM = createFSM<{
+  events: BaristaEvents;
+  states: BaristaStates;
+  context: BaristaContext;
+  methods: BaristaMethods;
+}>()({
   id: 'barista',
   initial: 'ticketQueued',
   // prettier-ignore
@@ -34,14 +36,14 @@ export const baristaFSM = createFSM<
 
 ---
 
-## 2. First-Class SignalStore Alignment: `withState` & `withMethods` (`call`) (ADR 3 & ADR 4)
+## 2. First-Class SignalStore Alignment: `withState`, `withMethods` (`call`) & Composable Features (ADR 3 & ADR 4)
 
 1. **Keine doppelte State-Haltung:**
-   - Der initiale State lebt **nicht** in `*.machine.ts`, sondern wird im SignalStore nativ über `withState<MyContext>(initialContext)` registriert.
+   - Der initiale State lebt **nicht** in `*.machine.ts`, sondern wird im SignalStore nativ über `withState<MyContext>(initialContext)` (bzw. wiederverwendbare `signalStoreFeature`-Helfer wie `withBarista()`) registriert.
    - Dadurch stehen alle State-Slices direkt als erstklassige SignalStore-Signale (`store.selectedDrink()`, `store.customerCard()`, etc.) sowie gebündelt über `store.fsmContext()` bereit.
 2. **Store-Methoden per `{ call: (m) => m._methodName }` statt riesiger Inline-`patch`-Lambdas:**
    - Synchrone State-Mutationen werden in `withMethods((store) => ({ _selectDrink: ... }))` mit `patchState(store, ...)` definiert.
-   - Methoden mit führendem Unterstrich (`_selectDrink`, `_markPaid`) werden von `@ngrx/signals` automatisch nach außen hin privat gehalten, sind aber innerhalb des Stores für `withStateMachine` über `{ call: (m) => m._selectDrink }` typsicher aufrufbar.
+   - Methoden mit führendem Unterstrich (`_selectDrink`, `_markPaid`, `_setBrewError`) werden von `@ngrx/signals` automatisch nach außen hin privat gehalten, werden aber von `withStateMachine` zur Compile-Zeit über alle Eltern- und Sub-Maschinen hinweg erzwungen und über `{ call: (m) => m._selectDrink }` typsicher aufgerufen.
    - **Verboten (Anti-Pattern):** Niemals mehrere Methoden in einem `call`-Selektor aufrufen (`{ call: (m) => { m._a(); m._b(); } }`) oder HTTP-/Async-Side-Effects in `withMethods` verstecken. Asynchrone Operationen gehören ausschließlich in `tasks: { awaitingState: ... }`!
 
 ---
@@ -70,9 +72,10 @@ Das Kernprinzip von `@matrix-fsm` ist die **visuelle 2D-Matrix**. Eine Transitio
 
 ---
 
-## 5. Wann `transitions<TContext>([...])` ausgelagert werden darf (`> 3`-Fälle-Regel)
+## 5. Wann `transitions<...>([...])` ausgelagert werden darf (`> 3`-Fälle-Regel)
 
-- **Verbindliche Schwellenwert-Regel:** Lagere eine `[FROM, VIA]`-Gruppe **nur dann** in eine eigene `transitions([...])`-Variable aus, wenn sie **mehr als 3 Fälle (`> 3` Zeilen, also mindestens 4 Zeilen)** umfasst!
+- **Verbindliche Schwellenwert-Regel:** Lagere eine `[FROM, VIA]`-Gruppe **nur dann** in eine eigene `transitions<...>([...])`-Variable aus, wenn sie **mehr als 3 Fälle (`> 3` Zeilen, also mindestens 4 Zeilen)** umfasst!
+- `transitions` akzeptiert entweder ein `FSMContract`-Objekt (`transitions<{ context: MyContext; methods: MyMethods }>([...])`), eine Maschinen-Referenz (`transitions<typeof myFSM>([...])`) oder direkt den Context-Typ.
 - Bei **2 oder 3 Zeilen** (z. B. ein `guard` + `stay()`-Fallback) **muss** die Gruppe direkt inline in der `transitions`-Matrix stehen (`@matrix-fsm/complete-extracted-groups`, `minRows: 4`).
 
 ---

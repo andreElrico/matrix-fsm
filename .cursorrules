@@ -1,10 +1,11 @@
-# @matrix-fsm Architectural & Formatting Rules (Referencing improvements.md & BEST_PRACTICES.md)
+# @matrix-fsm Architectural & Formatting Rules (Referencing BEST_PRACTICES.md & blueprint.md)
 
-1. **Curried `createFSM` & Unified Sub-Machines (Zero JSON Dummy Objects)**:
-   - Always use curried `createFSM<TEvents, TContext, TStates, TMethods>()({ id, initial, transitions })`. Never define dummy runtime objects like `events: {} as ...` or duplicate `context: { ... }` inside `*.machine.ts`.
-   - All machines (both root machines and sub-machines like `baristaFSM`) are created uniformly with `createFSM`. Pass child FSMs directly in Column 1 (`FROM`), Column 3 (`TO`), or `each(key, childFSM)` and use `finalState('OUTCOME')` for terminal outcomes.
-2. **SignalStore Alignment (`withState` + `withMethods` + `call`)**:
-   - Manage state in `*.store.ts` using `@ngrx/signals` `withState<TContext>(initialState)` and synchronous state updaters in `withMethods((store) => ({ _methodName: ... }))` using `patchState(store, ...)`.
+1. **Curried `createFSM` with Named `FSMContract` & Decoupled Sub-Machines (Zero JSON Dummy Objects)**:
+   - Always use curried `createFSM<{ events?: TEvents; states?: TStates; context?: TContext; methods?: TMethods }>()({ id, initial, transitions })`. Never define dummy runtime objects like `events: {} as ...` or duplicate `context: { ... }` inside `*.machine.ts`.
+   - Sub-machines (like `baristaFSM`) must declare only their own narrow `context`, `methods`, `events`, and `states` (zero imports from parent `*.domain.ts` or `*.machine.ts`).
+   - Pass child FSMs directly in Column 1 (`FROM`), Column 3 (`TO`), or `each(key, childFSM)` and use `finalState('OUTCOME')` for terminal outcomes. Column 2 (`VIA`) automatically infers `ExtractFinalOutcomes<typeof childFSM>` without duplicating child outcomes or events in the parent's `events` type.
+2. **SignalStore Alignment (`withState` + `withMethods` + Composable Features + `call`)**:
+   - Manage state in `*.store.ts` using `@ngrx/signals` `withState<TContext>(initialState)`, composable `signalStoreFeature` slices (e.g. `withBarista()`), and synchronous state updaters in `withMethods((store) => ({ _methodName: ... }))` using `patchState(store, ...)`.
    - Trigger store methods from transitions via `{ call: (m) => m._methodName }`. Never invoke multiple methods in a single transition or put async IO inside `withMethods` (all async work belongs in `tasks`).
 3. **Decoupled Task Execution (`@matrix-fsm/angular` vs `@matrix-fsm/angular/effect`)**:
    - `@matrix-fsm/angular` has 0% hard dependency on `effect` and works natively with `Promise` + `AbortSignal` and RxJS `Observable`.
@@ -13,6 +14,6 @@
    - Every transition row in `transitions: [...]` MUST keep its first 3 columns `[FROM, VIA, TO]` on a single horizontal line, vertically aligned across all rows like a 2D table.
    - Always place `// prettier-ignore` and `/* FROM ... VIA ... TO ... OPTIONS */` above `transitions: [`. (`**/*.machine.ts` is also ignored in `.prettierignore`).
 5. **Transition Extraction Threshold (`> 3` Cases Rule)**:
-   - NEVER extract a `[FROM, VIA]` group into a `transitions<TContext>([...])` variable if it has **3 or fewer rows** (`<= 3` cases). Only extract when a group has **more than 3 rows** (`>= 4` rows, enforced by `@matrix-fsm/complete-extracted-groups`).
+   - NEVER extract a `[FROM, VIA]` group into a `transitions<...>([...])` variable if it has **3 or fewer rows** (`<= 3` cases). Only extract when a group has **more than 3 rows** (`>= 4` rows, enforced by `@matrix-fsm/complete-extracted-groups`).
 6. **8 Matrix Linter Laws (`@matrix-fsm/eslint-plugin`)**:
    - `align-matrix-columns`, `group-contiguous-transitions`, `require-fallback-transition`, `no-unreachable-transitions`, `require-awaiting-handlers`, `awaiting-naming-convention`, `complete-extracted-groups`, `pure-machine-definition`.

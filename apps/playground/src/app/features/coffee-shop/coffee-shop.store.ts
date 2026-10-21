@@ -1,23 +1,24 @@
 /**
- * Layer 3 (Feature): Coffee Shop SignalStore (`withState` + `withMethods` + `withStateMachine`)
+ * Layer 3 (Feature): Coffee Shop SignalStore (`withBarista` + `withState` + `withMethods` + `withStateMachine`)
  * Zero Effect-TS dependency — uses native Promises, AbortSignal, and SignalStore `patchState`.
  */
 
 import { inject, Injectable } from '@angular/core';
 import { patchState, signalStore, withMethods, withState } from '@ngrx/signals';
 import { withStateMachine } from '@matrix-fsm/angular';
+import { createBaristaTasks, withBarista } from './barista.store';
 import { CoffeeShopApiService } from './coffee-shop-api.service';
 import {
   calculateNextStamps,
-  COFFEE_MENU,
+  initialCoffeeShopContext,
   type CoffeeShopContext,
   type CoffeeShopMethods,
-  initialCoffeeShopContext,
 } from './coffee-shop.domain';
 import { coffeeShopFSM } from './coffee-shop.machine';
 
 @Injectable()
 export class CoffeeShopStore extends signalStore(
+  withBarista(),
   withState<CoffeeShopContext>(initialCoffeeShopContext),
   withMethods(
     (store): CoffeeShopMethods => ({
@@ -37,10 +38,6 @@ export class CoffeeShopStore extends signalStore(
       _setMissingDrinkError: () =>
         patchState(store, {
           error: 'Please select a coffee first!',
-        }),
-      _setBrewError: (err) =>
-        patchState(store, {
-          error: err.message,
         }),
       _markPaid: () =>
         patchState(store, {
@@ -65,6 +62,7 @@ export class CoffeeShopStore extends signalStore(
   ),
   withStateMachine(coffeeShopFSM, {
     tasks: (api = inject(CoffeeShopApiService)) => ({
+      ...createBaristaTasks(api),
       checkingLoyalty: async (ctx, signal) => {
         const res = await api.checkLoyalty(
           ctx.customerCard.cardId,
@@ -76,14 +74,6 @@ export class CoffeeShopStore extends signalStore(
           isFreeDrink: res.isFreeDrink,
           customerCard: res.card,
           finalPrice: res.isFreeDrink ? 0 : (ctx.selectedDrink?.price ?? 0),
-          error: null,
-        };
-      },
-      brewingCoffee: async (ctx, signal) => {
-        const drink = ctx.selectedDrink ?? COFFEE_MENU[0];
-        const baristaResult = await api.brewCoffee(drink, signal);
-        return {
-          baristaResult,
           error: null,
         };
       },

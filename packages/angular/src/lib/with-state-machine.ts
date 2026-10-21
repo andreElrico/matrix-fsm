@@ -21,13 +21,13 @@ import {
   type DeepSignalOf,
   type EmptyFeatureResult,
   type SignalStoreFeature,
-  type SignalStoreFeatureResult,
 } from '@ngrx/signals';
 import {
   createMachineInstance,
   invokeCallSelector,
   type AnyFSMDefinition,
   type EachNode,
+  type EmptyObject,
   type ExtractAwaitingNodes,
   type ExtractContext,
   type ExtractEventPayload,
@@ -136,7 +136,26 @@ export type StateLifecycleHooks<TFSM extends AnyFSMDefinition> = Partial<
   Record<ExtractStates<TFSM>, (ctx: Readonly<ExtractContext<TFSM>>) => void>
 >;
 
-export type StateMachineFeatureConfig<TFSM extends AnyFSMDefinition> = {
+export type RequiredStoreMethods<
+  TFSM extends AnyFSMDefinition,
+  TExplicitMethods = EmptyObject,
+> = [keyof Omit<ExtractMethods<TFSM>, keyof TExplicitMethods>] extends [never]
+  ? EmptyFeatureResult['methods']
+  : {
+      [K in keyof Omit<
+        ExtractMethods<TFSM>,
+        keyof TExplicitMethods
+      >]: Omit<ExtractMethods<TFSM>, keyof TExplicitMethods>[K] extends (
+        ...args: any[]
+      ) => any
+        ? Omit<ExtractMethods<TFSM>, keyof TExplicitMethods>[K]
+        : (...args: any[]) => any;
+    };
+
+export type StateMachineFeatureConfig<
+  TFSM extends AnyFSMDefinition,
+  TExplicitMethods extends Record<string, (...args: any[]) => any> = EmptyObject,
+> = {
   /**
    * Reactive Context Mirroring: syncs external Angular Signals (e.g. from Layer 1 global stores)
    * into the FSM context without tight coupling.
@@ -148,8 +167,8 @@ export type StateMachineFeatureConfig<TFSM extends AnyFSMDefinition> = {
    * Optional explicit method dictionary for `{ call: (m) => m.methodName }` if not provided via `withMethods`.
    */
   readonly methods?:
-    | (() => Partial<ExtractMethods<TFSM>> & Record<string, (...args: any[]) => any>)
-    | (Partial<ExtractMethods<TFSM>> & Record<string, (...args: any[]) => any>);
+    | (() => TExplicitMethods & Partial<ExtractMethods<TFSM>>)
+    | (TExplicitMethods & Partial<ExtractMethods<TFSM>>);
   /**
    * Optional pluggable task runner adapter (e.g. `effectTaskAdapter` from `@matrix-fsm/angular/effect`).
    */
@@ -192,13 +211,13 @@ export interface ChildMachineSnapshot<TContext = any> {
   readonly finalOutcome: string | null;
 }
 
+export type AllowedSendEvents<TFSM extends AnyFSMDefinition> =
+  [ExtractEvents<TFSM>] extends [never]
+    ? string
+    : ExtractEvents<TFSM> | 'DONE' | 'ERROR' | 'ALL_DONE';
+
 export type SendFn<TFSM extends AnyFSMDefinition> = <
-  TEvent extends
-    | ExtractEvents<TFSM>
-    | 'DONE'
-    | 'ERROR'
-    | 'ALL_DONE'
-    | (string & {}),
+  TEvent extends AllowedSendEvents<TFSM>,
 >(
   ...args: ExtractEventPayload<TFSM, TEvent> extends void | undefined
     ? [event: TEvent, payload?: unknown]
@@ -268,22 +287,36 @@ function isSubscribable(
  */
 export function withStateMachine<
   TFSM extends AnyFSMDefinition,
-  Input extends SignalStoreFeatureResult = EmptyFeatureResult,
+  TExplicitMethods extends Record<string, (...args: any[]) => any> = EmptyObject,
 >(
   fsm: TFSM,
-  config?: StateMachineFeatureConfig<TFSM>,
+  ...configArgs: [ExtractAwaitingNodes<TFSM>] extends [never]
+    ? [config?: StateMachineFeatureConfig<TFSM, TExplicitMethods>]
+    : [config: StateMachineFeatureConfig<TFSM, TExplicitMethods>]
 ): SignalStoreFeature<
-  Input,
   {
-    state: {};
+    state: EmptyFeatureResult['state'];
+    props: EmptyFeatureResult['props'];
+    methods: RequiredStoreMethods<TFSM, TExplicitMethods>;
+  },
+  {
+    state: EmptyFeatureResult['state'];
     props: StateMachineStoreMembers<TFSM>;
-    methods: {};
+    methods: EmptyFeatureResult['methods'];
   }
 > {
+  const [config] = configArgs;
   type TState = ExtractStates<TFSM>;
   type TContext = ExtractContext<TFSM>;
 
-  return withProps<Input, StateMachineStoreMembers<TFSM>>(
+  return withProps<
+    {
+      state: EmptyFeatureResult['state'];
+      props: EmptyFeatureResult['props'];
+      methods: RequiredStoreMethods<TFSM, TExplicitMethods>;
+    },
+    StateMachineStoreMembers<TFSM>
+  >(
     (store): StateMachineStoreMembers<TFSM> => {
       const syncedSignals = (resolveFactoryOrValue(config?.syncContext) ??
         {}) as Record<string, Signal<unknown> | undefined>;

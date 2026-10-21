@@ -37,7 +37,7 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
       const { messages } = verifyRule(
         'group-contiguous-transitions',
         `
-        createFSM<AuthEvents, AuthContext, AuthStates>()({
+        createFSM<{ events: AuthEvents; context: AuthContext; states: AuthStates }>()({
           id: 'auth',
           initial: 'loginView',
           transitions: [
@@ -54,7 +54,7 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
     it('reports and auto-fixes non-contiguous [FROM, VIA] transition rows in curried createFSM', () => {
       const { messages, fixed } = verifyRule(
         'group-contiguous-transitions',
-        `createFSM<AuthEvents, AuthContext, AuthStates>()({
+        `createFSM<{ events: AuthEvents; context: AuthContext; states: AuthStates }>()({
   id: 'auth',
   initial: 'loginView',
   transitions: [

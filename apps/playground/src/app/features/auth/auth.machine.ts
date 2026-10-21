@@ -53,12 +53,12 @@ export type AuthMethods = {
 const hasValidInput = (ctx: AuthContext) => ctx.credentials.email.includes('@');
 const shouldShowPromo = (ctx: AuthContext) => ctx.policy.showUpsellAds;
 
-export const authFSM = createFSM<
-  AuthEvents,
-  AuthContext,
-  AuthStates,
-  AuthMethods
->()({
+export const authFSM = createFSM<{
+  events: AuthEvents;
+  context: AuthContext;
+  states: AuthStates;
+  methods: AuthMethods;
+}>()({
   id: 'auth',
   initial: 'loginView',
   // prettier-ignore

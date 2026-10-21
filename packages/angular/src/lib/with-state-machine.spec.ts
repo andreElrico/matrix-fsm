@@ -77,12 +77,12 @@ const hasValidInput = (ctx: AuthContext) => ctx.credentials.email.includes('@');
 const shouldShowPromo = (ctx: AuthContext) =>
   ctx.user !== null && ctx.policy.showUpsellAds;
 
-const authFSM = createFSM<
-  AuthEvents,
-  AuthContext,
-  AuthStates,
-  AuthMethods
->()({
+const authFSM = createFSM<{
+  events: AuthEvents;
+  context: AuthContext;
+  states: AuthStates;
+  methods: AuthMethods;
+}>()({
   id: 'auth',
   initial: 'loginView',
   transitions: [
@@ -346,7 +346,10 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
   });
 
   it('orchestrates parallel child machines via each() and dispatches ALL_DONE when all finish', () => {
-    const itemFSM = createFSM<{ COMPLETE: void }, { done: boolean }>()({
+    const itemFSM = createFSM<{
+      events: { COMPLETE: void };
+      context: { done: boolean };
+    }>()({
       id: 'uploadItem',
       initial: 'uploading',
       transitions: [
@@ -359,7 +362,10 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       ],
     });
 
-    const batchFSM = createFSM<{ START_BATCH: void }, { fileIds: string[] }>()({
+    const batchFSM = createFSM<{
+      events: { START_BATCH: void };
+      context: { fileIds: string[] };
+    }>()({
       id: 'batchUpload',
       initial: 'idle',
       transitions: [
@@ -388,5 +394,81 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     expect(store.fsmState()).toBe('completed');
     expect(store.childMachines()['fileIds']).toHaveLength(2);
     expect(store.childMachines()['fileIds'].every((c) => c.isDone)).toBe(true);
+  });
+
+  it('enforces recursive sub-machine tasks and methods at compile time on the host SignalStore', () => {
+    interface SubCtx {
+      brewed: boolean;
+    }
+    interface SubMethods {
+      _setBrewError(err: Error): void;
+    }
+    const subBarista = createFSM<{
+      events: { START_BREWING: void };
+      states: 'ticketQueued' | 'brewingCoffee' | 'maintenance';
+      context: SubCtx;
+      methods: SubMethods;
+    }>()({
+      id: 'barista',
+      initial: 'ticketQueued',
+      transitions: [
+        ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee')],
+        ['brewingCoffee', 'DONE',          finalState('COFFEE_READY')],
+        ['brewingCoffee', 'ERROR',         'maintenance',             { call: (m) => m._setBrewError }],
+      ],
+    });
+
+    interface ShopCtx {
+      paid: boolean;
+    }
+    interface ShopMethods {
+      _markPaid(): void;
+    }
+    const shopFSM = createFSM<{
+      events: { ORDER: void; PAY: void };
+      states: 'browsing' | 'checkingLoyalty' | 'awaitingPayment' | 'ready';
+      context: ShopCtx;
+      methods: ShopMethods;
+    }>()({
+      id: 'shop',
+      initial: 'browsing',
+      transitions: [
+        ['browsing',        'ORDER',        awaiting('checkingLoyalty')],
+        ['checkingLoyalty', 'DONE',         'awaitingPayment'],
+        ['checkingLoyalty', 'ERROR',        'browsing'],
+        ['awaitingPayment', 'PAY',          subBarista,                 { call: (m) => m._markPaid }],
+        [subBarista,        'COFFEE_READY', 'ready'],
+      ],
+    });
+
+    // 1. Omitting `brewingCoffee` (sub-machine task) triggers a TypeScript compile error:
+    signalStore(
+      withState<ShopCtx & SubCtx>({ paid: false, brewed: false }),
+      withMethods((): ShopMethods & SubMethods => ({
+        _markPaid: () => undefined,
+        _setBrewError: () => undefined,
+      })),
+      withStateMachine(shopFSM, {
+        // @ts-expect-error - Property 'brewingCoffee' is missing in tasks
+        tasks: () => ({
+          checkingLoyalty: async () => ({ paid: true }),
+        }),
+      }),
+    );
+
+    // 2. Omitting `_setBrewError` (sub-machine method) from store methods triggers a TypeScript compile error:
+    signalStore(
+      withState<ShopCtx & SubCtx>({ paid: false, brewed: false }),
+      withMethods((): ShopMethods => ({
+        _markPaid: () => undefined,
+      })),
+      // @ts-expect-error - Property '_setBrewError' is missing in store methods
+      withStateMachine(shopFSM, {
+        tasks: () => ({
+          checkingLoyalty: async () => ({ paid: true }),
+          brewingCoffee: async () => ({ brewed: true }),
+        }),
+      }),
+    );
   });
 });

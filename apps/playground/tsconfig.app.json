@@ -7,5 +7,15 @@
   },
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.spec.ts", "src/**/*.test.ts"],
-  "references": []
+  "references": [
+    {
+      "path": "../../packages/eslint-plugin"
+    },
+    {
+      "path": "../../packages/angular"
+    },
+    {
+      "path": "../../packages/core"
+    }
+  ]
 }

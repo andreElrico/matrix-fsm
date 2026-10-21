@@ -1,12 +1,11 @@
 /**
- * Layer 3 (Feature): Pure Coffee Shop & Barista Sub-FSM (coffee-shop.machine.ts)
- * 0% Angular DI, Zero JSON Dummy Objects, Unified createFSM, Strict Matrix Alignment
+ * Layer 3 (Feature): Pure Coffee Shop Root FSM (coffee-shop.machine.ts)
+ * 0% Angular DI, Zero JSON Dummy Objects, Named FSMContract, Strict Matrix Alignment
  */
 
-import { awaiting, createFSM, finalState, stay } from '@matrix-fsm/core';
+import { awaiting, createFSM, stay } from '@matrix-fsm/core';
+import { baristaFSM } from './barista.machine';
 import type {
-  BaristaEvents,
-  BaristaStates,
   CoffeeShopContext,
   CoffeeShopEvents,
   CoffeeShopMethods,
@@ -17,35 +16,14 @@ import type {
 const hasSelectedDrink = (ctx: CoffeeShopContext) => ctx.selectedDrink !== null;
 const isFreeDrink = (ctx: CoffeeShopContext) => ctx.isFreeDrink === true;
 
-/**
- * Hierarchical Sub-FSM for the Barista Station.
- * Created with the exact same `createFSM` as any root machine — becomes a sub-machine
- * purely by usage in the parent `coffeeShopFSM` matrix!
- */
-export const baristaFSM = createFSM<
-  BaristaEvents,
-  CoffeeShopContext,
-  BaristaStates,
-  CoffeeShopMethods
->()({
-  id: 'barista',
-  initial: 'ticketQueued',
-  // prettier-ignore
-  transitions: [
-    /* FROM                 VIA               TO                            OPTIONS */
-    ['ticketQueued',        'START_BREWING',  awaiting('brewingCoffee')],
-    ['brewingCoffee',       'DONE',           finalState('COFFEE_READY')],
-    ['brewingCoffee',       'ERROR',          'machineMaintenance',         { call: (m) => m._setBrewError }],
-    ['machineMaintenance',  'RETRY_BREW',     awaiting('brewingCoffee')],
-  ],
-});
+export { baristaFSM };
 
-export const coffeeShopFSM = createFSM<
-  CoffeeShopEvents,
-  CoffeeShopContext,
-  CoffeeShopStates,
-  CoffeeShopMethods
->()({
+export const coffeeShopFSM = createFSM<{
+  events: CoffeeShopEvents;
+  states: CoffeeShopStates;
+  context: CoffeeShopContext;
+  methods: CoffeeShopMethods;
+}>()({
   id: 'coffeeShop',
   initial: 'customerBrowsing',
   // prettier-ignore
@@ -59,7 +37,7 @@ export const coffeeShopFSM = createFSM<
     // Cashier checks loyalty card via API call:
     ['checkingLoyalty',     'CANCEL',                   'customerBrowsing'],
     ['checkingLoyalty',     'LoyaltyApiTimeoutError',   'loyaltyErrorView'],
-    ['checkingLoyalty',     'ERROR',                    'customerBrowsing',           { call: (m) => m._setBrewError }],
+    ['checkingLoyalty',     'ERROR',                    'customerBrowsing'],
     // 10th drink is FREE -> bypass payment and route directly into Barista Sub-FSM!
     ['checkingLoyalty',     'DONE',                     baristaFSM,                   { guard: isFreeDrink }],
     ['checkingLoyalty',     'DONE',                     'awaitingPayment'],

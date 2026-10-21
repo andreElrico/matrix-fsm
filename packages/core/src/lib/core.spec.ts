@@ -10,7 +10,9 @@ import {
   transitions,
   type ExtractAwaitingNodes,
   type ExtractContext,
+  type ExtractEvents,
   type ExtractFinalOutcomes,
+  type ExtractMethods,
   type ExtractStates,
   type RequiredTasksMap,
 } from '../index.js';
@@ -49,12 +51,12 @@ interface AuthMethods {
 const hasValidInput = (ctx: AuthContext) => ctx.credentials.email.includes('@');
 const shouldShowPromo = (ctx: AuthContext) => ctx.policy.showUpsellAds;
 
-const authFSM = createFSM<
-  AuthEvents,
-  AuthContext,
-  AuthStates,
-  AuthMethods
->()({
+const authFSM = createFSM<{
+  events: AuthEvents;
+  context: AuthContext;
+  states: AuthStates;
+  methods: AuthMethods;
+}>()({
   id: 'auth',
   initial: 'loginView',
   transitions: [
@@ -143,22 +145,36 @@ describe('@matrix-fsm/core', () => {
     expect(instance.state()).toBe('loggedIn');
   });
 
-  it('supports unified createFSM as a sub-machine directly in parent matrix and extracts finalState outcomes', () => {
-    // Notice: paymentSub is created with unified createFSM (no subMachine() wrapper!)
-    const paymentSub = createFSM<{ PAY: void }, { cardValid: boolean }>()({
+  it('supports unified createFSM as a sub-machine, infers finalState outcomes without parent event duplication, and rejects typo outcomes', () => {
+    // Sub-machine that omits `context` in FSMContract and only declares events, states, and methods
+    interface PaymentMethods {
+      _onPaymentError(err: Error): void;
+    }
+    const paymentSub = createFSM<{
+      events: { PAY: void };
+      states: 'enteringCard' | 'chargingCard';
+      methods: PaymentMethods;
+    }>()({
       id: 'payment',
       initial: 'enteringCard',
       transitions: [
         ['enteringCard',  'PAY',    awaiting('chargingCard')],
         ['chargingCard',  'DONE',   finalState('PAID')],
-        ['chargingCard',  'ERROR',  'enteringCard'],
+        ['chargingCard',  'ERROR',  'enteringCard',          { call: (m) => m._onPaymentError }],
       ],
     });
 
     type PaymentOutcomes = ExtractFinalOutcomes<typeof paymentSub>;
     expectTypeOf<PaymentOutcomes>().toEqualTypeOf<'PAID'>();
+    // Omitted context defaults safely to `Record<never, never>` without index signature pollution:
+    expectTypeOf<ExtractContext<typeof paymentSub>>().toEqualTypeOf<
+      Record<never, never>
+    >();
 
-    const uploadChild = createFSM<{ START: void }, { progress: number }>()({
+    const uploadChild = createFSM<{
+      events: { START: void };
+      context: { progress: number };
+    }>()({
       id: 'uploadItem',
       initial: 'queued',
       transitions: [
@@ -168,23 +184,59 @@ describe('@matrix-fsm/core', () => {
       ],
     });
 
-    const checkoutFSM = createFSM<
-      { UPLOAD_FILES: void; CANCEL: void; PAID: void },
-      { files: string[] }
-    >()({
+    interface CheckoutContext {
+      files: string[];
+    }
+    interface CheckoutMethods {
+      _resetCart(): void;
+    }
+
+    // Notice: 'PAID' is NOT in Checkout events — it is inferred directly from `paymentSub`'s `finalState('PAID')`!
+    const checkoutFSM = createFSM<{
+      events: { UPLOAD_FILES: void; CANCEL: void };
+      context: CheckoutContext;
+      methods: CheckoutMethods;
+    }>()({
       id: 'checkout',
       initial: 'cart',
       transitions: [
         ['cart',                     'UPLOAD_FILES',  each('files', uploadChild)],
         [each('files', uploadChild), 'ALL_DONE',      paymentSub],
-        [paymentSub,                 'CANCEL',        'cart'],
+        [paymentSub,                 'CANCEL',        'cart',          { call: (m) => m._resetCart }],
         [paymentSub,                 'PAID',          'orderConfirmed'],
         [paymentSub,                 'DONE',          'orderConfirmed'],
       ],
     });
 
+    // Verify recursive intersection of Context, Methods, States, and Events:
+    expectTypeOf<ExtractContext<typeof checkoutFSM>>().toEqualTypeOf<
+      CheckoutContext & { progress: number }
+    >();
+    expectTypeOf<ExtractMethods<typeof checkoutFSM>>().toEqualTypeOf<
+      CheckoutMethods & PaymentMethods
+    >();
+    expectTypeOf<ExtractEvents<typeof checkoutFSM>>().toEqualTypeOf<
+      'UPLOAD_FILES' | 'CANCEL' | 'PAY' | 'START'
+    >();
+    expectTypeOf<'enteringCard'>().toExtend<ExtractStates<typeof checkoutFSM>>();
+    expectTypeOf<'cart'>().toExtend<ExtractStates<typeof checkoutFSM>>();
+
+    // Compile-time check: invalid outcome on sub-machine row triggers @ts-expect-error
+    createFSM<{
+      events: { CANCEL: void };
+      context: CheckoutContext;
+    }>()({
+      id: 'invalidOutcomeTest',
+      initial: 'cart',
+      transitions: [
+        ['cart',     'CANCEL',       paymentSub],
+        // @ts-expect-error - 'TYPO_OUTCOME' is not a finalState of paymentSub or an event of parent
+        [paymentSub, 'TYPO_OUTCOME', 'orderConfirmed'],
+      ],
+    });
+
     const instance = createMachineInstance(checkoutFSM, {
-      initialContext: { files: ['f1', 'f2'] },
+      initialContext: { files: ['f1', 'f2'], progress: 0 },
     });
     expect(instance.state()).toBe('cart');
 
@@ -217,15 +269,26 @@ describe('@matrix-fsm/core', () => {
     expect(mermaid).toContain('each_files');
   });
 
-  it('supports extracted transitions() groups (> 3 rows) with curried createFSM', () => {
-    const handleOrderSubmit = transitions<AuthContext>([
+  it('supports extracted transitions() groups (> 3 rows) with FSMContract, machine typeof, or context', () => {
+    const handleOrderSubmit = transitions<{
+      context: AuthContext;
+      methods: AuthMethods;
+    }>([
       ['loginView', 'LOGIN', 'ssoRedirect',             { guard: hasValidInput }],
       ['loginView', 'LOGIN', 'mfaChallenge',            { guard: shouldShowPromo }],
       ['loginView', 'LOGIN', awaiting('authenticating'), { guard: hasValidInput }],
-      ['loginView', 'LOGIN', stay()],
+      ['loginView', 'LOGIN', stay(),                    { call: (m) => m._setInvalidEmail }],
+    ]);
+
+    const handleByMachineType = transitions<typeof authFSM>([
+      ['loginView', 'LOGIN', 'ssoRedirect',             { guard: hasValidInput }],
+      ['loginView', 'LOGIN', 'mfaChallenge',            { guard: shouldShowPromo }],
+      ['loginView', 'LOGIN', awaiting('authenticating'), { guard: hasValidInput }],
+      ['loginView', 'LOGIN', stay(),                    { call: (m) => m._setInvalidEmail }],
     ]);
 
     expect(handleOrderSubmit).toHaveLength(4);
+    expect(handleByMachineType).toHaveLength(4);
   });
 
   it('generates Mermaid diagram with ⚡ awaiting badges and stay labels', () => {

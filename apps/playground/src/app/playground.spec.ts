@@ -141,34 +141,34 @@ describe('@matrix-fsm/playground - Angular DI & Blueprint E2E Verification', () 
     expect(store.fsmContext().user?.email).toBe('admin@matrix-fsm.dev');
   });
 
-  it('verifies coffee-shop.machine.ts passes all 7 AST rules of @matrix-fsm/eslint-plugin with zero errors', () => {
-    const machinePath = path.resolve(
-      import.meta.dirname,
-      './features/coffee-shop/coffee-shop.machine.ts',
-    );
-    const machineSource = fs.readFileSync(machinePath, 'utf-8');
-
+  it('verifies coffee-shop.machine.ts and barista.machine.ts pass all 8 AST rules of @matrix-fsm/eslint-plugin with zero errors', () => {
     const linter = new Linter({ configType: 'flat' });
-    const messages = linter.verify(
-      machineSource,
-      [
-        {
-          files: ['**/*.ts'],
-          languageOptions: {
-            parser: tseslint.parser as Linter.Parser,
-            ecmaVersion: 'latest',
-            sourceType: 'module',
-          },
-          plugins: {
-            '@matrix-fsm': matrixFsmConfigs.recommended.plugins['@matrix-fsm'] as unknown as ESLint.Plugin,
-          },
-          rules: matrixFsmConfigs.recommended.rules as Linter.RulesRecord,
+    const lintConfig = [
+      {
+        files: ['**/*.ts'],
+        languageOptions: {
+          parser: tseslint.parser as Linter.Parser,
+          ecmaVersion: 'latest',
+          sourceType: 'module' as const,
         },
-      ],
-      { filename: 'coffee-shop.machine.ts' },
-    );
+        plugins: {
+          '@matrix-fsm': matrixFsmConfigs.recommended.plugins['@matrix-fsm'] as unknown as ESLint.Plugin,
+        },
+        rules: matrixFsmConfigs.recommended.rules as Linter.RulesRecord,
+      },
+    ];
 
-    expect(messages).toEqual([]);
+    for (const file of ['coffee-shop.machine.ts', 'barista.machine.ts']) {
+      const machinePath = path.resolve(
+        import.meta.dirname,
+        `./features/coffee-shop/${file}`,
+      );
+      const machineSource = fs.readFileSync(machinePath, 'utf-8');
+      const messages = linter.verify(machineSource, lintConfig, {
+        filename: file,
+      });
+      expect(messages).toEqual([]);
+    }
   });
 
   it('executes regular Coffee Shop flow: order -> card check -> customer pays -> barista brews -> customer drinks', async () => {

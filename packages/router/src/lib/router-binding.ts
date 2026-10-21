@@ -7,6 +7,7 @@ import {
   signalStoreFeature,
   type,
   withProps,
+  type EmptyFeatureResult,
   type SignalStoreFeature,
 } from '@ngrx/signals';
 import type {
@@ -52,21 +53,21 @@ export function withRouteMachine<TFSM extends AnyFSMDefinition>(
   mapping: RouteStateMapping<TFSM>,
 ): SignalStoreFeature<
   {
-    state: {};
+    state: EmptyFeatureResult['state'];
     props: StateMachineStoreMembers<TFSM>;
-    methods: {};
+    methods: EmptyFeatureResult['methods'];
   },
   {
-    state: {};
+    state: EmptyFeatureResult['state'];
     props: RouteBoundStoreMembers;
-    methods: {};
+    methods: EmptyFeatureResult['methods'];
   }
 > {
   return signalStoreFeature(
     type<{
-      state: {};
+      state: EmptyFeatureResult['state'];
       props: StateMachineStoreMembers<TFSM>;
-      methods: {};
+      methods: EmptyFeatureResult['methods'];
     }>(),
     withProps((store): RouteBoundStoreMembers => {
       const fsmUrl = computed<string | null>(() => {

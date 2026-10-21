@@ -55,9 +55,12 @@
         @for (slot of stampSlots; track slot) {
           <div
             class="stamp-slot"
+            role="button"
+            tabindex="0"
             [class.filled]="slot <= store.fsmContext().customerCard.currentStamps"
             [class.tenth]="slot === 10"
             (click)="setStampCount(slot === 10 ? 9 : slot)"
+            (keydown.enter)="setStampCount(slot === 10 ? 9 : slot)"
             [title]="slot === 10 ? '10th Drink (FREE!)' : 'Stamp ' + slot"
           >
             @if (slot === 10) {
@@ -140,8 +143,11 @@
               @for (item of menu; track item.id) {
                 <div
                   class="menu-item"
+                  role="button"
+                  tabindex="0"
                   [class.selected]="store.fsmContext().selectedDrink?.id === item.id"
                   (click)="selectDrink(item)"
+                  (keydown.enter)="selectDrink(item)"
                 >
                   <div class="menu-item-emoji">{{ item.emoji }}</div>
                   <div class="menu-item-details">
