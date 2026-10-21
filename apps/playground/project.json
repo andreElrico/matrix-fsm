@@ -6,6 +6,12 @@
   "sourceRoot": "apps/playground/src",
   "tags": ["type:feature", "scope:playground"],
   "targets": {
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --noEmit -p apps/playground/tsconfig.app.json"
+      }
+    },
     "build": {
       "executor": "@angular/build:application",
       "outputs": ["{options.outputPath}"],

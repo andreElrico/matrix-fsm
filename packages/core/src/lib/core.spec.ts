@@ -8,6 +8,8 @@ import {
   stay,
   toMermaid,
   transitions,
+  type ExtractAllContext,
+  type ExtractAllMethods,
   type ExtractAwaitingNodes,
   type ExtractContext,
   type ExtractEvents,
@@ -204,15 +206,17 @@ describe('@matrix-fsm/core', () => {
         [each('files', uploadChild), 'ALL_DONE',      paymentSub],
         [paymentSub,                 'CANCEL',        'cart',          { call: (m) => m._resetCart }],
         [paymentSub,                 'PAID',          'orderConfirmed'],
-        [paymentSub,                 'DONE',          'orderConfirmed'],
       ],
     });
 
-    // Verify recursive intersection of Context, Methods, States, and Events:
-    expectTypeOf<ExtractContext<typeof checkoutFSM>>().toEqualTypeOf<
+    // Verify Scope Invariant encapsulation: ExtractContext & ExtractMethods only extract own machine facets
+    // while ExtractAllContext & ExtractAllMethods provide the full tree intersection when needed:
+    expectTypeOf<ExtractContext<typeof checkoutFSM>>().toEqualTypeOf<CheckoutContext>();
+    expectTypeOf<ExtractMethods<typeof checkoutFSM>>().toEqualTypeOf<CheckoutMethods>();
+    expectTypeOf<ExtractAllContext<typeof checkoutFSM>>().toEqualTypeOf<
       CheckoutContext & { progress: number }
     >();
-    expectTypeOf<ExtractMethods<typeof checkoutFSM>>().toEqualTypeOf<
+    expectTypeOf<ExtractAllMethods<typeof checkoutFSM>>().toEqualTypeOf<
       CheckoutMethods & PaymentMethods
     >();
     expectTypeOf<ExtractEvents<typeof checkoutFSM>>().toEqualTypeOf<

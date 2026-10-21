@@ -53,8 +53,7 @@ export const coffeeShopFSM = createFSM<{
 
     // Barista Sub-FSM outcomes & group-interrupt:
     [baristaFSM,            'CANCEL',                   'customerBrowsing'],
-    [baristaFSM,            'COFFEE_READY',             'coffeeReady'],
-    [baristaFSM,            'DONE',                     'coffeeReady'],
+    [baristaFSM,            'COFFEE_READY',             'coffeeReady',                { call: (m) => m._handleDrinkPrepared }],
 
     // Customer picks up coffee from counter and drinks it:
     ['coffeeReady',         'TAKE_COFFEE',              'drinkingCoffee'],

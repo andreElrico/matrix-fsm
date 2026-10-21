@@ -9,13 +9,13 @@
   "exclude": ["src/**/*.spec.ts", "src/**/*.test.ts"],
   "references": [
     {
-      "path": "../../packages/eslint-plugin"
+      "path": "../../packages/eslint-plugin/tsconfig.lib.json"
     },
     {
-      "path": "../../packages/angular"
+      "path": "../../packages/angular/tsconfig.lib.json"
     },
     {
-      "path": "../../packages/core"
+      "path": "../../packages/core/tsconfig.lib.json"
     }
   ]
 }

@@ -15,6 +15,7 @@ export interface MachineInstance<TFSM extends AnyFSMDefinition = AnyFSMDefinitio
   readonly id: string;
   readonly state: () => ExtractStates<TFSM>;
   readonly subState: () => string | null;
+  readonly subContext: () => Readonly<Record<string, unknown>> | null;
   readonly context: () => Readonly<ExtractContext<TFSM>>;
   readonly isPending: () => boolean;
   readonly isDone: () => boolean;
@@ -114,15 +115,20 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
 
   const isDone = (): boolean => doneOutcome !== null;
 
-  const enterSubMachineIfNeeded = (subRef: SubMachineRef<any, any> | null) => {
+  const enterSubMachineIfNeeded = (
+    subRef: SubMachineRef<any, any> | null,
+    inputMapped?: Record<string, unknown> | null,
+  ) => {
     if (!subRef) {
       return;
     }
     activeSubRef = subRef;
     activeSubMachine = createMachineInstance(subRef.machine, {
-      initialContext: readEffectiveContext(),
+      initialContext: {
+        ...readEffectiveContext(),
+        ...(inputMapped ?? {}),
+      },
       methods: hooks?.methods,
-      getContext: () => readEffectiveContext(),
       onPatch: (patch) => {
         currentContext = { ...currentContext, ...patch };
         hooks?.onPatch?.(patch);
@@ -220,7 +226,10 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     }
 
     if (evaluation.enteredSubMachine) {
-      enterSubMachineIfNeeded(evaluation.enteredSubMachine);
+      enterSubMachineIfNeeded(
+        evaluation.enteredSubMachine,
+        evaluation.inputMapped,
+      );
     }
 
     hooks?.onEnter?.[currentState]?.(readEffectiveContext());
@@ -253,6 +262,10 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     id: fsm.id,
     state: () => currentState,
     subState: () => (activeSubMachine ? activeSubMachine.state() : null),
+    subContext: () =>
+      activeSubMachine
+        ? (activeSubMachine.context() as Readonly<Record<string, unknown>>)
+        : null,
     context: () => readEffectiveContext(),
     isPending,
     isDone,

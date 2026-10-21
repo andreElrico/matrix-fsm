@@ -13,9 +13,11 @@ import { AuthFeatureStore } from './features/auth/auth.store';
 import {
   COFFEE_MENU,
 } from './features/coffee-shop/coffee-shop.domain';
-import { coffeeShopFSM } from './features/coffee-shop/coffee-shop.machine';
+import { coffeeShopFSM, baristaFSM } from './features/coffee-shop/coffee-shop.machine';
 import { CoffeeShopStore } from './features/coffee-shop/coffee-shop.store';
+import { BaristaStore } from './features/coffee-shop/barista.store';
 import { CoffeeShopApiService } from './features/coffee-shop/coffee-shop-api.service';
+import { provideStateMachine } from '@matrix-fsm/angular';
 
 function setupPlaygroundInjector() {
   const injector = Injector.create({
@@ -176,6 +178,7 @@ describe('@matrix-fsm/playground - Angular DI & Blueprint E2E Verification', () 
       providers: [
         { provide: CoffeeShopApiService, useClass: CoffeeShopApiService, deps: [] },
         { provide: CoffeeShopStore, useClass: CoffeeShopStore, deps: [] },
+        provideStateMachine(baristaFSM, BaristaStore),
       ],
     });
     const store = runInInjectionContext(injector, () => injector.get(CoffeeShopStore));
@@ -238,6 +241,7 @@ describe('@matrix-fsm/playground - Angular DI & Blueprint E2E Verification', () 
       providers: [
         { provide: CoffeeShopApiService, useClass: CoffeeShopApiService, deps: [] },
         { provide: CoffeeShopStore, useClass: CoffeeShopStore, deps: [] },
+        provideStateMachine(baristaFSM, BaristaStore),
       ],
     });
     const store = runInInjectionContext(injector, () => injector.get(CoffeeShopStore));
@@ -279,6 +283,7 @@ describe('@matrix-fsm/playground - Angular DI & Blueprint E2E Verification', () 
       providers: [
         { provide: CoffeeShopApiService, useClass: CoffeeShopApiService, deps: [] },
         { provide: CoffeeShopStore, useClass: CoffeeShopStore, deps: [] },
+        provideStateMachine(baristaFSM, BaristaStore),
       ],
     });
     const api = injector.get(CoffeeShopApiService);

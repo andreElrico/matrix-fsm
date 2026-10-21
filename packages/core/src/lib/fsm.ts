@@ -15,7 +15,9 @@ import type {
   AnyTransitionRow,
   ContractContext,
   ContractEvents,
+  ContractInput,
   ContractMethods,
+  ContractOutput,
   ContractStates,
   EachNode,
   EmptyObject,
@@ -247,6 +249,10 @@ function buildFSM<
         ? ({ ...currentContext, ...patchApplied } as EffectiveContext)
         : ({ ...currentContext } as EffectiveContext);
 
+      const inputMapped = options?.input
+        ? (options.input(nextContext, payload) as Record<string, unknown>)
+        : null;
+
       const resolved = resolveTargetId(to, currentState);
       const isTargetAwaiting =
         resolved.isAwaiting || awaitingStates.has(resolved.stateName);
@@ -264,6 +270,7 @@ function buildFSM<
         nextContext,
         patchApplied,
         callSelector: options?.call ?? null,
+        inputMapped,
         stayed: resolved.stayed,
         isAwaiting: resolved.stayed
           ? awaitingStates.has(currentState)
@@ -283,6 +290,7 @@ function buildFSM<
       nextContext: { ...currentContext } as EffectiveContext,
       patchApplied: null,
       callSelector: null,
+      inputMapped: null,
       stayed: false,
       isAwaiting: awaitingStates.has(currentState),
       finalOutcome: null,
@@ -346,7 +354,9 @@ export function createFSM<
   ResolveContext<ContractContext<TContract>, TTransitions>,
   ContractEvents<TContract>,
   TTransitions,
-  ContractMethods<TContract>
+  ContractMethods<TContract>,
+  ContractInput<TContract>,
+  ContractOutput<TContract>
 > {
   return (curriedConfig: FSMConfig<any, any, any, any, any, any, any>) =>
     buildFSM(curriedConfig) as any;

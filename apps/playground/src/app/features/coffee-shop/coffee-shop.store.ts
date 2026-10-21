@@ -1,12 +1,12 @@
 /**
- * Layer 3 (Feature): Coffee Shop SignalStore (`withBarista` + `withState` + `withMethods` + `withStateMachine`)
- * Zero Effect-TS dependency — uses native Promises, AbortSignal, and SignalStore `patchState`.
+ * Layer 3 (Feature): Coffee Shop SignalStore (`withState` + `withMethods` + `withStateMachine`)
+ * Zero Barista Leakage — 100% focused on CoffeeShop domain logic!
+ * Sub-machine (`baristaFSM`) is coupled ONLY in `coffee-shop.machine.ts`.
  */
 
 import { inject, Injectable } from '@angular/core';
 import { patchState, signalStore, withMethods, withState } from '@ngrx/signals';
 import { withStateMachine } from '@matrix-fsm/angular';
-import { createBaristaTasks, withBarista } from './barista.store';
 import { CoffeeShopApiService } from './coffee-shop-api.service';
 import {
   calculateNextStamps,
@@ -18,7 +18,6 @@ import { coffeeShopFSM } from './coffee-shop.machine';
 
 @Injectable()
 export class CoffeeShopStore extends signalStore(
-  withBarista(),
   withState<CoffeeShopContext>(initialCoffeeShopContext),
   withMethods(
     (store): CoffeeShopMethods => ({
@@ -43,6 +42,11 @@ export class CoffeeShopStore extends signalStore(
         patchState(store, {
           isPaid: true,
         }),
+      _handleDrinkPrepared: (payload) =>
+        patchState(store, {
+          preparedCup: payload?.baristaResult ?? null,
+          baristaResult: payload?.baristaResult ?? null,
+        }),
       _finishCoffee: () =>
         patchState(store, {
           customerCard: {
@@ -55,6 +59,7 @@ export class CoffeeShopStore extends signalStore(
           selectedDrink: null,
           isPaid: false,
           isFreeDrink: false,
+          preparedCup: null,
           baristaResult: null,
           error: null,
         }),
@@ -62,7 +67,6 @@ export class CoffeeShopStore extends signalStore(
   ),
   withStateMachine(coffeeShopFSM, {
     tasks: (api = inject(CoffeeShopApiService)) => ({
-      ...createBaristaTasks(api),
       checkingLoyalty: async (ctx, signal) => {
         const res = await api.checkLoyalty(
           ctx.customerCard.cardId,

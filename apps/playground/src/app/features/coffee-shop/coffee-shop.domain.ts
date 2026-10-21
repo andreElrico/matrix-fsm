@@ -23,6 +23,8 @@ export interface CoffeeShopContext {
   isFreeDrink: boolean;
   finalPrice: number;
   isPaid: boolean;
+  preparedCup: BrewResult | null;
+  baristaResult?: BrewResult | null;
   error: string | null;
 }
 
@@ -36,6 +38,8 @@ export const initialCoffeeShopContext: CoffeeShopContext = {
   isFreeDrink: false,
   finalPrice: 0,
   isPaid: false,
+  preparedCup: null,
+  baristaResult: null,
   error: null,
 };
 
@@ -65,6 +69,7 @@ export type CoffeeShopMethods = {
   _setStamps(payload: { stamps: number }): void;
   _setMissingDrinkError(): void;
   _markPaid(): void;
+  _handleDrinkPrepared(payload: { baristaResult?: BrewResult | null }): void;
   _finishCoffee(): void;
 };
 

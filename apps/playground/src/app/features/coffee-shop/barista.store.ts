@@ -1,57 +1,74 @@
 /**
- * Layer 3 (Feature): Composable Barista SignalStore Feature (barista.store.ts)
+ * Layer 3 (Feature): Self-Contained Barista Store & Feature (barista.store.ts)
  * Encapsulates Barista state (`BaristaContext`), methods (`BaristaMethods`), and tasks (`brewingCoffee`).
+ * Can be injected standalone (`BaristaStore`), provided via `provideStateMachine(baristaFSM, BaristaStore)`,
+ * or auto-discovered when `baristaFSM` transitions are entered!
  */
 
-import { inject } from '@angular/core';
+import { inject, Injectable } from '@angular/core';
 import {
   patchState,
+  signalStore,
   signalStoreFeature,
   withMethods,
   withState,
-  type WritableStateSource,
 } from '@ngrx/signals';
-import type { TasksMapFor } from '@matrix-fsm/angular';
+import { withMachineTasks, withStateMachine } from '@matrix-fsm/angular';
 import { CoffeeShopApiService } from './coffee-shop-api.service';
 import {
   COFFEE_MENU,
   initialBaristaContext,
   type BaristaContext,
   type BaristaMethods,
-  type BrewResult,
 } from './barista.domain';
-import type { baristaFSM } from './barista.machine';
+import { baristaFSM } from './barista.machine';
 
+@Injectable({ providedIn: 'root' })
+export class BaristaStore extends signalStore(
+  withStateMachine(baristaFSM, {
+    state: initialBaristaContext,
+    methods: (store): BaristaMethods => ({
+      _setBrewError: (err) =>
+        patchState(store, {
+          error: err.message,
+        }),
+    }),
+    tasks: (api = inject(CoffeeShopApiService)) => ({
+      brewingCoffee: async (ctx, signal) => {
+        const drink = ctx.selectedDrink ?? COFFEE_MENU[0];
+        const baristaResult = await api.brewCoffee(drink, signal);
+        return {
+          baristaResult,
+          error: null,
+        };
+      },
+    }),
+  }),
+) {}
+
+/**
+ * Optional composable SignalStore feature for teams that prefer explicit feature composition.
+ */
 export function withBarista() {
   return signalStoreFeature(
-    withState<{ baristaResult: BrewResult | null }>({
-      baristaResult: initialBaristaContext.baristaResult,
-    }),
+    withState<BaristaContext>(initialBaristaContext),
     withMethods(
       (store): BaristaMethods => ({
         _setBrewError: (err) =>
-          patchState(
-            store as unknown as WritableStateSource<Pick<BaristaContext, 'error'>>,
-            {
-              error: err.message,
-            },
-          ),
+          patchState(store, {
+            error: err.message,
+          }),
       }),
     ),
+    withMachineTasks(baristaFSM, (api = inject(CoffeeShopApiService)) => ({
+      brewingCoffee: async (ctx, signal) => {
+        const drink = ctx.selectedDrink ?? COFFEE_MENU[0];
+        const baristaResult = await api.brewCoffee(drink, signal);
+        return {
+          baristaResult,
+          error: null,
+        };
+      },
+    })),
   );
-}
-
-export function createBaristaTasks(
-  api = inject(CoffeeShopApiService),
-): TasksMapFor<typeof baristaFSM> {
-  return {
-    brewingCoffee: async (ctx, signal) => {
-      const drink = ctx.selectedDrink ?? COFFEE_MENU[0];
-      const baristaResult = await api.brewCoffee(drink, signal);
-      return {
-        baristaResult,
-        error: null,
-      };
-    },
-  };
 }

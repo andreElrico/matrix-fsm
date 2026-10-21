@@ -14,7 +14,12 @@ import {
   finalState,
   stay,
 } from '@matrix-fsm/core';
-import { withStateMachine, type Subscribable } from '../index.js';
+import {
+  provideStateMachine,
+  withMachineTasks,
+  withStateMachine,
+  type Subscribable,
+} from '../index.js';
 import { effectTaskAdapter } from '../effect/index.js';
 
 class NetworkTimeoutError extends Data.TaggedError('NetworkTimeoutError')<{
@@ -396,9 +401,11 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     expect(store.childMachines()['fileIds'].every((c) => c.isDone)).toBe(true);
   });
 
-  it('enforces recursive sub-machine tasks and methods at compile time on the host SignalStore', () => {
+  it('supports zero-leakage sub-machine stores (BaristaStore), explicit input/output contracts, and composable withMachineTasks', async () => {
     interface SubCtx {
+      selectedDrink: string | null;
       brewed: boolean;
+      error: string | null;
     }
     interface SubMethods {
       _setBrewError(err: Error): void;
@@ -419,13 +426,16 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     });
 
     interface ShopCtx {
+      drinkOrder: string;
       paid: boolean;
+      cupReady: boolean;
     }
     interface ShopMethods {
       _markPaid(): void;
+      _onCupReady(output: SubCtx): void;
     }
     const shopFSM = createFSM<{
-      events: { ORDER: void; PAY: void };
+      events: { ORDER: void; PAY: void; CANCEL: void };
       states: 'browsing' | 'checkingLoyalty' | 'awaitingPayment' | 'ready';
       context: ShopCtx;
       methods: ShopMethods;
@@ -436,39 +446,206 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         ['browsing',        'ORDER',        awaiting('checkingLoyalty')],
         ['checkingLoyalty', 'DONE',         'awaitingPayment'],
         ['checkingLoyalty', 'ERROR',        'browsing'],
-        ['awaitingPayment', 'PAY',          subBarista,                 { call: (m) => m._markPaid }],
-        [subBarista,        'COFFEE_READY', 'ready'],
+        [
+          'awaitingPayment',
+          'PAY',
+          subBarista,
+          {
+            call: (m) => m._markPaid,
+            input: (ctx) => ({ selectedDrink: ctx.drinkOrder }),
+          },
+        ],
+        [subBarista,        'CANCEL',       'browsing'],
+        [subBarista,        'COFFEE_READY', 'ready',                   { call: (m) => m._onCupReady }],
       ],
     });
 
-    // 1. Omitting `brewingCoffee` (sub-machine task) triggers a TypeScript compile error:
+    // Self-contained child store (Zero leakage into parent!)
+    const BaristaStore = signalStore(
+      withStateMachine(subBarista, {
+        state: {
+          selectedDrink: null,
+          brewed: false,
+          error: null,
+        },
+        methods: (store): SubMethods => ({
+          _setBrewError: (err) => patchState(store, { error: err.message }),
+        }),
+        tasks: () => ({
+          brewingCoffee: async (ctx) => ({
+            brewed: ctx.selectedDrink === 'Flat White',
+          }),
+        }),
+      }),
+    );
+    expect(BaristaStore).toBeDefined();
+
+    // 1. Omitting parent's OWN task (`checkingLoyalty`) or OWN method (`_markPaid`) triggers a compile error:
     signalStore(
-      withState<ShopCtx & SubCtx>({ paid: false, brewed: false }),
-      withMethods((): ShopMethods & SubMethods => ({
+      withState<ShopCtx>({ drinkOrder: 'Flat White', paid: false, cupReady: false }),
+      withMethods((): ShopMethods => ({
         _markPaid: () => undefined,
-        _setBrewError: () => undefined,
+        _onCupReady: () => undefined,
+      })),
+      // @ts-expect-error - Own awaiting state 'checkingLoyalty' is missing in tasks
+      withStateMachine(shopFSM, {
+        tasks: () => ({}),
+      }),
+    );
+
+    signalStore(
+      withState<ShopCtx>({ drinkOrder: 'Flat White', paid: false, cupReady: false }),
+      // @ts-expect-error - Own method '_onCupReady' is missing in store methods
+      withMethods(() => ({
+        _markPaid: () => undefined,
       })),
       withStateMachine(shopFSM, {
-        // @ts-expect-error - Property 'brewingCoffee' is missing in tasks
         tasks: () => ({
-          checkingLoyalty: async () => ({ paid: true }),
+          checkingLoyalty: async () => ({ paid: false }),
         }),
       }),
     );
 
-    // 2. Omitting `_setBrewError` (sub-machine method) from store methods triggers a TypeScript compile error:
-    signalStore(
-      withState<ShopCtx & SubCtx>({ paid: false, brewed: false }),
-      withMethods((): ShopMethods => ({
-        _markPaid: () => undefined,
+    // 2. Zero-Leakage Parent Store: ZERO Barista state, ZERO Barista methods, ZERO Barista tasks!
+    const ZeroLeakageShopStore = signalStore(
+      withState<ShopCtx>({ drinkOrder: 'Flat White', paid: false, cupReady: false }),
+      withMethods((store): ShopMethods => ({
+        _markPaid: () => patchState(store, { paid: true }),
+        _onCupReady: (output) => patchState(store, { cupReady: output.brewed }),
       })),
-      // @ts-expect-error - Property '_setBrewError' is missing in store methods
       withStateMachine(shopFSM, {
-        tasks: () => ({
-          checkingLoyalty: async () => ({ paid: true }),
-          brewingCoffee: async () => ({ brewed: true }),
-        }),
+        tasks: {
+          checkingLoyalty: () => undefined,
+        },
       }),
     );
+
+    const shop = new ZeroLeakageShopStore();
+    shop.send('ORDER');
+    expect(shop.fsmState()).toBe('awaitingPayment');
+    shop.send('PAY');
+    expect(shop.fsmState()).toBe('barista');
+    expect(shop.fsmSubState()).toBe('ticketQueued');
+    // Child received mapped input `{ selectedDrink: 'Flat White' }`!
+    expect(shop.fsmSubContext()?.['selectedDrink']).toBe('Flat White');
+
+    shop.send('START_BREWING');
+    await new Promise((r) => setTimeout(r, 15));
+    expect(shop.fsmState()).toBe('ready');
+    expect(shop.cupReady()).toBe(true);
+
+    // 3. Also supports composable `withMachineTasks(subBarista)` on a combined store:
+    const ComposedStore = signalStore(
+      withState<ShopCtx & SubCtx>({
+        drinkOrder: 'Espresso',
+        paid: false,
+        cupReady: false,
+        selectedDrink: null,
+        brewed: false,
+        error: null,
+      }),
+      withMethods((store): ShopMethods & SubMethods => ({
+        _markPaid: () => patchState(store, { paid: true }),
+        _onCupReady: (output) => patchState(store, { cupReady: output.brewed }),
+        _setBrewError: () => undefined,
+      })),
+      withMachineTasks(subBarista, {
+        brewingCoffee: () => ({ brewed: true }),
+      }),
+      withStateMachine(shopFSM, {
+        tasks: {
+          checkingLoyalty: () => undefined,
+        },
+      }),
+    );
+    const composed = new ComposedStore();
+    composed.send('ORDER');
+    expect(composed.fsmState()).toBe('awaitingPayment');
+    composed.send('PAY');
+    expect(composed.fsmState()).toBe('barista');
+    composed.send('START_BREWING');
+    expect(composed.brewed()).toBe(true);
+    expect(composed.fsmState()).toBe('ready');
+  });
+
+  it('executes async awaiting() tasks and nested sub-machines inside 1:N each() pools and aborts all on parent interrupt', async () => {
+    let abortedCount = 0;
+
+    const orderItemFSM = createFSM<{
+      events: { BREW: void };
+      states: 'queued' | 'brewingItem';
+      context: { id: string; drink: string; done: boolean };
+    }>()({
+      id: 'orderItem',
+      initial: 'queued',
+      transitions: [
+        ['queued',      'BREW',  awaiting('brewingItem')],
+        ['brewingItem', 'DONE',  finalState('ORDER_READY')],
+        ['brewingItem', 'ERROR', 'queued'],
+      ],
+    });
+
+    provideStateMachine(orderItemFSM, {
+      state: { id: '', drink: '', done: false },
+      tasks: {
+        brewingItem: (_ctx, signal) =>
+          new Promise((resolve) => {
+            const timer = setTimeout(() => resolve({ done: true }), 25);
+            signal.addEventListener('abort', () => {
+              clearTimeout(timer);
+              abortedCount++;
+            });
+          }),
+      },
+    });
+
+    const shopPoolFSM = createFSM<{
+      events: { DISPATCH_ALL: void; CANCEL_ALL: void };
+      context: { orders: Array<{ id: string; drink: string; done: boolean }> };
+    }>()({
+      id: 'shopPool',
+      initial: 'idle',
+      transitions: [
+        ['idle',                       'DISPATCH_ALL', each('orders', orderItemFSM)],
+        [each('orders', orderItemFSM), 'CANCEL_ALL',   'idle'],
+        [each('orders', orderItemFSM), 'ALL_DONE',     'allFulfilled'],
+      ],
+    });
+
+    const PoolStore = signalStore(
+      withState({
+        orders: [
+          { id: 'ord-1', drink: 'Espresso', done: false },
+          { id: 'ord-2', drink: 'Cappuccino', done: false },
+        ],
+      }),
+      withStateMachine(shopPoolFSM),
+    );
+
+    const store = new PoolStore();
+    store.send('DISPATCH_ALL');
+    expect(store.fsmState()).toBe('each:orders');
+    expect(store.childMachines()['orders']).toHaveLength(2);
+
+    // Trigger async brewing on both concurrent items
+    store.sendToChild('orders', 'ord-1', 'BREW');
+    store.sendToChild('orders', 'ord-2', 'BREW');
+    expect(store.isPending()).toBe(true);
+
+    // Wait for both async child tasks to finish -> automatically dispatches ALL_DONE!
+    await new Promise((r) => setTimeout(r, 45));
+    expect(store.fsmState()).toBe('allFulfilled');
+    expect(store.isPending()).toBe(false);
+
+    // Now test parent group-interrupt on active 1:N pool (`CANCEL_ALL`)
+    store.reset();
+    store.send('DISPATCH_ALL');
+    store.sendToChild('orders', 'ord-1', 'BREW');
+    store.sendToChild('orders', 'ord-2', 'BREW');
+    expect(store.isPending()).toBe(true);
+
+    store.send('CANCEL_ALL');
+    expect(store.fsmState()).toBe('idle');
+    expect(abortedCount).toBe(2);
   });
 });

@@ -22,7 +22,23 @@ export interface FSMContract {
   readonly states?: string;
   readonly context?: object;
   readonly methods?: object;
+  readonly input?: object;
+  readonly output?: any;
 }
+
+export type ContractInput<T extends FSMContract> =
+  T extends { readonly input: infer I extends object }
+    ? [I] extends [never]
+      ? EmptyObject
+      : I
+    : EmptyObject;
+
+export type ContractOutput<T extends FSMContract> =
+  T extends { readonly output: infer O }
+    ? [O] extends [never]
+      ? unknown
+      : O
+    : unknown;
 
 export type ContractEvents<T extends FSMContract> =
   T extends { readonly events: infer E extends Record<string, any> }
@@ -112,13 +128,16 @@ export type TransitionCallSelector<
 > =
   | ((
       methods: TMethods,
-    ) => (payload: TPayload, ctx: ReadonlyContext<TContext>) => void)
+    ) =>
+      | ((payload: TPayload, ctx: ReadonlyContext<TContext>) => void)
+      | undefined)
   | Extract<keyof TMethods, string>;
 
 export interface TransitionOptions<
   TContext = any,
   TPayload = any,
   TMethods = any,
+  TInput = any,
 > {
   readonly guard?: (
     ctx: ReadonlyContext<TContext>,
@@ -136,6 +155,14 @@ export interface TransitionOptions<
     ctx: ReadonlyContext<TContext>,
     eventPayload: TPayload,
   ) => PatchResult<TContext>;
+  /**
+   * Explicit input mapper when transitioning into a sub-machine or `each()` pool.
+   * Example: `{ input: (ctx) => ({ selectedDrink: ctx.selectedDrink }) }`
+   */
+  readonly input?: (
+    ctx: ReadonlyContext<TContext>,
+    eventPayload: TPayload,
+  ) => TInput;
 }
 
 export type TransitionFrom<
@@ -237,6 +264,7 @@ export interface TransitionEvaluation<
   readonly nextContext: TContext;
   readonly patchApplied: Partial<TContext> | null;
   readonly callSelector: TransitionCallSelector<TMethods, any, TContext> | null;
+  readonly inputMapped: Record<string, unknown> | null;
   readonly stayed: boolean;
   readonly isAwaiting: boolean;
   readonly finalOutcome: string | null;
@@ -253,6 +281,8 @@ export interface FSMDefinition<
   TTransitions extends readonly AnyTransitionRow<any, any>[] =
     readonly AnyTransitionRow<any, any>[],
   TMethods = any,
+  TInput extends object = EmptyObject,
+  TOutput = unknown,
 > {
   readonly id: TId;
   readonly initial: TInitial;
@@ -260,6 +290,8 @@ export interface FSMDefinition<
   readonly events: TEvents;
   readonly transitions: TTransitions;
   readonly __methodsBrand?: TMethods;
+  readonly __inputBrand?: TInput;
+  readonly __outputBrand?: TOutput;
   readonly states: ReadonlySet<string>;
   readonly awaitingStates: ReadonlySet<string>;
   readonly subMachines: ReadonlyMap<string, SubMachineRef<any, any>>;
@@ -277,7 +309,16 @@ export interface FSMDefinition<
   hasTransitionFor(state: string, event: string): boolean;
 }
 
-export type AnyFSMDefinition = FSMDefinition<any, any, any, any, any, any>;
+export type AnyFSMDefinition = FSMDefinition<
+  any,
+  any,
+  any,
+  any,
+  any,
+  any,
+  any,
+  any
+>;
 
 // ============================================================================
 // Type-Level Extractors & Validators
@@ -288,7 +329,7 @@ type UnwrapReadonly<T> = T extends Readonly<infer U> ? U : T;
 type IsConcreteFSM<T> =
   [0] extends [1 & T]
     ? false
-    : T extends FSMDefinition<infer TId, any, any, any, any, any>
+    : T extends FSMDefinition<infer TId, any, any, any, any, any, any, any>
       ? [0] extends [1 & TId]
         ? false
         : string extends TId
@@ -385,7 +426,12 @@ export type ValidateTransitionRows<
     ? IsSubMachineNode<From> extends true
       ? readonly [
           from: From,
-          via: ExtractFinalOutcomes<From> | BuiltInLifecycleEvent | TEvent,
+          via:
+            | ([ExtractFinalOutcomes<From>] extends [never]
+                ? 'DONE'
+                : ExtractFinalOutcomes<From>)
+            | 'ERROR'
+            | TEvent,
           to: To,
           ...(Rest extends readonly [any]
             ? [options?: TransitionOptions<TContext, any, TMethods>]
@@ -404,7 +450,7 @@ type ExtractFromTarget<T> = T extends ExtractedMarker<any, any>
       : T extends SubMachineRef<any, infer Id>
         ? Id
         : IsConcreteFSM<T> extends true
-          ? T extends FSMDefinition<infer Id, any, any, any, any, any>
+          ? T extends FSMDefinition<infer Id, any, any, any, any, any, any, any>
             ? Id
             : never
           : T extends EachNode<infer K, any>
@@ -420,7 +466,7 @@ type ExtractFromSource<T> = T extends ExtractedMarker<any, any>
   : T extends SubMachineRef<any, infer Id>
     ? Id
     : IsConcreteFSM<T> extends true
-      ? T extends FSMDefinition<infer Id, any, any, any, any, any>
+      ? T extends FSMDefinition<infer Id, any, any, any, any, any, any, any>
         ? Id
         : never
       : T extends EachNode<infer K, any>
@@ -465,7 +511,7 @@ type ExtractDirectSubMachinesFromTransitions<
     : never;
 
 type ExtractDirectSubMachines<TFSM> =
-  TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any>
+  TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any, any, any>
     ? ExtractDirectSubMachinesFromTransitions<TTransitions>
     : never;
 
@@ -480,6 +526,8 @@ export type ExtractOwnStates<TFSM> =
     any,
     any,
     infer TTransitions,
+    any,
+    any,
     any
   >
     ? ExtractStatesFromConfig<TInitial, TTransitions>
@@ -490,12 +538,24 @@ export type ExtractStates<TFSM> =
   | ExtractOwnStates<ExtractAllSubMachines<TFSM>>;
 
 export type ExtractOwnContext<TFSM> =
-  TFSM extends FSMDefinition<any, any, infer TContext, any, any, any>
+  TFSM extends FSMDefinition<any, any, infer TContext, any, any, any, any, any>
     ? TContext
     : EmptyObject;
 
+/**
+ * Extracts the machine's own encapsulated context (Scope Invariant: child contexts do NOT leak into parent!).
+ */
 export type ExtractContext<TFSM> =
-  TFSM extends FSMDefinition<any, any, infer TContext, any, any, any>
+  TFSM extends FSMDefinition<any, any, infer TContext, any, any, any, any, any>
+    ? [0] extends [1 & TContext]
+      ? Record<string, any>
+      : IsDefaultOrUntypedObject<TContext> extends true
+        ? EmptyObject
+        : TContext
+    : EmptyObject;
+
+export type ExtractAllContext<TFSM> =
+  TFSM extends FSMDefinition<any, any, infer TContext, any, any, any, any, any>
     ? [0] extends [1 & TContext]
       ? Record<string, any>
       : MergeExtractedObjects<
@@ -505,17 +565,39 @@ export type ExtractContext<TFSM> =
     : EmptyObject;
 
 export type ExtractOwnMethods<TFSM> =
-  TFSM extends FSMDefinition<any, any, any, any, any, infer TMethods>
+  TFSM extends FSMDefinition<any, any, any, any, any, infer TMethods, any, any>
     ? TMethods
     : EmptyObject;
 
+/**
+ * Extracts the machine's own methods (Scope Invariant: child private methods do NOT leak into parent!).
+ */
 export type ExtractMethods<TFSM> = MergeExtractedObjects<
+  ExtractOwnMethods<TFSM>,
+  EmptyObject
+>;
+
+export type ExtractAllMethods<TFSM> = MergeExtractedObjects<
   ExtractOwnMethods<TFSM> | ExtractOwnMethods<ExtractAllSubMachines<TFSM>>,
   EmptyObject
 >;
 
+export type ExtractInput<TFSM> =
+  TFSM extends FSMDefinition<any, any, any, any, any, any, infer TInput, any>
+    ? TInput
+    : TFSM extends SubMachineRef<infer Inner, any>
+      ? ExtractInput<Inner>
+      : EmptyObject;
+
+export type ExtractOutput<TFSM> =
+  TFSM extends FSMDefinition<any, any, any, any, any, any, any, infer TOutput>
+    ? TOutput
+    : TFSM extends SubMachineRef<infer Inner, any>
+      ? ExtractOutput<Inner>
+      : unknown;
+
 export type ExtractEventsMap<TFSM> =
-  TFSM extends FSMDefinition<any, any, any, infer TEvents, any, any>
+  TFSM extends FSMDefinition<any, any, any, infer TEvents, any, any, any, any>
     ? TEvents
     : Record<string, any>;
 
@@ -531,7 +613,7 @@ export type ExtractFinalOutcomesFromTransitions<
  * Extracts all `finalState('OUTCOME_NAME')` string literals from an FSM definition.
  */
 export type ExtractFinalOutcomes<TFSM> =
-  TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any>
+  TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any, any, any>
     ? ExtractFinalOutcomesFromTransitions<TTransitions>
     : TFSM extends SubMachineRef<infer Inner, any>
       ? ExtractFinalOutcomes<Inner>
@@ -557,6 +639,8 @@ type ExtractShallowEvents<TFSM> =
     any,
     infer TEvents,
     infer TTransitions,
+    any,
+    any,
     any
   >
     ?
@@ -573,7 +657,7 @@ export type ExtractEvents<TFSM> =
 export type ExtractEventPayload<
   TFSM,
   TEvent extends string,
-> = TFSM extends FSMDefinition<any, any, any, infer TEvents, any, any>
+> = TFSM extends FSMDefinition<any, any, any, infer TEvents, any, any, any, any>
   ? TEvent extends keyof TEvents
     ? string extends keyof TEvents
       ? unknown
@@ -581,7 +665,7 @@ export type ExtractEventPayload<
     : ExtractAllSubMachines<TFSM> extends infer Sub
       ? [Sub] extends [never]
         ? unknown
-        : Sub extends FSMDefinition<any, any, any, infer TSubEvents, any, any>
+        : Sub extends FSMDefinition<any, any, any, infer TSubEvents, any, any, any, any>
           ? TEvent extends keyof TSubEvents
             ? string extends keyof TSubEvents
               ? unknown
@@ -619,7 +703,7 @@ type ExtractDoneSourceStates<
         ? never
         : From extends SubMachineRef<any, any>
           ? never
-          : From extends FSMDefinition<any, any, any, any, any, any>
+          : From extends FSMDefinition<any, any, any, any, any, any, any, any>
             ? never
             : From extends EachNode<any, any>
               ? never
@@ -638,9 +722,11 @@ type ExtractShallowAwaitingFromTransitions<
   | ExtractDoneSourceStates<TTransitions>;
 
 type ExtractShallowAwaiting<TFSM> =
-  TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any>
+  TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any, any, any>
     ? ExtractShallowAwaitingFromTransitions<TTransitions>
     : never;
+
+export type ExtractOwnAwaitingNodes<TFSM> = ExtractShallowAwaiting<TFSM>;
 
 export type ExtractAwaitingNodesFromTransitions<
   TTransitions extends readonly AnyTransitionRow<any, any>[],
@@ -653,14 +739,14 @@ export type ExtractAwaitingNodes<TFSM> =
   | ExtractShallowAwaiting<ExtractAllSubMachines<TFSM>>;
 
 /**
- * Enforces that every `awaiting('x')` state in the FSM has a corresponding
+ * Enforces that every own `awaiting('x')` state in the FSM has a corresponding
  * task implementation in the SignalStore's `tasks` block.
  */
 export type RequiredTasksMap<
   TFSM extends AnyFSMDefinition,
   TTaskResult = Promise<Partial<ExtractContext<TFSM>> | void>,
 > = {
-  readonly [K in ExtractAwaitingNodes<TFSM>]: (
+  readonly [K in ExtractOwnAwaitingNodes<TFSM>]: (
     ctx: Readonly<ExtractContext<TFSM>>,
     signal: AbortSignal,
   ) => TTaskResult;
@@ -680,7 +766,7 @@ type IsFSMContractShape<T> =
           ? true
           : Exclude<
                 keyof T,
-                'events' | 'states' | 'context' | 'methods'
+                'events' | 'states' | 'context' | 'methods' | 'input' | 'output'
               > extends never
             ? true
             : false
