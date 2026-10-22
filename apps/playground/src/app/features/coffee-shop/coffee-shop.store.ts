@@ -8,6 +8,7 @@ import { inject, Injectable } from '@angular/core';
 import { patchState, signalStore, withMethods, withState } from '@ngrx/signals';
 import { withStateMachine } from '@matrix-fsm/angular';
 import { CoffeeShopApiService } from './coffee-shop-api.service';
+import { initialBaristaContext } from './barista.domain';
 import {
   calculateNextStamps,
   initialCoffeeShopContext,
@@ -49,6 +50,8 @@ export class CoffeeShopStore extends signalStore(
         }),
       _finishCoffee: () =>
         patchState(store, {
+          ...initialCoffeeShopContext,
+          ...initialBaristaContext,
           customerCard: {
             ...store.customerCard(),
             currentStamps: calculateNextStamps(
@@ -56,12 +59,6 @@ export class CoffeeShopStore extends signalStore(
               store.isFreeDrink(),
             ),
           },
-          selectedDrink: null,
-          isPaid: false,
-          isFreeDrink: false,
-          preparedCup: null,
-          baristaResult: null,
-          error: null,
         }),
     }),
   ),

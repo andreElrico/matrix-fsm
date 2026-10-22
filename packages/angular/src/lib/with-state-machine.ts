@@ -1171,6 +1171,7 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
       ) {
         // Parent group-interrupt (e.g. [baristaFSM, 'CANCEL', 'customerBrowsing'])
         // Atomically aborts child tasks & destroys child instance in the exact same tick!
+        onExitHooks[childCurrentState]?.(getEffectiveContext());
         destroyActiveSubNode();
       } else if (subHasTransition) {
         activeSubNode.send(event, payload);
@@ -1178,6 +1179,7 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
         onNotifyParent?.();
         return;
       } else if (parentHasInterrupt) {
+        onExitHooks[childCurrentState]?.(getEffectiveContext());
         destroyActiveSubNode();
       } else {
         return;

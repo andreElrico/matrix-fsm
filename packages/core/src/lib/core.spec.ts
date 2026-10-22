@@ -224,6 +224,9 @@ describe('@matrix-fsm/core', () => {
     >();
     expectTypeOf<'enteringCard'>().toExtend<ExtractStates<typeof checkoutFSM>>();
     expectTypeOf<'cart'>().toExtend<ExtractStates<typeof checkoutFSM>>();
+    expectTypeOf<'PAID'>().not.toExtend<ExtractStates<typeof paymentSub>>();
+    expectTypeOf<'PAID'>().not.toExtend<ExtractStates<typeof checkoutFSM>>();
+    expect(paymentSub.states.has('PAID')).toBe(false);
 
     // Compile-time check: invalid outcome on sub-machine row triggers @ts-expect-error
     createFSM<{
@@ -239,8 +242,12 @@ describe('@matrix-fsm/core', () => {
       ],
     });
 
+    const exitedStates: string[] = [];
     const instance = createMachineInstance(checkoutFSM, {
       initialContext: { files: ['f1', 'f2'], progress: 0 },
+      onExit: {
+        enteringCard: () => exitedStates.push('enteringCard'),
+      },
     });
     expect(instance.state()).toBe('cart');
 
@@ -251,10 +258,11 @@ describe('@matrix-fsm/core', () => {
     expect(instance.state()).toBe('payment');
     expect(instance.subState()).toBe('enteringCard');
 
-    // Group interrupt from parent
+    // Group interrupt from parent invokes onExit for active sub-state
     instance.send('CANCEL');
     expect(instance.state()).toBe('cart');
     expect(instance.subState()).toBeNull();
+    expect(exitedStates).toContain('enteringCard');
 
     // Re-enter and complete payment
     instance.send('UPLOAD_FILES');

@@ -255,6 +255,20 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
       expect(messages[0].messageId).toBe('tooFewRowsToExtract');
     });
 
+    it('inspects curried transitions<{ context: C; methods: M }>()([...]) calls across rules', () => {
+      const { messages } = verifyRule(
+        'complete-extracted-groups',
+        `
+        const handleLogin = transitions<{ context: AuthContext; methods: AuthMethods }>()([
+          ['loginView', 'LOGIN', awaiting('authenticating'), { guard: isValid }],
+          ['loginView', 'LOGIN', stay()],
+        ]);
+        `,
+      );
+      expect(messages).toHaveLength(1);
+      expect(messages[0].messageId).toBe('tooFewRowsToExtract');
+    });
+
     it('reports error when [FROM, VIA] is split between transitions([...]) variable and parent createFSM', () => {
       const { messages } = verifyRule(
         'complete-extracted-groups',

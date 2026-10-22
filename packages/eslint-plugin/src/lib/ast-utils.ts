@@ -144,22 +144,26 @@ export function parseTransitionRow(
   };
 }
 
+export function unwrapCallee(node: TSESTree.Node): TSESTree.Node {
+  let current = node;
+  while (
+    current.type === AST_NODE_TYPES.CallExpression ||
+    current.type === AST_NODE_TYPES.TSInstantiationExpression
+  ) {
+    current =
+      current.type === AST_NODE_TYPES.CallExpression
+        ? current.callee
+        : current.expression;
+  }
+  return current;
+}
+
 function isMachineCreatorCallee(node: TSESTree.CallExpression): boolean {
-  if (
-    node.callee.type === AST_NODE_TYPES.Identifier &&
-    (node.callee.name === 'createFSM' || node.callee.name === 'subMachine')
-  ) {
-    return true;
-  }
-  if (
-    node.callee.type === AST_NODE_TYPES.CallExpression &&
-    node.callee.callee.type === AST_NODE_TYPES.Identifier &&
-    (node.callee.callee.name === 'createFSM' ||
-      node.callee.callee.name === 'subMachine')
-  ) {
-    return true;
-  }
-  return false;
+  const callee = unwrapCallee(node.callee);
+  return (
+    callee.type === AST_NODE_TYPES.Identifier &&
+    (callee.name === 'createFSM' || callee.name === 'subMachine')
+  );
 }
 
 /**
@@ -192,23 +196,16 @@ export function getMachineTransitionsArray(
 }
 
 /**
- * Checks if a CallExpression is `transitions([...])` or `transitions<T>()([...])`
- * and returns its ArrayExpression argument.
+ * Checks if a CallExpression is `transitions([...])`, `transitions<T>([...])`,
+ * or curried `transitions<T>()([...])` and returns its ArrayExpression argument.
  */
 export function getExtractedTransitionsArray(
   node: TSESTree.CallExpression,
 ): TSESTree.ArrayExpression | null {
+  const callee = unwrapCallee(node.callee);
   if (
-    node.callee.type === AST_NODE_TYPES.Identifier &&
-    node.callee.name === 'transitions' &&
-    node.arguments[0]?.type === AST_NODE_TYPES.ArrayExpression
-  ) {
-    return node.arguments[0];
-  }
-  if (
-    node.callee.type === AST_NODE_TYPES.CallExpression &&
-    node.callee.callee.type === AST_NODE_TYPES.Identifier &&
-    node.callee.callee.name === 'transitions' &&
+    callee.type === AST_NODE_TYPES.Identifier &&
+    callee.name === 'transitions' &&
     node.arguments[0]?.type === AST_NODE_TYPES.ArrayExpression
   ) {
     return node.arguments[0];

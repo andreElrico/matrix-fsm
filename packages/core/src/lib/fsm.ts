@@ -191,7 +191,7 @@ function buildFSM<
       states.add(to.state);
       awaitingStates.add(to.state);
     } else if (isFinalNode(to)) {
-      states.add(to.outcome);
+      // FinalNode is a terminal outcome marker, not a resting state in `states`
     } else if (toSub) {
       states.add(toSub.id);
       subMachines.set(toSub.id, toSub);

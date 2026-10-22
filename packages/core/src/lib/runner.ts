@@ -129,6 +129,8 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
         ...(inputMapped ?? {}),
       },
       methods: hooks?.methods,
+      onEnter: hooks?.onEnter as any,
+      onExit: hooks?.onExit as any,
       onPatch: (patch) => {
         currentContext = { ...currentContext, ...patch };
         hooks?.onPatch?.(patch);
@@ -159,8 +161,10 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
         !activeSubRef.machine.hasTransitionFor(activeSubMachine.state(), event)
       ) {
         // Parent group-interrupt (e.g. [paymentFSM, 'CANCEL', 'cart'])
+        const subState = activeSubMachine.state();
         activeSubMachine = null;
         activeSubRef = null;
+        hooks?.onExit?.[subState]?.(readEffectiveContext());
       } else if (
         activeSubRef.machine.hasTransitionFor(activeSubMachine.state(), event)
       ) {
@@ -168,8 +172,10 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
         activeSubMachine.send(event, payload);
         return;
       } else if (fsm.hasTransitionFor(activeSubRef.id, event)) {
+        const subState = activeSubMachine.state();
         activeSubMachine = null;
         activeSubRef = null;
+        hooks?.onExit?.[subState]?.(readEffectiveContext());
       } else {
         return;
       }
