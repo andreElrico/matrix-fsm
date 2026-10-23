@@ -3,6 +3,7 @@
  */
 
 import {
+  isAfterNode,
   isAwaitingNode,
   isEachNode,
   isFinalNode,
@@ -60,6 +61,13 @@ export function resolveSourceId(source: unknown): string {
     return source.id;
   }
   return String(source);
+}
+
+export function resolveViaId(via: unknown): string {
+  if (isAfterNode(via)) {
+    return via.id;
+  }
+  return String(via);
 }
 
 export function resolveTargetId(
@@ -208,7 +216,7 @@ function buildFSM<
   const hasTransitionFor = (state: string, event: string): boolean => {
     for (const row of config.transitions) {
       const [from, via] = row as unknown as readonly [unknown, unknown];
-      if (resolveSourceId(from) === state && String(via) === event) {
+      if (resolveSourceId(from) === state && resolveViaId(via) === event) {
         return true;
       }
     }
@@ -231,7 +239,7 @@ function buildFSM<
       ];
 
       const fromId = resolveSourceId(from);
-      const viaId = String(via);
+      const viaId = resolveViaId(via);
 
       if (fromId !== currentState || viaId !== event) {
         continue;
@@ -242,12 +250,7 @@ function buildFSM<
       }
 
       // First matching row wins!
-      const patchApplied = options?.patch
-        ? (options.patch(currentContext, payload) as Partial<EffectiveContext>)
-        : null;
-      const nextContext = patchApplied
-        ? ({ ...currentContext, ...patchApplied } as EffectiveContext)
-        : ({ ...currentContext } as EffectiveContext);
+      const nextContext = { ...currentContext } as EffectiveContext;
 
       const inputMapped = options?.input
         ? (options.input(nextContext, payload) as Record<string, unknown>)
@@ -310,7 +313,6 @@ function buildFSM<
         via: event,
         nextState: effectiveNextState,
         nextContext,
-        patchApplied,
         callSelector: options?.call ?? null,
         inputMapped,
         stayed: resolved.stayed,
@@ -334,7 +336,6 @@ function buildFSM<
       via: event,
       nextState: currentState as StateUnion,
       nextContext: { ...currentContext } as EffectiveContext,
-      patchApplied: null,
       callSelector: null,
       inputMapped: null,
       stayed: false,

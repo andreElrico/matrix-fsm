@@ -1,5 +1,6 @@
-import { describe, expect, expectTypeOf, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
+  after,
   awaiting,
   createFSM,
   createMachineInstance,
@@ -244,7 +245,7 @@ describe('@matrix-fsm/core', () => {
 
     const exitedStates: string[] = [];
     const instance = createMachineInstance(checkoutFSM, {
-      initialContext: { files: ['f1', 'f2'], progress: 0 },
+      initialContext: { files: ['f1', 'f2'] },
       onExit: {
         enteringCard: () => exitedStates.push('enteringCard'),
       },
@@ -343,13 +344,16 @@ describe('@matrix-fsm/core', () => {
       outputs: BaristaOutputs;
       context: BaristaInputs & { temp: number; percent: number };
       states: 'ticketQueued' | 'brewingCoffee' | 'cleaning';
+      methods: {
+        _tickProgress(ev: { readonly delta: number }, ctx: BaristaInputs & { temp: number; percent: number }): void;
+      };
     }>()({
       id: 'barista',
       initial: 'ticketQueued',
       // prettier-ignore
       transitions: [
         ['ticketQueued',  'START_BREWING',  awaiting('brewingCoffee'), { output: 'STEAM_READY' }],
-        ['brewingCoffee', 'TICK_PROGRESS',  stay(),                    { patch: (ctx, ev: { readonly delta: number }) => ({ percent: ctx.percent + ev.delta }), output: ['PROGRESS', (ctx, ev: { readonly delta: number }) => ({ percent: ctx.percent + ev.delta - ev.delta })] }],
+        ['brewingCoffee', 'TICK_PROGRESS',  stay(),                    { call: (m) => m._tickProgress, output: ['PROGRESS', (ctx) => ({ percent: ctx.percent })] }],
         ['brewingCoffee', 'NEEDS_CLEANING', 'cleaning',                { output: ['CLEAN_ALERT'] }],
         ['brewingCoffee', 'DONE',           finalState(),              { output: ['COFFEE_READY', (ctx) => ({ drinkName: ctx.selectedDrink, temp: ctx.temp })] }],
         ['brewingCoffee', 'OUT_OF_BEANS',   finalState(),              { output: ['BEAN_EMPTY', () => ({ reason: 'Hopper empty' })] }],
@@ -404,8 +408,8 @@ describe('@matrix-fsm/core', () => {
     }>()({
       id: 'missingOutputHandlerTest',
       initial: 'idle',
-      // @ts-expect-error - Missing required transition rows for sub-machine output(s)
       transitions: [
+        // @ts-expect-error - Missing required transition rows for sub-machine output(s)
         ['idle',        'PAY',          strictBarista, { input: (ctx) => ({ selectedDrink: ctx.drink }) }],
         [strictBarista, 'COFFEE_READY', 'done'],
       ],
@@ -447,10 +451,13 @@ describe('@matrix-fsm/core', () => {
     const instance = createMachineInstance(validShop, {
       initialContext: { drink: 'Flat White', temp: 68, percent: 10 } as any,
       methods: {
-        _onReady: (out) => {
+        _tickProgress: (ev: { readonly delta: number }, ctx: { percent: number }) => {
+          instance.patchContext({ percent: ctx.percent + ev.delta } as any);
+        },
+        _onReady: (out: { readonly drinkName: string; readonly temp: number }) => {
           readyOutput = out;
         },
-        _onProgress: (out) => {
+        _onProgress: (out: { readonly percent: number }) => {
           lastProgress = out.percent;
         },
         _onSteam: () => {
@@ -513,7 +520,7 @@ describe('@matrix-fsm/core', () => {
       id: 'coffeeShop',
       initial: 'idle',
       transitions: [
-        ['idle',        'PAY',          strictBarista, { input: (ctx) => ({ selectedDrink: ctx.drink }) }],
+        ['idle',        'PAY',          strictBarista, { input: (ctx: { drink: string }) => ({ selectedDrink: ctx.drink }) }],
         [strictBarista, 'COFFEE_READY', 'done'],
       ] as any,
     });
@@ -525,5 +532,132 @@ describe('@matrix-fsm/core', () => {
     expect(() => brokenInstance.send('START_BREWING')).toThrow(
       "[MatrixFSM Error]: Sub-machine 'barista' emitted output 'STEAM_READY', but parent 'coffeeShop' has no matching transition. Prevented silent deadlock!",
     );
+  });
+
+  it('processes synchronous re-entrant send() calls strictly in FIFO order (Run-to-Completion)', () => {
+    const orderLog: string[] = [];
+
+    const reentrantFSM = createFSM<{
+      events: { START: void; AUTO_ADVANCE: void };
+      states: 'idle' | 'step1' | 'step2';
+      methods: { _onEnterStep1: () => void; _onEnterStep2: () => void };
+    }>()({
+      id: 'reentrant',
+      initial: 'idle',
+      transitions: [
+        ['idle',  'START',        'step1', { call: (m) => m._onEnterStep1 }],
+        ['step1', 'AUTO_ADVANCE', 'step2', { call: (m) => m._onEnterStep2 }],
+      ],
+    });
+
+    const runnerRef = createMachineInstance(reentrantFSM, {
+      context: {},
+      methods: {
+        _onEnterStep1: () => {
+          orderLog.push(`in-method-1:state=${runnerRef.getState()}`);
+          // Synchroner re-entranter send()-Aufruf NOCH WÄHREND der erste Übergang läuft!
+          runnerRef.send('AUTO_ADVANCE');
+          orderLog.push('after-nested-send-in-method-1');
+        },
+        _onEnterStep2: () => {
+          orderLog.push(`in-method-2:state=${runnerRef.getState()}`);
+        },
+      },
+    });
+
+    runnerRef.send('START');
+
+    // Erwartung:
+    // 1. Erst läuft Transition 1 ('idle' -> 'step1') inkl. _onEnterStep1 KOMPLETT zu Ende.
+    // 2. Erst DANACH wird das eingereihte 'AUTO_ADVANCE' ('step1' -> 'step2') aus der FIFO-Queue verarbeitet!
+    expect(runnerRef.getState()).toBe('step2');
+    expect(orderLog).toEqual([
+      'in-method-1:state=step1',
+      'after-nested-send-in-method-1',
+      'in-method-2:state=step2',
+    ]);
+  });
+
+  it('rejects inline patch option in column 4 in favor of call', () => {
+    createFSM<{
+      events: { INC: void };
+      states: 'idle';
+      context: { count: number };
+    }>()({
+      id: 'noPatch',
+      initial: 'idle',
+      // prettier-ignore
+      transitions: [
+        // @ts-expect-error — 'patch' does not exist in TransitionOptions; use 'call' instead
+        ['idle', 'INC', stay(), { patch: (ctx: { count: number }) => ({ count: ctx.count + 1 }) }],
+      ],
+    });
+  });
+
+  it('emits structured debug trace logs when debug option is enabled', () => {
+    const logs: string[] = [];
+    const customLogger = (msg: string) => logs.push(msg);
+
+    const fsm = createFSM<{
+      events: { GO: void; IGNORED_EVENT: void };
+      states: 'a' | 'b';
+    }>()({
+      id: 'debugMachine',
+      initial: 'a',
+      transitions: [['a', 'GO', 'b']],
+    });
+
+    const instance = createMachineInstance(fsm, {
+      context: {},
+      debug: customLogger,
+    });
+
+    instance.send('IGNORED_EVENT');
+    instance.send('GO');
+
+    expect(logs).toEqual([
+      "[MatrixFSM:debugMachine] Ignored event 'IGNORED_EVENT' in state 'a'",
+      "[MatrixFSM:debugMachine] Transition 'a' --(GO)--> 'b'",
+    ]);
+  });
+
+  describe('declarative timers with after(ms)', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('automatically transitions after the specified delay and cancels stale timers on early exit', () => {
+      const timerFSM = createFSM<{
+        events: { SHOW: void; DISMISS: void };
+        states: 'idle' | 'toastVisible';
+      }>()({
+        id: 'toast',
+        initial: 'idle',
+        transitions: [
+          ['idle',         'SHOW',      'toastVisible'],
+          ['toastVisible', 'DISMISS',   'idle'],
+          ['toastVisible', after(3000), 'idle'],
+        ],
+      });
+
+      const instance = createMachineInstance(timerFSM, { context: {} });
+
+      // 1. Besuch: Wird nach 2000ms manuell abgebrochen -> Timer MUSS gekillt werden!
+      instance.send('SHOW');
+      expect(instance.getState()).toBe('toastVisible');
+      vi.advanceTimersByTime(2000);
+      instance.send('DISMISS');
+      expect(instance.getState()).toBe('idle');
+
+      // 2. Besuch bei t=2500ms: Der alte Timer von Besuch 1 darf NICHT bei t=3000ms feuern!
+      vi.advanceTimersByTime(500);
+      instance.send('SHOW');
+      expect(instance.getState()).toBe('toastVisible');
+
+      vi.advanceTimersByTime(2999);
+      expect(instance.getState()).toBe('toastVisible'); // Nach 2999ms im 2. Besuch noch offen!
+
+      vi.advanceTimersByTime(1);
+      expect(instance.getState()).toBe('idle'); // Exakt nach 3000ms im 2. Besuch geschlossen!
+    });
   });
 });

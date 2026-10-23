@@ -9,6 +9,7 @@ import { Data, Effect } from 'effect';
 import { describe, expect, it } from 'vitest';
 import {
   awaiting,
+  createFeatureTester,
   createFSM,
   createMachineFeature,
   each,
@@ -361,7 +362,6 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
           'uploading',
           'COMPLETE',
           finalState('DONE'),
-          { patch: () => ({ done: true }) },
         ],
       ],
     });
@@ -783,7 +783,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       // prettier-ignore
       transitions: [
         ['ticketQueued',   'START_BREWING',      awaiting('brewingCoffee')],
-        ['brewingCoffee',  'TICK_PROGRESS',      stay(),                    { patch: (_ctx, ev: { readonly percent: number }) => ({ progressPercent: ev.percent }), output: ['BREW_PROGRESS', (ctx) => ({ percent: ctx.progressPercent })] }],
+        ['brewingCoffee',  'TICK_PROGRESS',      stay(),                    { call: (m) => m._setProgress, output: ['BREW_PROGRESS', (ctx) => ({ percent: ctx.progressPercent })] }],
         ['brewingCoffee',  'EMERGENCY_OVERHEAT', stay(),                    { output: 'OVERHEAT_ALERT' }],
         ['brewingCoffee',  'DONE',               finalState(),              { output: ['COFFEE_READY', (ctx) => ({ drinkName: ctx.selectedDrink.name, temperatureCelsius: ctx.temperatureCelsius! })] }],
         ['brewingCoffee',  'ERROR',              'maintenance',             { call: (m) => m._setBrewError }],
@@ -795,6 +795,8 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         brewError: null as string | null,
       },
       methods: (store) => ({
+        _setProgress: (ev: { readonly percent: number }) =>
+          patchState(store, { progressPercent: ev.percent }),
         _setBrewError: (err: Error) =>
           patchState(store, { brewError: err.message }),
       }),
@@ -1007,5 +1009,197 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     expect(() => brokenStore.send('FAIL_BEANS' as any)).toThrow(
       "[MatrixFSM Error]: Sub-machine 'barista' emitted output 'BEAN_EMPTY', but parent 'coffeeShop' has no matching transition. Prevented silent deadlock!",
     );
+  });
+
+  it('tests a createMachineFeature in pure Vitest without Angular TestBed via createFeatureTester', async () => {
+    const baristaFSM = createMachineFeature<{
+      inputs: {
+        readonly drink: {
+          readonly id: string;
+          readonly name: string;
+          readonly price: number;
+        };
+      };
+      events: { START_BREWING: void };
+      outputs: {
+        COFFEE_READY: {
+          readonly drinkName: string;
+          readonly result: {
+            readonly drinkName: string;
+            readonly brewedAt: number;
+          };
+        };
+      };
+      states: 'ticketQueued' | 'brewingCoffee' | 'maintenance';
+    }>()({
+      id: 'barista',
+      initial: 'ticketQueued',
+      // prettier-ignore
+      transitions: [
+        ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee')],
+        ['brewingCoffee', 'DONE',          finalState(),              { output: ['COFFEE_READY', (ctx) => ({ drinkName: ctx.drink.name, result: ctx.baristaResult! })] }],
+        ['brewingCoffee', 'ERROR',         'maintenance'],
+      ],
+      state: {
+        baristaResult: null as {
+          readonly drinkName: string;
+          readonly brewedAt: number;
+        } | null,
+        error: null as string | null,
+      },
+      tasks: (
+        api = (() => {
+          throw new Error(
+            'Angular DI inject() must not be called in createFeatureTester!',
+          );
+        })(),
+      ) => ({
+        brewingCoffee: async () => api,
+      }),
+    });
+
+    const tester = createFeatureTester(baristaFSM, {
+      inputs: { drink: { id: 'espresso', name: 'Espresso', price: 3 } },
+      tasks: {
+        brewingCoffee: async (ctx) => ({
+          baristaResult: { drinkName: ctx.drink.name, brewedAt: 12345 },
+          error: null,
+        }),
+      },
+    });
+
+    expect(tester.state()).toBe('ticketQueued');
+    expect(tester.context().drink.name).toBe('Espresso');
+
+    tester.send('START_BREWING');
+    expect(tester.state()).toBe('brewingCoffee');
+
+    // Warte auf Abschluss des gemockten Tasks:
+    await tester.flushTasks();
+
+    expect(tester.isCompleted()).toBe(true);
+    expect(tester.emittedOutputs()).toEqual([
+      {
+        type: 'COFFEE_READY',
+        payload: {
+          drinkName: 'Espresso',
+          result: { drinkName: 'Espresso', brewedAt: 12345 },
+        },
+      },
+    ]);
+  });
+
+  it('orchestrates parallel createMachineFeature actors via each("drinks", baristaFSM), waits for ALL_DONE, and aborts all AbortSignals on parent CANCEL', async () => {
+    const abortedDrinks: string[] = [];
+    const resolvers = new Map<string, () => void>();
+
+    const baristaFSM = createMachineFeature<{
+      inputs: {
+        readonly drink: {
+          readonly id: string;
+          readonly name: string;
+          readonly price: number;
+        };
+      };
+      events: { START_BREWING: void };
+      outputs: {
+        COFFEE_READY: { readonly drinkId: string; readonly drinkName: string };
+      };
+      states: 'ticketQueued' | 'brewingCoffee' | 'maintenance';
+    }>()({
+      id: 'barista',
+      initial: 'ticketQueued',
+      // prettier-ignore
+      transitions: [
+        ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee')],
+        ['brewingCoffee', 'DONE',          finalState(),              { output: ['COFFEE_READY', (ctx) => ({ drinkId: ctx.drink.id, drinkName: ctx.drink.name })] }],
+        ['brewingCoffee', 'ERROR',         'maintenance'],
+      ],
+      state: {
+        brewed: false,
+      },
+      tasks: () => ({
+        brewingCoffee: (ctx, abortSignal) =>
+          new Promise((resolve) => {
+            resolvers.set(ctx.drink.id, () => resolve({ brewed: true }));
+            abortSignal.addEventListener('abort', () => {
+              abortedDrinks.push(ctx.drink.id);
+            });
+          }),
+      }),
+    });
+
+    const batchOrderFSM = createFSM<{
+      events: { PLACE_BATCH: void; CANCEL: void };
+      states: 'idle' | 'orderCompleted';
+      context: {
+        drinks: Array<{ id: string; name: string; price: number }>;
+        completedCups: Array<{ drinkId: string; drinkName: string }>;
+      };
+      methods: {
+        _onAllDone(
+          outputs: Array<{ drinkId: string; drinkName: string }>,
+        ): void;
+      };
+    }>()({
+      id: 'batchOrder',
+      initial: 'idle',
+      transitions: [
+        ['idle',                       'PLACE_BATCH', each('drinks', baristaFSM)],
+        [each('drinks', baristaFSM),   'CANCEL',      'idle'],
+        [each('drinks', baristaFSM),   'ALL_DONE',    'orderCompleted',          { call: (m) => m._onAllDone }],
+      ],
+    });
+
+    const BatchStore = signalStore(
+      withState({
+        drinks: [
+          { id: 'espresso', name: 'Espresso', price: 3 },
+          { id: 'latte', name: 'Latte', price: 4 },
+        ],
+        completedCups: [] as Array<{ drinkId: string; drinkName: string }>,
+      }),
+      withMethods((store) => ({
+        _onAllDone: (outputs: Array<{ drinkId: string; drinkName: string }>) =>
+          patchState(store, { completedCups: outputs }),
+      })),
+      withStateMachine(batchOrderFSM),
+    );
+
+    const store = new BatchStore();
+
+    // 1. Start batch and trigger brewing on both parallel baristaFSM actors:
+    store.send('PLACE_BATCH');
+    expect(store.fsmState()).toBe('each:drinks');
+    expect(store.childMachines()['drinks']).toHaveLength(2);
+
+    store.send('START_BREWING');
+    expect(store.isPending()).toBe(true);
+
+    // First actor finishes -> parent MUST remain in 'each:drinks' until second actor finishes!
+    resolvers.get('espresso')?.();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(store.fsmState()).toBe('each:drinks');
+
+    // Second actor finishes -> ALL_DONE fires and transitions parent to 'orderCompleted'!
+    resolvers.get('latte')?.();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(store.fsmState()).toBe('orderCompleted');
+    expect(store.completedCups()).toEqual([
+      { drinkId: 'espresso', drinkName: 'Espresso' },
+      { drinkId: 'latte', drinkName: 'Latte' },
+    ]);
+
+    // 2. Parent interrupt: [each('drinks', baristaFSM), 'CANCEL', 'idle'] aborts all running instances:
+    store.reset();
+    resolvers.clear();
+    store.send('PLACE_BATCH');
+    store.send('START_BREWING');
+    expect(store.isPending()).toBe(true);
+
+    store.send('CANCEL');
+    expect(store.fsmState()).toBe('idle');
+    expect(store.isPending()).toBe(false);
+    expect(abortedDrinks).toEqual(['espresso', 'latte']);
   });
 });

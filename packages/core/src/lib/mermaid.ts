@@ -3,6 +3,7 @@
  */
 
 import {
+  isAfterNode,
   isAwaitingNode,
   isEachNode,
   isFinalNode,
@@ -60,7 +61,7 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
           ? from.id
           : String(from);
     const fromId = sanitizeMermaidId(fromRaw);
-    const viaLabel = String(via);
+    const viaLabel = isAfterNode(via) ? `after(${via.ms}ms)` : String(via);
 
     const guardName = options?.guard
       ? options.guard.name

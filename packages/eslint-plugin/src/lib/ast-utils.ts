@@ -50,6 +50,24 @@ export function extractNodeKey(
       return `each:${firstArg}`;
     }
   }
+  if (
+    node.type === AST_NODE_TYPES.CallExpression &&
+    node.callee.type === AST_NODE_TYPES.Identifier &&
+    node.callee.name === 'after' &&
+    node.arguments.length >= 1
+  ) {
+    const firstArg = node.arguments[0];
+    if (
+      firstArg.type === AST_NODE_TYPES.Literal &&
+      typeof firstArg.value === 'number'
+    ) {
+      return `after(${firstArg.value})`;
+    }
+    const argKey = extractNodeKey(firstArg);
+    if (argKey) {
+      return `after(${argKey})`;
+    }
+  }
   return null;
 }
 

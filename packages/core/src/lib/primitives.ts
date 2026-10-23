@@ -4,6 +4,7 @@
 
 import { createFSM } from './fsm.js';
 import type {
+  AfterNode,
   AnyFSMDefinition,
   AnyTransitionRow,
   AwaitingNode,
@@ -57,6 +58,20 @@ export function finalState(outcome?: string): FinalNode<string> {
   return Object.freeze({
     __type: 'finalState' as const,
     outcome: outcome ?? 'DONE',
+  });
+}
+
+/**
+ * Declarative timer marker for Column 2 (`VIA`).
+ * Automatically fires after `ms` milliseconds while in the source state
+ * and cancels via `clearTimeout` immediately when the state is exited.
+ */
+export function after<const TMs extends number>(ms: TMs): AfterNode<TMs> {
+  return Object.freeze({
+    __type: 'after' as const,
+    __kind: 'after' as const,
+    ms,
+    id: `__after_${ms}__` as const,
   });
 }
 
@@ -186,6 +201,15 @@ export function isFinalNode(value: unknown): value is FinalNode<string> {
     typeof value === 'object' &&
     value !== null &&
     (value as FinalNode).__type === 'finalState'
+  );
+}
+
+export function isAfterNode(value: unknown): value is AfterNode<number> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    ((value as AfterNode).__type === 'after' ||
+      (value as AfterNode).__kind === 'after')
   );
 }
 

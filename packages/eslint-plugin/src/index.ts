@@ -2,6 +2,7 @@ import { alignMatrixColumns } from './lib/rules/align-matrix-columns.js';
 import { awaitingNamingConvention } from './lib/rules/awaiting-naming-convention.js';
 import { completeExtractedGroups } from './lib/rules/complete-extracted-groups.js';
 import { groupContiguousTransitions } from './lib/rules/group-contiguous-transitions.js';
+import { noConflictingFinalOutput } from './lib/rules/no-conflicting-final-output.js';
 import { noUnreachableTransitions } from './lib/rules/no-unreachable-transitions.js';
 import { pureMachineDefinition } from './lib/rules/pure-machine-definition.js';
 import { requireAwaitingHandlers } from './lib/rules/require-awaiting-handlers.js';
@@ -16,6 +17,7 @@ export const rules = {
   'awaiting-naming-convention': awaitingNamingConvention,
   'complete-extracted-groups': completeExtractedGroups,
   'pure-machine-definition': pureMachineDefinition,
+  'no-conflicting-final-output': noConflictingFinalOutput,
 };
 
 export const plugin = {
@@ -40,6 +42,7 @@ export const configs = {
       '@matrix-fsm/awaiting-naming-convention': 'error',
       '@matrix-fsm/complete-extracted-groups': 'error',
       '@matrix-fsm/pure-machine-definition': 'error',
+      '@matrix-fsm/no-conflicting-final-output': 'error',
     },
   },
 };
@@ -51,6 +54,7 @@ export {
   awaitingNamingConvention,
   completeExtractedGroups,
   groupContiguousTransitions,
+  noConflictingFinalOutput,
   noUnreachableTransitions,
   pureMachineDefinition,
   requireAwaitingHandlers,

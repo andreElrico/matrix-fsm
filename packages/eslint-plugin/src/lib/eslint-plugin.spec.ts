@@ -397,6 +397,59 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
         'invalidTransitionCallSelector',
       );
     });
+
+    it('allows @angular/core, @ngrx/signals, and service imports when createMachineFeature is used, but forbids inject() inside transitions: [...]', () => {
+      // 1. Valid Sandwich Case (even without *.feature.ts filename suffix):
+      const validSandwich = verifyRule(
+        'pure-machine-definition',
+        `
+        import { inject } from '@angular/core';
+        import { patchState } from '@ngrx/signals';
+        import { createMachineFeature, awaiting } from '@matrix-fsm/angular';
+        import { ApiService } from './api.service';
+
+        export const baristaFSM = createMachineFeature()({
+          id: 'barista',
+          initial: 'ticketQueued',
+          transitions: [
+            ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee')],
+            ['brewingCoffee', 'DONE',          'ticketQueued'],
+            ['brewingCoffee', 'ERROR',         'maintenance', { call: (m) => m._setBrewError }],
+          ],
+          methods: (store) => ({
+            _setBrewError: (err: Error) => patchState(store, { brewError: err.message }),
+          }),
+          tasks: (api = inject(ApiService)) => ({
+            brewingCoffee: async () => api.brew(),
+          }),
+        });
+        `,
+      );
+      expect(validSandwich.messages).toHaveLength(0);
+
+      // 2. Invalid Sandwich Case: inject(ApiService) called INSIDE transitions: [...]
+      const invalidSandwichTransitions = verifyRule(
+        'pure-machine-definition',
+        `
+        import { inject } from '@angular/core';
+        import { createMachineFeature } from '@matrix-fsm/angular';
+        import { ApiService } from './api.service';
+
+        export const baristaFSM = createMachineFeature()({
+          id: 'barista',
+          initial: 'ticketQueued',
+          transitions: [
+            ['ticketQueued', 'START_BREWING', 'maintenance', { guard: () => inject(ApiService).isReady() }],
+          ],
+        });
+        `,
+        'barista.feature.ts',
+      );
+      expect(invalidSandwichTransitions.messages).toHaveLength(1);
+      expect(invalidSandwichTransitions.messages[0].messageId).toBe(
+        'forbiddenInjectCall',
+      );
+    });
   });
 
   describe('8. align-matrix-columns', () => {
@@ -439,6 +492,42 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
       expect(fixed.output).toContain(
         `    ['loginView',       'LOGIN',   awaiting('authenticating'), { guard: hasValidInput }],\n    ['authenticating',  'CANCEL',  'loginView'],`,
       );
+    });
+  });
+
+  describe('9. no-conflicting-final-output', () => {
+    it('passes for unnamed finalState() with output tuple or named finalState("CANCELLED") without output', () => {
+      const { messages } = verifyRule(
+        'no-conflicting-final-output' as any,
+        `
+        createFSM()({
+          id: 'barista',
+          initial: 'brewing',
+          transitions: [
+            ['brewing', 'DONE',   finalState(),            { output: ['READY', (ctx) => ctx.result] }],
+            ['brewing', 'CANCEL', finalState('CANCELLED')],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(0);
+    });
+
+    it('reports error when named finalState("CANCELLED") is combined with options.output', () => {
+      const { messages } = verifyRule(
+        'no-conflicting-final-output' as any,
+        `
+        createFSM()({
+          id: 'barista',
+          initial: 'brewing',
+          transitions: [
+            ['brewing', 'CANCEL', finalState('CANCELLED'), { output: ['READY', (ctx) => ctx.result] }],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(1);
+      expect(messages[0].messageId).toBe('conflictingFinalOutput');
     });
   });
 });

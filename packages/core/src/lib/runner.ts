@@ -2,6 +2,8 @@
  * @matrix-fsm/core - Pure TypeScript Machine Runner (0% Angular)
  */
 
+import { resolveSourceId } from './fsm.js';
+import { isAfterNode } from './primitives.js';
 import type {
   AnyFSMDefinition,
   ExtractContext,
@@ -14,6 +16,7 @@ import type {
 export interface MachineInstance<TFSM extends AnyFSMDefinition = AnyFSMDefinition> {
   readonly id: string;
   readonly state: () => ExtractStates<TFSM>;
+  readonly getState: () => ExtractStates<TFSM>;
   readonly subState: () => string | null;
   readonly subContext: () => Readonly<Record<string, unknown>> | null;
   readonly context: () => Readonly<ExtractContext<TFSM>>;
@@ -24,10 +27,35 @@ export interface MachineInstance<TFSM extends AnyFSMDefinition = AnyFSMDefinitio
   readonly send: (event: string, payload?: unknown) => void;
   readonly patchContext: (patch: Partial<ExtractContext<TFSM>>) => void;
   readonly reset: () => void;
+  readonly destroy: () => void;
+}
+
+export type DebugLogger =
+  | boolean
+  | ((message: string, details?: unknown) => void);
+
+export function resolveDebugLogger(
+  debug?: DebugLogger,
+): ((message: string, details?: unknown) => void) | null {
+  if (typeof debug === 'function') {
+    return debug;
+  }
+  if (debug === true) {
+    return (msg, details) => {
+      if (details !== undefined) {
+        console.debug(msg, details);
+      } else {
+        console.debug(msg);
+      }
+    };
+  }
+  return null;
 }
 
 export interface MachineInstanceHooks<TFSM extends AnyFSMDefinition> {
   readonly initialContext?: Partial<ExtractContext<TFSM>>;
+  readonly context?: Partial<ExtractContext<TFSM>>;
+  readonly debug?: DebugLogger;
   /**
    * Optional method map or store reference used to resolve `{ call: (m) => m.methodName }`
    * during transitions.
@@ -39,10 +67,6 @@ export interface MachineInstanceHooks<TFSM extends AnyFSMDefinition> {
    * Optional dynamic context provider (e.g., SignalStore's live state getter).
    */
   readonly getContext?: () => ExtractContext<TFSM>;
-  /**
-   * Optional callback invoked whenever a transition applies a pure `patch`.
-   */
-  readonly onPatch?: (patch: Partial<ExtractContext<TFSM>>) => void;
   readonly onStateChange?: (
     state: ExtractStates<TFSM>,
     context: Readonly<ExtractContext<TFSM>>,
@@ -97,12 +121,47 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
   let currentState: TState = fsm.initial as TState;
   let currentContext: TContext = {
     ...fsm.context,
+    ...(hooks?.context ?? {}),
     ...(hooks?.initialContext ?? {}),
   };
   let activeSubMachine: MachineInstance<any> | null = null;
   let activeSubRef: SubMachineRef<any, any> | null = null;
   let doneOutcome: string | null = null;
   let donePayload: unknown = undefined;
+  const eventQueue: Array<{
+    event: string;
+    payload: unknown;
+    fromChildOutput: boolean;
+  }> = [];
+  let isProcessing = false;
+  const activeTimers: Array<ReturnType<typeof setTimeout>> = [];
+  const debugLog = resolveDebugLogger(hooks?.debug);
+
+  const clearActiveTimers = (): void => {
+    for (const timer of activeTimers) {
+      clearTimeout(timer);
+    }
+    activeTimers.length = 0;
+  };
+
+  const scheduleStateTimers = (stateName: string): void => {
+    clearActiveTimers();
+    const scheduledIds = new Set<string>();
+    for (const row of fsm.transitions) {
+      const [from, via] = row as unknown as readonly [unknown, unknown];
+      if (
+        resolveSourceId(from) === stateName &&
+        isAfterNode(via) &&
+        !scheduledIds.has(via.id)
+      ) {
+        scheduledIds.add(via.id);
+        const timerId = setTimeout(() => {
+          sendInternal(via.id, undefined, false);
+        }, via.ms);
+        activeTimers.push(timerId);
+      }
+    }
+  };
 
   const readEffectiveContext = (): TContext => {
     if (hooks?.getContext) {
@@ -134,12 +193,9 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
         ...(inputMapped ?? {}),
       },
       methods: hooks?.methods,
+      debug: hooks?.debug,
       onEnter: hooks?.onEnter as any,
       onExit: hooks?.onExit as any,
-      onPatch: (patch) => {
-        currentContext = { ...currentContext, ...patch };
-        hooks?.onPatch?.(patch);
-      },
       onStateChange: (_childState, childCtx, childInfo) => {
         if (!childInfo.isDone && childInfo.emittedOutput && activeSubRef) {
           const refId = activeSubRef.id;
@@ -175,7 +231,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     });
   };
 
-  const sendInternal = (
+  const processOneEvent = (
     event: string,
     payload?: unknown,
     fromChildOutput = false,
@@ -191,6 +247,9 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
         activeSubMachine.send(event, payload);
         return;
       } else if (!fsm.hasTransitionFor(activeSubRef.id, event)) {
+        debugLog?.(
+          `[MatrixFSM:${fsm.id}] Ignored event '${event}' in state '${currentState}'`,
+        );
         return;
       }
     }
@@ -205,21 +264,32 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     );
 
     if (!evaluation.matched) {
+      debugLog?.(
+        `[MatrixFSM:${fsm.id}] Ignored event '${event}' in state '${prevState}'`,
+      );
       return;
     }
+
+    debugLog?.(
+      `[MatrixFSM:${fsm.id}] Transition '${prevState}' --(${event})--> '${evaluation.nextState}'`,
+    );
 
     // If leaving an active subMachine (not staying), clean it up and fire its onExit hook
     if (!evaluation.stayed && activeSubMachine && activeSubRef) {
       const subState = activeSubMachine.state();
+      activeSubMachine.destroy();
       activeSubMachine = null;
       activeSubRef = null;
       hooks?.onExit?.[subState]?.(readEffectiveContext());
     }
 
-    currentContext = evaluation.nextContext;
-    if (evaluation.patchApplied) {
-      hooks?.onPatch?.(evaluation.patchApplied);
+    if (!evaluation.stayed) {
+      clearActiveTimers();
+      hooks?.onExit?.[prevState]?.(readEffectiveContext());
+      currentState = evaluation.nextState;
     }
+
+    currentContext = evaluation.nextContext;
 
     if (evaluation.callSelector) {
       invokeCallSelector(
@@ -230,6 +300,12 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       );
       if (hooks?.getContext) {
         currentContext = hooks.getContext();
+      }
+      if (activeSubMachine && !fromChildOutput) {
+        currentContext = {
+          ...currentContext,
+          ...(activeSubMachine.context() as Record<string, unknown>),
+        };
       }
     }
 
@@ -246,6 +322,15 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       ? resolvedEmittedOutput?.payload
       : evaluation.finalPayload;
 
+    if (resolvedEmittedOutput) {
+      debugLog?.(
+        `[MatrixFSM:${fsm.id}] Output '${resolvedEmittedOutput.type}'`,
+        resolvedEmittedOutput.payload,
+      );
+    } else if (evaluation.finalOutcome !== null) {
+      debugLog?.(`[MatrixFSM:${fsm.id}] Output '${evaluation.finalOutcome}'`);
+    }
+
     if (evaluation.stayed) {
       hooks?.onStateChange?.(currentState, effectiveCtxAfterMutations, {
         stayed: true,
@@ -260,10 +345,6 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       });
       return;
     }
-
-    // Standard state transition
-    hooks?.onExit?.[prevState]?.(effectiveCtxAfterMutations);
-    currentState = evaluation.nextState;
 
     if (evaluation.finalOutcome !== null) {
       doneOutcome = evaluation.finalOutcome;
@@ -280,6 +361,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     }
 
     hooks?.onEnter?.[currentState]?.(readEffectiveContext());
+    scheduleStateTimers(currentState);
     hooks?.onStateChange?.(currentState, readEffectiveContext(), {
       stayed: false,
       isPending: isPending(),
@@ -294,29 +376,67 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     });
   };
 
+  const sendInternal = (
+    event: string,
+    payload?: unknown,
+    fromChildOutput = false,
+  ): void => {
+    eventQueue.push({ event, payload, fromChildOutput });
+    if (isProcessing) {
+      return;
+    }
+    isProcessing = true;
+    try {
+      while (eventQueue.length > 0) {
+        const next = eventQueue.shift()!;
+        processOneEvent(next.event, next.payload, next.fromChildOutput);
+      }
+    } finally {
+      isProcessing = false;
+    }
+  };
+
   const send = (event: string, payload?: unknown): void => {
     sendInternal(event, payload, false);
   };
 
   const patchContext = (patch: Partial<TContext>): void => {
     currentContext = { ...currentContext, ...patch };
+    if (activeSubMachine) {
+      activeSubMachine.patchContext(patch as Record<string, unknown>);
+    }
+  };
+
+  const destroy = (): void => {
+    clearActiveTimers();
+    eventQueue.length = 0;
+    isProcessing = false;
+    if (activeSubMachine) {
+      activeSubMachine.destroy();
+      activeSubMachine = null;
+      activeSubRef = null;
+    }
   };
 
   const reset = (): void => {
-    activeSubMachine = null;
-    activeSubRef = null;
+    destroy();
     doneOutcome = null;
     donePayload = undefined;
     currentState = fsm.initial as TState;
     currentContext = {
       ...fsm.context,
+      ...(hooks?.context ?? {}),
       ...(hooks?.initialContext ?? {}),
     };
+    scheduleStateTimers(currentState);
   };
+
+  scheduleStateTimers(currentState);
 
   return {
     id: fsm.id,
     state: () => currentState,
+    getState: () => currentState,
     subState: () => (activeSubMachine ? activeSubMachine.state() : null),
     subContext: () =>
       activeSubMachine
@@ -330,5 +450,6 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     send,
     patchContext,
     reset,
+    destroy,
   };
 }

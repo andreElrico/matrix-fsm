@@ -94,6 +94,13 @@ export interface FinalNode<TOutcome extends string = string> {
   readonly outcome: TOutcome;
 }
 
+export interface AfterNode<TMs extends number = number> {
+  readonly __type: 'after';
+  readonly __kind: 'after';
+  readonly ms: TMs;
+  readonly id: `__after_${TMs}__`;
+}
+
 export interface SubMachineRef<
   TFSM extends AnyFSMDefinition = AnyFSMDefinition,
   TId extends string = string,
@@ -121,12 +128,6 @@ export interface ExtractedMarker<TContext = any, TMethods = any> {
   readonly __extractedBrand: unique symbol;
   readonly __contextFn?: (ctx: TContext, methods: TMethods) => void;
 }
-
-export type PatchResult<TContext> = [0] extends [1 & TContext]
-  ? Record<string, any>
-  : {
-      readonly [K in keyof TContext]?: unknown;
-    };
 
 export type TransitionMethod<TPayload = any, TContext = any> = (
   payload: TPayload,
@@ -256,13 +257,6 @@ export interface TransitionOptions<
    */
   readonly call?: TransitionCallSelector<TMethods, TPayload, TContext>;
   /**
-   * Pure context reducer function returning a partial context patch.
-   */
-  readonly patch?: (
-    ctx: ReadonlyContext<TContext>,
-    eventPayload: TPayload,
-  ) => PatchResult<TContext>;
-  /**
    * Explicit input mapper when transitioning into a sub-machine or `each()` pool.
    * Example: `{ input: (ctx) => ({ selectedDrink: ctx.selectedDrink }) }`
    */
@@ -325,6 +319,7 @@ export type TransitionVia<
 > =
   | TEvent
   | BuiltInLifecycleEvent
+  | AfterNode<number>
   | ExtractedMarker<TContext, TMethods>;
 
 export type TransitionToNonNamedFinal<
@@ -424,7 +419,6 @@ export interface TransitionEvaluation<
   readonly via: string;
   readonly nextState: TState;
   readonly nextContext: TContext;
-  readonly patchApplied: Partial<TContext> | null;
   readonly callSelector: TransitionCallSelector<TMethods, any, TContext> | null;
   readonly inputMapped: Record<string, unknown> | null;
   readonly stayed: boolean;
@@ -669,6 +663,7 @@ type AllowedSubMachineVia<From, TEvent extends string> =
           | ExtractEmittedOutputs<From>
           | ExtractOutputKeys<From>)
   | 'ERROR'
+  | AfterNode<number>
   | TEvent;
 
 type ResolveSubMachineOutputPayload<From, Via> =
@@ -749,39 +744,33 @@ export type ValidateTransitionRows<
     infer To,
     ...(infer Rest),
   ]
-    ? IsSubMachineNode<From> extends true
-      ? readonly [
-          from: From,
-          via: AllowedSubMachineVia<From, TEvent>,
-          to: ValidateSubMachineOutputs<To, TTransitions>,
-          ...ValidateRowOptions<
-            Rest,
-            TContext,
-            ResolveSubMachineOutputPayload<From, Via>,
-            TMethods,
-            To,
-            TOutputs
-          >,
-        ]
-      : IsSubMachineNode<To> extends true
+    ? (Rest extends readonly [infer Opts]
+        ? 'patch' extends keyof Opts
+          ? true
+          : false
+        : false) extends true
+      ? {
+          readonly __error: "'patch' does not exist in TransitionOptions; use 'call' instead";
+        }
+      : IsSubMachineNode<From> extends true
         ? readonly [
             from: From,
-            via: Via,
+            via: AllowedSubMachineVia<From, TEvent>,
             to: ValidateSubMachineOutputs<To, TTransitions>,
             ...ValidateRowOptions<
               Rest,
               TContext,
-              any,
+              ResolveSubMachineOutputPayload<From, Via>,
               TMethods,
               To,
               TOutputs
             >,
           ]
-        : IsNamedFinalNode<To> extends true
+        : IsSubMachineNode<To> extends true
           ? readonly [
               from: From,
               via: Via,
-              to: To,
+              to: ValidateSubMachineOutputs<To, TTransitions>,
               ...ValidateRowOptions<
                 Rest,
                 TContext,
@@ -791,7 +780,21 @@ export type ValidateTransitionRows<
                 TOutputs
               >,
             ]
-          : TTransitions[K]
+          : IsNamedFinalNode<To> extends true
+            ? readonly [
+                from: From,
+                via: Via,
+                to: To,
+                ...ValidateRowOptions<
+                  Rest,
+                  TContext,
+                  any,
+                  TMethods,
+                  To,
+                  TOutputs
+                >,
+              ]
+            : TTransitions[K]
     : TTransitions[K];
 };
 
