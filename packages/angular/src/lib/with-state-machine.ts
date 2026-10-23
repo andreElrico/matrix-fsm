@@ -1050,7 +1050,7 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
 
       destroyActiveSubNode();
       if (fsm.hasTransitionFor(refId, outcome)) {
-        dispatchInternal(outcome, outputPayload);
+        dispatchInternal(outcome, outputPayload, true);
       } else {
         throw new Error(
           `[MatrixFSM Error]: Sub-machine '${refId}' emitted output '${outcome}', but parent '${fsm.id}' has no matching transition. Prevented silent deadlock!`,
@@ -1310,7 +1310,7 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
             `[MatrixFSM Error]: Sub-machine '${refId}' emitted output '${emitted.type}', but parent '${fsm.id}' has no matching transition. Prevented silent deadlock!`,
           );
         }
-        dispatchInternal(emitted.type, emitted.payload);
+        dispatchInternal(emitted.type, emitted.payload, true);
       },
     );
     activeSubNode = childNode;
@@ -1336,12 +1336,16 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     return false;
   };
 
-  const dispatchInternal = (event: string, payload?: unknown): void => {
+  const dispatchInternal = (
+    event: string,
+    payload?: unknown,
+    fromChildOutput = false,
+  ): void => {
     const currentState = untracked(() => fsmStateSig());
     const currentCtx = getEffectiveContext();
 
     // 1. Handle subMachine delegation vs parent group-interrupt (Cooperative Cancel vs Hard Kill!)
-    if (activeSubNode && activeSubRef) {
+    if (!fromChildOutput && activeSubNode && activeSubRef) {
       const subHandlesEvent = canSubNodeHandleEvent(
         activeSubRef,
         activeSubNode,
@@ -1392,9 +1396,18 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
       );
     }
 
-    if (evaluation.emittedOutput) {
-      onEmitOutput?.(evaluation.emittedOutput);
-    }
+    const freshCtx = getEffectiveContext();
+    const resolvedEmittedOutput = evaluation.emittedOutput
+      ? {
+          type: evaluation.emittedOutput.type,
+          payload: evaluation.outputSelector
+            ? evaluation.outputSelector(freshCtx, payload)
+            : evaluation.emittedOutput.payload,
+        }
+      : null;
+    const resolvedFinalPayload = evaluation.hasFinalPayloadSelector
+      ? resolvedEmittedOutput?.payload
+      : evaluation.finalPayload;
 
     // In-place stay(): patch/call applied, keep current state, do NOT re-enter or interrupt tasks!
     if (evaluation.stayed) {
@@ -1403,6 +1416,9 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
         syncEachInstances(activeEach, evaluation.inputMapped);
       }
       onNotifyParent?.();
+      if (resolvedEmittedOutput) {
+        onEmitOutput?.(resolvedEmittedOutput);
+      }
       return;
     }
 
@@ -1431,7 +1447,7 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
       );
       finalPayloadSig.set(
         evaluation.hasFinalPayloadSelector
-          ? evaluation.finalPayload
+          ? resolvedFinalPayload
           : getEffectiveContext(),
       );
       doneOutcomeSig.set(evaluation.finalOutcome);
@@ -1458,6 +1474,10 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     }
 
     onNotifyParent?.();
+
+    if (evaluation.finalOutcome === null && resolvedEmittedOutput) {
+      onEmitOutput?.(resolvedEmittedOutput);
+    }
   };
 
   const send: SendFn<TFSM> = (...args: [event: string, payload?: unknown]) => {

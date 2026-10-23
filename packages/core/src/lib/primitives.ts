@@ -13,7 +13,6 @@ import type {
   FinalNode,
   FSMConfig,
   FSMDefinition,
-  ReadonlyContext,
   ResolveTransitionsContext,
   ResolveTransitionsMethods,
   StayNode,
@@ -50,18 +49,14 @@ export function stay(): StayNode {
 /**
  * Terminal state marker for sub-machine or workflow outcomes.
  */
-export function finalState<
-  const TOutcome extends string,
-  TContext = any,
-  TPayload = void,
->(
+export function finalState(): FinalNode<'DONE'>;
+export function finalState<const TOutcome extends string>(
   outcome: TOutcome,
-  payloadSelector?: (ctx: ReadonlyContext<TContext>) => TPayload,
-): FinalNode<TOutcome, TContext, TPayload> {
+): FinalNode<TOutcome>;
+export function finalState(outcome?: string): FinalNode<string> {
   return Object.freeze({
     __type: 'finalState' as const,
-    outcome,
-    ...(payloadSelector ? { payloadSelector } : {}),
+    outcome: outcome ?? 'DONE',
   });
 }
 

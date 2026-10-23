@@ -76,8 +76,13 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
     }
 
     if (isFinalNode(to)) {
+      const outcomeLabel = options?.output
+        ? typeof options.output === 'string'
+          ? options.output
+          : String(options.output[0])
+        : to.outcome;
       lines.push(
-        `${indent}${fromId} --> [*] : ${viaLabel}${guardName} (${to.outcome})`,
+        `${indent}${fromId} --> [*] : ${viaLabel}${guardName} (${outcomeLabel})`,
       );
       continue;
     }

@@ -318,44 +318,66 @@ describe('@matrix-fsm/core', () => {
     expect(diagram).toContain('authenticating --> loggedIn : DONE');
   });
 
-  it('enforces compile-time input contracts, output exhaustiveness (ValidateSubMachineOutputs), finalState payload selectors, intermediate emit, and runtime fail-fast guards', () => {
+  it('enforces compile-time input contracts, output exhaustiveness (ValidateSubMachineOutputs), unified output tuple selectors, intermediate outputs, dual (ctx, eventPayload) signature, collision guards, and runtime fail-fast guards', () => {
     interface BaristaInputs {
       readonly selectedDrink: string;
     }
     type BaristaOutputs = {
       COFFEE_READY: { readonly drinkName: string; readonly temp: number };
       BEAN_EMPTY: { readonly reason: string };
+      PROGRESS: { readonly percent: number };
+      STEAM_READY: void;
+      CLEAN_ALERT: void;
+      CANCELLED: void;
     };
 
     const strictBarista = createFSM<{
       inputs: BaristaInputs;
-      events: { START_BREWING: void; OUT_OF_BEANS: void; PROGRESS: void };
-      outputs: BaristaOutputs & { STEAM_READY: void };
-      context: BaristaInputs & { temp: number };
-      states: 'ticketQueued' | 'brewingCoffee';
+      events: {
+        START_BREWING: void;
+        TICK_PROGRESS: { readonly delta: number };
+        NEEDS_CLEANING: void;
+        OUT_OF_BEANS: void;
+        ABORT_BREW: void;
+      };
+      outputs: BaristaOutputs;
+      context: BaristaInputs & { temp: number; percent: number };
+      states: 'ticketQueued' | 'brewingCoffee' | 'cleaning';
     }>()({
       id: 'barista',
       initial: 'ticketQueued',
+      // prettier-ignore
       transitions: [
-        ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee'), { emit: 'STEAM_READY' }],
-        [
-          'brewingCoffee',
-          'DONE',
-          finalState('COFFEE_READY', (ctx) => ({
-            drinkName: ctx.selectedDrink,
-            temp: ctx.temp,
-          })),
-        ],
-        [
-          'brewingCoffee',
-          'OUT_OF_BEANS',
-          finalState('BEAN_EMPTY', () => ({ reason: 'Hopper empty' })),
-        ],
-        ['brewingCoffee', 'ERROR',         'ticketQueued'],
+        ['ticketQueued',  'START_BREWING',  awaiting('brewingCoffee'), { output: 'STEAM_READY' }],
+        ['brewingCoffee', 'TICK_PROGRESS',  stay(),                    { patch: (ctx, ev: { readonly delta: number }) => ({ percent: ctx.percent + ev.delta }), output: ['PROGRESS', (ctx, ev: { readonly delta: number }) => ({ percent: ctx.percent + ev.delta - ev.delta })] }],
+        ['brewingCoffee', 'NEEDS_CLEANING', 'cleaning',                { output: ['CLEAN_ALERT'] }],
+        ['brewingCoffee', 'DONE',           finalState(),              { output: ['COFFEE_READY', (ctx) => ({ drinkName: ctx.selectedDrink, temp: ctx.temp })] }],
+        ['brewingCoffee', 'OUT_OF_BEANS',   finalState(),              { output: ['BEAN_EMPTY', () => ({ reason: 'Hopper empty' })] }],
+        ['brewingCoffee', 'ABORT_BREW',     finalState('CANCELLED')],
+        ['brewingCoffee', 'ERROR',          'ticketQueued'],
       ],
     });
 
     // Compile-time verification:
+    // 0. Compile-time error tests on `output` and `finalState` collision guard:
+    createFSM<{
+      events: { GO: void; CANCEL: void };
+      outputs: BaristaOutputs;
+      context: { selectedDrink: string; temp: number };
+      states: 'idle';
+    }>()({
+      id: 'outputCompileErrorChecks',
+      initial: 'idle',
+      transitions: [
+        // @ts-expect-error - 'UNKNOWN_OUTPUT' is not in BaristaOutputs
+        ['idle', 'GO',     finalState(),            { output: ['UNKNOWN_OUTPUT', () => ({})] }],
+        // @ts-expect-error - Selector return type does not match BaristaOutputs['COFFEE_READY']
+        ['idle', 'GO',     finalState(),            { output: ['COFFEE_READY', () => ({ wrongKey: 123 })] }],
+        // @ts-expect-error - Collision guard: finalState('CANCELLED') cannot be combined with options.output
+        ['idle', 'CANCEL', finalState('CANCELLED'), { output: 'CANCELLED' }],
+      ],
+    });
+
     // 1. Omitting `{ input: (ctx) => ... }` when entering `strictBarista` must be a compile error!
     createFSM<{
       events: { PAY: void };
@@ -368,7 +390,10 @@ describe('@matrix-fsm/core', () => {
         ['idle',        'PAY',          strictBarista],
         [strictBarista, 'COFFEE_READY', 'done'],
         [strictBarista, 'BEAN_EMPTY',   'idle'],
+        [strictBarista, 'PROGRESS',     stay()],
         [strictBarista, 'STEAM_READY',  stay()],
+        [strictBarista, 'CLEAN_ALERT',  stay()],
+        [strictBarista, 'CANCELLED',    'idle'],
       ],
     });
 
@@ -379,7 +404,7 @@ describe('@matrix-fsm/core', () => {
     }>()({
       id: 'missingOutputHandlerTest',
       initial: 'idle',
-      // @ts-expect-error - Missing required transition rows for sub-machine output(s): 'BEAN_EMPTY' | 'STEAM_READY'
+      // @ts-expect-error - Missing required transition rows for sub-machine output(s)
       transitions: [
         ['idle',        'PAY',          strictBarista, { input: (ctx) => ({ selectedDrink: ctx.drink }) }],
         [strictBarista, 'COFFEE_READY', 'done'],
@@ -388,11 +413,17 @@ describe('@matrix-fsm/core', () => {
 
     // 3. Valid parent handling all outputs + strongly typed payload on `call: (m) => m._onReady`
     let readyOutput: { readonly drinkName: string; readonly temp: number } | null = null;
+    let lastProgress = 0;
     let steamCount = 0;
+    let cleanAlertCount = 0;
+    let cancelCount = 0;
 
     interface ParentMethods {
       _onReady(output: { readonly drinkName: string; readonly temp: number }): void;
+      _onProgress(output: { readonly percent: number }): void;
       _onSteam(): void;
+      _onCleanAlert(): void;
+      _onCancelled(): void;
     }
 
     const validShop = createFSM<{
@@ -405,19 +436,31 @@ describe('@matrix-fsm/core', () => {
       transitions: [
         ['idle',        'PAY',          strictBarista, { input: (ctx) => ({ selectedDrink: ctx.drink }) }],
         [strictBarista, 'STEAM_READY',  stay(),        { call: (m) => m._onSteam }],
+        [strictBarista, 'PROGRESS',     stay(),        { call: (m) => m._onProgress }],
+        [strictBarista, 'CLEAN_ALERT',  stay(),        { call: (m) => m._onCleanAlert }],
         [strictBarista, 'COFFEE_READY', 'done',        { call: (m) => m._onReady }],
         [strictBarista, 'BEAN_EMPTY',   'maintenance'],
+        [strictBarista, 'CANCELLED',    'idle',        { call: (m) => m._onCancelled }],
       ],
     });
 
     const instance = createMachineInstance(validShop, {
-      initialContext: { drink: 'Flat White', temp: 68 } as any,
+      initialContext: { drink: 'Flat White', temp: 68, percent: 10 } as any,
       methods: {
         _onReady: (out) => {
           readyOutput = out;
         },
+        _onProgress: (out) => {
+          lastProgress = out.percent;
+        },
         _onSteam: () => {
           steamCount++;
+        },
+        _onCleanAlert: () => {
+          cleanAlertCount++;
+        },
+        _onCancelled: () => {
+          cancelCount++;
         },
       },
     });
@@ -426,16 +469,41 @@ describe('@matrix-fsm/core', () => {
     expect(instance.state()).toBe('barista');
     expect(instance.subState()).toBe('ticketQueued');
 
-    // Intermediate `emit: 'STEAM_READY'` triggers parent `stay()` without killing child!
+    // Intermediate `output: 'STEAM_READY'` triggers parent `stay()` without killing child!
     instance.send('START_BREWING');
     expect(steamCount).toBe(1);
     expect(instance.state()).toBe('barista');
     expect(instance.subState()).toBe('brewingCoffee');
 
-    // Terminal `finalState('COFFEE_READY', selector)` passes selector output to `_onReady`!
+    // Intermediate `stay()` + `patch` + `output: ['PROGRESS', (ctx, ev) => ...]` executes patch first, then output selector!
+    instance.send('TICK_PROGRESS', { delta: 40 });
+    expect(lastProgress).toBe(50);
+    expect(instance.state()).toBe('barista');
+    expect(instance.subState()).toBe('brewingCoffee');
+
+    // Terminal `finalState()` + `output: ['COFFEE_READY', selector]` passes selector output to `_onReady` and terminates child!
     instance.send('DONE');
     expect(instance.state()).toBe('done');
+    expect(instance.subState()).toBeNull();
     expect(readyOutput).toEqual({ drinkName: 'Flat White', temp: 68 });
+
+    // Test intermediate output with state change (`'cleaning'` + `output: ['CLEAN_ALERT']`)
+    instance.reset();
+    instance.send('PAY');
+    instance.send('START_BREWING');
+    instance.send('NEEDS_CLEANING');
+    expect(cleanAlertCount).toBe(1);
+    expect(instance.state()).toBe('barista');
+    expect(instance.subState()).toBe('cleaning');
+
+    // Test terminal output without payload (`finalState('CANCELLED')`)
+    instance.reset();
+    instance.send('PAY');
+    instance.send('START_BREWING');
+    instance.send('ABORT_BREW');
+    expect(cancelCount).toBe(1);
+    expect(instance.state()).toBe('idle');
+    expect(instance.subState()).toBeNull();
 
     // 4. Runtime Fail-Fast Guard when someone bypasses TypeScript via `as any`:
     const brokenShop = createFSM<{
@@ -451,7 +519,7 @@ describe('@matrix-fsm/core', () => {
     });
 
     const brokenInstance = createMachineInstance(brokenShop, {
-      initialContext: { drink: 'Espresso', temp: 65 } as any,
+      initialContext: { drink: 'Espresso', temp: 65, percent: 0 } as any,
     });
     brokenInstance.send('PAY');
     expect(() => brokenInstance.send('START_BREWING')).toThrow(

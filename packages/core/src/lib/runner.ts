@@ -141,7 +141,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
         hooks?.onPatch?.(patch);
       },
       onStateChange: (_childState, childCtx, childInfo) => {
-        if (childInfo.emittedOutput && activeSubRef) {
+        if (!childInfo.isDone && childInfo.emittedOutput && activeSubRef) {
           const refId = activeSubRef.id;
           const outType = childInfo.emittedOutput.type;
           const outPayload = childInfo.emittedOutput.payload;
@@ -150,7 +150,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
               `[MatrixFSM Error]: Sub-machine '${refId}' emitted output '${outType}', but parent '${fsm.id}' has no matching transition. Prevented silent deadlock!`,
             );
           }
-          send(outType, outPayload);
+          sendInternal(outType, outPayload, true);
         }
         if (childInfo.isDone) {
           const outcome = childInfo.finalOutcome ?? 'DONE';
@@ -164,7 +164,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
             return;
           }
           if (fsm.hasTransitionFor(refToExit.id, outcome)) {
-            send(outcome, outputPayload);
+            sendInternal(outcome, outputPayload, true);
           } else {
             throw new Error(
               `[MatrixFSM Error]: Sub-machine '${refToExit.id}' emitted output '${outcome}', but parent '${fsm.id}' has no matching transition. Prevented silent deadlock!`,
@@ -175,11 +175,15 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     });
   };
 
-  const send = (event: string, payload?: unknown): void => {
+  const sendInternal = (
+    event: string,
+    payload?: unknown,
+    fromChildOutput = false,
+  ): void => {
     // 1. If inside a subMachine:
     //    - Cooperative Cancel / Child Event Priority: if child handles `event` in its current state, delegate first.
     //    - Fallback / Hard Kill / Output Event: if parent handles `[subMachine, event, ...]`, evaluate parent transition.
-    if (activeSubMachine && activeSubRef) {
+    if (!fromChildOutput && activeSubMachine && activeSubRef) {
       if (
         activeSubRef.machine.hasTransitionFor(activeSubMachine.state(), event)
       ) {
@@ -229,15 +233,28 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       }
     }
 
+    const effectiveCtxAfterMutations = readEffectiveContext();
+    const resolvedEmittedOutput = evaluation.emittedOutput
+      ? {
+          type: evaluation.emittedOutput.type,
+          payload: evaluation.outputSelector
+            ? evaluation.outputSelector(effectiveCtxAfterMutations, payload)
+            : evaluation.emittedOutput.payload,
+        }
+      : null;
+    const resolvedFinalPayload = evaluation.hasFinalPayloadSelector
+      ? resolvedEmittedOutput?.payload
+      : evaluation.finalPayload;
+
     if (evaluation.stayed) {
-      hooks?.onStateChange?.(currentState, readEffectiveContext(), {
+      hooks?.onStateChange?.(currentState, effectiveCtxAfterMutations, {
         stayed: true,
         isPending: isPending(),
         isDone: isDone(),
         finalOutcome: doneOutcome,
         finalPayload: donePayload,
         hasFinalPayloadSelector: false,
-        emittedOutput: evaluation.emittedOutput,
+        emittedOutput: resolvedEmittedOutput,
         enteredSubMachine: null,
         exitedSubMachine: null,
       });
@@ -245,13 +262,13 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     }
 
     // Standard state transition
-    hooks?.onExit?.[prevState]?.(readEffectiveContext());
+    hooks?.onExit?.[prevState]?.(effectiveCtxAfterMutations);
     currentState = evaluation.nextState;
 
     if (evaluation.finalOutcome !== null) {
       doneOutcome = evaluation.finalOutcome;
       donePayload = evaluation.hasFinalPayloadSelector
-        ? evaluation.finalPayload
+        ? resolvedFinalPayload
         : readEffectiveContext();
     }
 
@@ -268,12 +285,17 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       isPending: isPending(),
       isDone: isDone(),
       finalOutcome: doneOutcome,
-      finalPayload: evaluation.finalPayload,
+      finalPayload: resolvedFinalPayload,
       hasFinalPayloadSelector: evaluation.hasFinalPayloadSelector,
-      emittedOutput: evaluation.emittedOutput,
+      emittedOutput:
+        evaluation.finalOutcome === null ? resolvedEmittedOutput : null,
       enteredSubMachine: evaluation.enteredSubMachine,
       exitedSubMachine: evaluation.exitedSubMachine,
     });
+  };
+
+  const send = (event: string, payload?: unknown): void => {
+    sendInternal(event, payload, false);
   };
 
   const patchContext = (patch: Partial<TContext>): void => {

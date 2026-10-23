@@ -51,10 +51,10 @@ export const baristaFSM = createMachineFeature<{
   // --------------------------------------------------------------------------
   // prettier-ignore
   transitions: [
-    /* FROM            VIA               TO                                                                                                     OPTIONS */
+    /* FROM            VIA               TO                         OPTIONS */
     ['ticketQueued',   'START_BREWING',  awaiting('brewingCoffee')],
-    ['brewingCoffee',  'DONE',           finalState('COFFEE_READY', (ctx) => ({ drinkName: ctx.selectedDrink.name, result: ctx.baristaResult! }))],
-    ['brewingCoffee',  'ERROR',          'maintenance',                                                                                         { call: (m) => m._setBrewError }],
+    ['brewingCoffee',  'DONE',           finalState(),              { output: ['COFFEE_READY', (ctx) => ({ drinkName: ctx.selectedDrink.name, result: ctx.baristaResult! })] }],
+    ['brewingCoffee',  'ERROR',          'maintenance',             { call: (m) => m._setBrewError }],
     ['maintenance',    'RETRY_BREW',     awaiting('brewingCoffee')],
   ],
 

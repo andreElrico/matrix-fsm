@@ -746,7 +746,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     expect(subAborted).toBe(true);
   });
 
-  it('supports createMachineFeature (Sandwich-Pattern), store.actors.<id>() reactive signals, finalState payload selectors, Cooperative Cancel vs Hard Kill, and Runtime Fail-Fast Guard', async () => {
+  it('supports createMachineFeature (Sandwich-Pattern), store.actors.<id>() reactive signals, unified output tuple selectors, intermediate outputs with parent stay() or exit kill, Cooperative Cancel vs Hard Kill, and Runtime Fail-Fast Guard', async () => {
     interface BaristaInputs {
       readonly selectedDrink: { readonly name: string; readonly price: number };
       readonly simulateBrewError?: boolean;
@@ -754,6 +754,8 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
 
     type BaristaEvents = {
       START_BREWING: void;
+      TICK_PROGRESS: { readonly percent: number };
+      EMERGENCY_OVERHEAT: void;
       RETRY_BREW: void;
     };
 
@@ -762,6 +764,10 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         readonly drinkName: string;
         readonly temperatureCelsius: number;
       };
+      BREW_PROGRESS: {
+        readonly percent: number;
+      };
+      OVERHEAT_ALERT: void;
     };
 
     let brewAborted = false;
@@ -774,21 +780,18 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     }>()({
       id: 'barista',
       initial: 'ticketQueued',
+      // prettier-ignore
       transitions: [
-        ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee')],
-        [
-          'brewingCoffee',
-          'DONE',
-          finalState('COFFEE_READY', (ctx) => ({
-            drinkName: ctx.selectedDrink.name,
-            temperatureCelsius: ctx.temperatureCelsius!,
-          })),
-        ],
-        ['brewingCoffee', 'ERROR',         'maintenance',             { call: (m) => m._setBrewError }],
-        ['maintenance',   'RETRY_BREW',    awaiting('brewingCoffee')],
+        ['ticketQueued',   'START_BREWING',      awaiting('brewingCoffee')],
+        ['brewingCoffee',  'TICK_PROGRESS',      stay(),                    { patch: (_ctx, ev: { readonly percent: number }) => ({ progressPercent: ev.percent }), output: ['BREW_PROGRESS', (ctx) => ({ percent: ctx.progressPercent })] }],
+        ['brewingCoffee',  'EMERGENCY_OVERHEAT', stay(),                    { output: 'OVERHEAT_ALERT' }],
+        ['brewingCoffee',  'DONE',               finalState(),              { output: ['COFFEE_READY', (ctx) => ({ drinkName: ctx.selectedDrink.name, temperatureCelsius: ctx.temperatureCelsius! })] }],
+        ['brewingCoffee',  'ERROR',              'maintenance',             { call: (m) => m._setBrewError }],
+        ['maintenance',    'RETRY_BREW',         awaiting('brewingCoffee')],
       ],
       state: {
         temperatureCelsius: null as number | null,
+        progressPercent: 0,
         brewError: null as string | null,
       },
       methods: (store) => ({
@@ -817,6 +820,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     interface ShopContext {
       selectedDrink: { readonly name: string; readonly price: number } | null;
       simulateBrewError: boolean;
+      lastProgress: number;
       preparedDrink: {
         readonly drinkName: string;
         readonly temperatureCelsius: number;
@@ -828,6 +832,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         readonly drinkName: string;
         readonly temperatureCelsius: number;
       }): void;
+      _onBrewProgress(output: { readonly percent: number }): void;
     }
 
     // Compile-time checks for `createMachineFeature`:
@@ -840,8 +845,10 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         initial: 'browsing',
         transitions: [
           // @ts-expect-error - Missing required `{ input: (ctx) => BaristaInputs }`
-          ['browsing',     'PAY',          baristaFeature],
-          [baristaFeature, 'COFFEE_READY', 'ready'],
+          ['browsing',     'PAY',            baristaFeature],
+          [baristaFeature, 'COFFEE_READY',   'ready'],
+          [baristaFeature, 'BREW_PROGRESS',  stay()],
+          [baristaFeature, 'OVERHEAT_ALERT', 'browsing'],
         ],
       });
 
@@ -851,7 +858,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       }>()({
         id: 'missingOutputCompileTest',
         initial: 'browsing',
-        // @ts-expect-error - Missing required transition row for sub-machine output 'COFFEE_READY'
+        // @ts-expect-error - Missing required transition rows for sub-machine outputs
         transitions: [
           [
             'browsing',
@@ -883,8 +890,10 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
             }),
           },
         ],
-        [baristaFeature, 'CANCEL',       'browsing'],
-        [baristaFeature, 'COFFEE_READY', 'ready',    { call: (m) => m._onCoffeeReady }],
+        [baristaFeature, 'CANCEL',         'browsing'],
+        [baristaFeature, 'BREW_PROGRESS',  stay(),     { call: (m) => m._onBrewProgress }],
+        [baristaFeature, 'OVERHEAT_ALERT', 'browsing'],
+        [baristaFeature, 'COFFEE_READY',   'ready',    { call: (m) => m._onCoffeeReady }],
       ],
     });
 
@@ -893,12 +902,15 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       withState<ShopContext>({
         selectedDrink: { name: 'Oat Cappuccino', price: 4.8 },
         simulateBrewError: true,
+        lastProgress: 0,
         preparedDrink: null,
       }),
       withMethods(
         (store): ShopMethods => ({
           _onCoffeeReady: (output) =>
             patchState(store, { preparedDrink: output }),
+          _onBrewProgress: (output) =>
+            patchState(store, { lastProgress: output.percent }),
         }),
       ),
       withStateMachine(shopFSM),
@@ -935,7 +947,23 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     expect(store.fsmSubState()).toBe('brewingCoffee');
     expect(store.isPending()).toBe(true);
 
-    // Test Hard Kill during brewing -> aborts AbortSignal immediately
+    // Test intermediate output (`stay()` + `output: ['BREW_PROGRESS', ...]`) updates both `store.actors.barista()` and parent!
+    store.send('TICK_PROGRESS', { percent: 55 });
+    expect(store.actors.barista()?.progressPercent).toBe(55);
+    expect(store.lastProgress()).toBe(55);
+    expect(store.fsmState()).toBe('barista');
+    expect(store.fsmSubState()).toBe('brewingCoffee');
+
+    // Test Hard Kill when parent transitions away from sub-machine on intermediate output (`OVERHEAT_ALERT` -> `'browsing'`)
+    store.send('EMERGENCY_OVERHEAT');
+    expect(brewAborted).toBe(true);
+    expect(store.fsmState()).toBe('browsing');
+    expect(store.actors.barista()).toBeNull();
+
+    // Re-enter and test Hard Kill via direct parent CANCEL during brewing -> aborts AbortSignal immediately
+    brewAborted = false;
+    store.send('PAY');
+    store.send('START_BREWING');
     store.send('CANCEL');
     expect(brewAborted).toBe(true);
     expect(store.fsmState()).toBe('browsing');

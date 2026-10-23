@@ -253,27 +253,51 @@ function buildFSM<
         ? (options.input(nextContext, payload) as Record<string, unknown>)
         : null;
 
-      let emittedOutput: { readonly type: string; readonly payload: unknown } | null =
-        null;
-      if (options?.emit) {
-        if (typeof options.emit === 'string') {
-          emittedOutput = { type: options.emit, payload };
-        } else if (typeof options.emit === 'object' && options.emit !== null) {
+      let outputType: string | null = null;
+      let outputSelector:
+        | ((ctx: Readonly<EffectiveContext>, eventPayload: any) => unknown)
+        | null = null;
+      let emittedOutput: {
+        readonly type: string;
+        readonly payload: unknown;
+      } | null = null;
+
+      if (options?.output) {
+        if (typeof options.output === 'string') {
+          outputType = options.output;
+          emittedOutput = { type: outputType, payload: undefined };
+        } else if (Array.isArray(options.output)) {
+          const [type, selector] = options.output as readonly [
+            string,
+            ((ctx: Readonly<EffectiveContext>, eventPayload: any) => unknown)?,
+          ];
+          outputType = String(type);
+          outputSelector = typeof selector === 'function' ? selector : null;
           emittedOutput = {
-            type: String(options.emit.type),
-            payload: options.emit.payload(nextContext, payload),
+            type: outputType,
+            payload: outputSelector
+              ? outputSelector(nextContext, payload)
+              : undefined,
           };
         }
       }
 
       const resolved = resolveTargetId(to, currentState);
-      const hasFinalPayloadSelector =
-        isFinalNode(to) && typeof to.payloadSelector === 'function';
+      const isFinal = resolved.finalOutcome !== null;
+      const effectiveFinalOutcome = isFinal
+        ? (outputType ?? resolved.finalOutcome)
+        : null;
+      const effectiveNextState = (
+        isFinal && effectiveFinalOutcome
+          ? effectiveFinalOutcome
+          : resolved.stateName
+      ) as StateUnion;
+      const hasFinalPayloadSelector = isFinal && outputSelector !== null;
       const finalPayload = hasFinalPayloadSelector
-        ? to.payloadSelector!(nextContext)
+        ? emittedOutput?.payload
         : undefined;
       const isTargetAwaiting =
-        resolved.isAwaiting || awaitingStates.has(resolved.stateName);
+        resolved.isAwaiting || awaitingStates.has(effectiveNextState);
 
       const exitedSub =
         !resolved.stayed && subMachines.has(currentState)
@@ -284,7 +308,7 @@ function buildFSM<
         matched: true,
         from: currentState,
         via: event,
-        nextState: resolved.stateName as StateUnion,
+        nextState: effectiveNextState,
         nextContext,
         patchApplied,
         callSelector: options?.call ?? null,
@@ -293,10 +317,11 @@ function buildFSM<
         isAwaiting: resolved.stayed
           ? awaitingStates.has(currentState)
           : isTargetAwaiting,
-        finalOutcome: resolved.finalOutcome,
+        finalOutcome: effectiveFinalOutcome,
         finalPayload,
         hasFinalPayloadSelector,
         emittedOutput,
+        outputSelector,
         enteredSubMachine: resolved.subMachine,
         exitedSubMachine: exitedSub,
         enteredEach: resolved.eachNode,
@@ -318,6 +343,7 @@ function buildFSM<
       finalPayload: undefined,
       hasFinalPayloadSelector: false,
       emittedOutput: null,
+      outputSelector: null,
       enteredSubMachine: null,
       exitedSubMachine: null,
       enteredEach: null,
