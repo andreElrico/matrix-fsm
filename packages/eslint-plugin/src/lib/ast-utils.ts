@@ -162,7 +162,9 @@ function isMachineCreatorCallee(node: TSESTree.CallExpression): boolean {
   const callee = unwrapCallee(node.callee);
   return (
     callee.type === AST_NODE_TYPES.Identifier &&
-    (callee.name === 'createFSM' || callee.name === 'subMachine')
+    (callee.name === 'createFSM' ||
+      callee.name === 'createMachineFeature' ||
+      callee.name === 'subMachine')
   );
 }
 

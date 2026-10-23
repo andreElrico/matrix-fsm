@@ -4,7 +4,7 @@
  */
 
 import { awaiting, createFSM, stay } from '@matrix-fsm/core';
-import { baristaFSM } from './barista.machine';
+import { baristaFSM } from './barista.feature';
 import type {
   CoffeeShopContext,
   CoffeeShopEvents,
@@ -38,8 +38,11 @@ export const coffeeShopFSM = createFSM<{
     ['checkingLoyalty',     'CANCEL',                   'customerBrowsing'],
     ['checkingLoyalty',     'LoyaltyApiTimeoutError',   'loyaltyErrorView'],
     ['checkingLoyalty',     'ERROR',                    'customerBrowsing'],
-    // 10th drink is FREE -> bypass payment and route directly into Barista Sub-FSM!
-    ['checkingLoyalty',     'DONE',                     baristaFSM,                   { guard: isFreeDrink }],
+    // 10th drink is FREE -> bypass payment and route directly into Barista Sub-FSM with typed input!
+    ['checkingLoyalty',     'DONE',                     baristaFSM,                   {
+                                                                                        guard: isFreeDrink,
+                                                                                        input: (ctx) => ({ selectedDrink: ctx.selectedDrink! }),
+                                                                                      }],
     ['checkingLoyalty',     'DONE',                     'awaitingPayment'],
 
     // Loyalty error recovery options:
@@ -47,13 +50,16 @@ export const coffeeShopFSM = createFSM<{
     ['loyaltyErrorView',    'BYPASS_CARD',              'awaitingPayment'],
     ['loyaltyErrorView',    'CANCEL',                   'customerBrowsing'],
 
-    // Customer payment at register -> enters Barista Sub-FSM:
-    ['awaitingPayment',     'PAY',                      baristaFSM,                   { call: (m) => m._markPaid }],
+    // Customer payment at register -> enters Barista Sub-FSM with typed input:
+    ['awaitingPayment',     'PAY',                      baristaFSM,                   {
+                                                                                        call: (m) => m._markPaid,
+                                                                                        input: (ctx) => ({ selectedDrink: ctx.selectedDrink! }),
+                                                                                      }],
     ['awaitingPayment',     'CANCEL',                   'customerBrowsing'],
 
     // Barista Sub-FSM outcomes & group-interrupt:
     [baristaFSM,            'CANCEL',                   'customerBrowsing'],
-    [baristaFSM,            'COFFEE_READY',             'coffeeReady',                { call: (m) => m._handleDrinkPrepared }],
+    [baristaFSM,            'COFFEE_READY',             'coffeeReady',                { call: (m) => m._onCoffeeReady }],
 
     // Customer picks up coffee from counter and drinks it:
     ['coffeeReady',         'TAKE_COFFEE',              'drinkingCoffee'],

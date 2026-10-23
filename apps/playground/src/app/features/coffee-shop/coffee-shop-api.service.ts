@@ -115,8 +115,15 @@ export class CoffeeShopApiService {
   async brewCoffee(
     drink: CoffeeDrink,
     signal?: AbortSignal,
+    simulateBrewError?: boolean,
   ): Promise<BrewResult> {
     this.brewCallCount++;
+
+    if (simulateBrewError) {
+      throw new BaristaMachineGlitchError(
+        'Steam wand pressure drop — please retry extraction',
+      );
+    }
 
     const brewDuration = this.mode === 'slow_brewing' ? 1200 : 450;
 

@@ -9,18 +9,13 @@ import {
   type CoffeeDrink,
   isTenthDrinkEligible,
 } from './coffee-shop.domain';
-import { provideStateMachine } from '@matrix-fsm/angular';
-import { BaristaStore } from './barista.store';
-import { coffeeShopFSM, baristaFSM } from './coffee-shop.machine';
+import { coffeeShopFSM } from './coffee-shop.machine';
 import { CoffeeShopStore } from './coffee-shop.store';
 
 @Component({
   selector: 'app-coffee-shop-example',
   standalone: true,
-  providers: [
-    CoffeeShopStore,
-    provideStateMachine(baristaFSM, BaristaStore),
-  ],
+  providers: [CoffeeShopStore], // Zero BaristaStore / provideStateMachine boilerplate!
   templateUrl: './coffee-shop-example.component.html',
   styleUrl: './coffee-shop-example.component.css',
 })

@@ -6,7 +6,8 @@
     "build": "nx run-many -t build",
     "test": "vitest run",
     "lint": "nx run-many -t lint",
-    "typecheck": "nx run-many -t typecheck"
+    "typecheck": "nx run-many -t typecheck",
+    "mermaid": "node tools/generate-mermaid.mjs"
   },
   "private": true,
   "devDependencies": {

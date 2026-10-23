@@ -253,7 +253,25 @@ function buildFSM<
         ? (options.input(nextContext, payload) as Record<string, unknown>)
         : null;
 
+      let emittedOutput: { readonly type: string; readonly payload: unknown } | null =
+        null;
+      if (options?.emit) {
+        if (typeof options.emit === 'string') {
+          emittedOutput = { type: options.emit, payload };
+        } else if (typeof options.emit === 'object' && options.emit !== null) {
+          emittedOutput = {
+            type: String(options.emit.type),
+            payload: options.emit.payload(nextContext, payload),
+          };
+        }
+      }
+
       const resolved = resolveTargetId(to, currentState);
+      const hasFinalPayloadSelector =
+        isFinalNode(to) && typeof to.payloadSelector === 'function';
+      const finalPayload = hasFinalPayloadSelector
+        ? to.payloadSelector!(nextContext)
+        : undefined;
       const isTargetAwaiting =
         resolved.isAwaiting || awaitingStates.has(resolved.stateName);
 
@@ -276,6 +294,9 @@ function buildFSM<
           ? awaitingStates.has(currentState)
           : isTargetAwaiting,
         finalOutcome: resolved.finalOutcome,
+        finalPayload,
+        hasFinalPayloadSelector,
+        emittedOutput,
         enteredSubMachine: resolved.subMachine,
         exitedSubMachine: exitedSub,
         enteredEach: resolved.eachNode,
@@ -294,6 +315,9 @@ function buildFSM<
       stayed: false,
       isAwaiting: awaitingStates.has(currentState),
       finalOutcome: null,
+      finalPayload: undefined,
+      hasFinalPayloadSelector: false,
+      emittedOutput: null,
       enteredSubMachine: null,
       exitedSubMachine: null,
       enteredEach: null,
@@ -330,7 +354,8 @@ export function createFSM<
     ContractContext<TContract>,
     Extract<keyof ContractEvents<TContract>, string>,
     ContractStates<TContract>,
-    ContractMethods<TContract>
+    ContractMethods<TContract>,
+    ContractOutput<TContract>
   >[],
 >(
   config: FSMConfig<
@@ -343,7 +368,8 @@ export function createFSM<
         TTransitions,
         ContractContext<TContract>,
         Extract<keyof ContractEvents<TContract>, string>,
-        ContractMethods<TContract>
+        ContractMethods<TContract>,
+        ContractOutput<TContract>
       >,
     ContractStates<TContract>,
     ContractMethods<TContract>

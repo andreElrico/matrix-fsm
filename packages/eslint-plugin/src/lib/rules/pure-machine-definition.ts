@@ -24,7 +24,7 @@ export type MessageIds =
 
 const IMPURE_IMPORT_PATTERN = /\.(service|store)(\.[cm]?[jt]s)?$/i;
 const EXEMPT_FILE_PATTERN =
-  /\.(store|component|service|directive|pipe|module|spec|test)\.[cm]?[jt]sx?$/i;
+  /\.(feature|store|component|service|directive|pipe|module|spec|test)\.[cm]?[jt]sx?$/i;
 
 function isValidCallSelectorProperty(valueNode: TSESTree.Node): boolean {
   if (

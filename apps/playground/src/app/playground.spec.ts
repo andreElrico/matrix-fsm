@@ -13,11 +13,9 @@ import { AuthFeatureStore } from './features/auth/auth.store';
 import {
   COFFEE_MENU,
 } from './features/coffee-shop/coffee-shop.domain';
-import { coffeeShopFSM, baristaFSM } from './features/coffee-shop/coffee-shop.machine';
+import { coffeeShopFSM } from './features/coffee-shop/coffee-shop.machine';
 import { CoffeeShopStore } from './features/coffee-shop/coffee-shop.store';
-import { BaristaStore } from './features/coffee-shop/barista.store';
 import { CoffeeShopApiService } from './features/coffee-shop/coffee-shop-api.service';
-import { provideStateMachine } from '@matrix-fsm/angular';
 
 function setupPlaygroundInjector() {
   const injector = Injector.create({
@@ -143,7 +141,7 @@ describe('@matrix-fsm/playground - Angular DI & Blueprint E2E Verification', () 
     expect(store.fsmContext().user?.email).toBe('admin@matrix-fsm.dev');
   });
 
-  it('verifies coffee-shop.machine.ts and barista.machine.ts pass all 8 AST rules of @matrix-fsm/eslint-plugin with zero errors', () => {
+  it('verifies coffee-shop.machine.ts and barista.feature.ts pass all 8 AST rules of @matrix-fsm/eslint-plugin with zero errors', () => {
     const linter = new Linter({ configType: 'flat' });
     const lintConfig = [
       {
@@ -160,7 +158,7 @@ describe('@matrix-fsm/playground - Angular DI & Blueprint E2E Verification', () 
       },
     ];
 
-    for (const file of ['coffee-shop.machine.ts', 'barista.machine.ts']) {
+    for (const file of ['coffee-shop.machine.ts', 'barista.feature.ts']) {
       const machinePath = path.resolve(
         import.meta.dirname,
         `./features/coffee-shop/${file}`,
@@ -178,13 +176,13 @@ describe('@matrix-fsm/playground - Angular DI & Blueprint E2E Verification', () 
       providers: [
         { provide: CoffeeShopApiService, useClass: CoffeeShopApiService, deps: [] },
         { provide: CoffeeShopStore, useClass: CoffeeShopStore, deps: [] },
-        provideStateMachine(baristaFSM, BaristaStore),
       ],
     });
     const store = runInInjectionContext(injector, () => injector.get(CoffeeShopStore));
     const flatWhite = COFFEE_MENU[2]; // Velvet Flat White ($5.0)
 
     expect(store.fsmState()).toBe('customerBrowsing');
+    expect(store.actors.barista()).toBeNull();
 
     // 1. Placing order without selecting a drink triggers stay() fallback
     store.send('PLACE_ORDER');
@@ -210,6 +208,7 @@ describe('@matrix-fsm/playground - Angular DI & Blueprint E2E Verification', () 
     expect(store.fsmState()).toBe('barista');
     expect(store.fsmSubState()).toBe('ticketQueued');
     expect(store.fsmContext().isPaid).toBe(true);
+    expect(store.actors.barista()?.selectedDrink.name).toBe('Velvet Flat White');
 
     // 4. Barista starts brewing -> subState becomes 'brewingCoffee' -> finalState('COFFEE_READY') -> 'coffeeReady'
     store.send('START_BREWING');
@@ -219,7 +218,8 @@ describe('@matrix-fsm/playground - Angular DI & Blueprint E2E Verification', () 
 
     expect(store.fsmState()).toBe('coffeeReady');
     expect(store.fsmSubState()).toBeNull();
-    expect(store.fsmContext().baristaResult?.temperatureCelsius).toBe(67);
+    expect(store.actors.barista()).toBeNull();
+    expect(store.fsmContext().preparedCup?.temperatureCelsius).toBe(67);
 
     // 5. Customer takes coffee and drinks it
     store.send('TAKE_COFFEE');
@@ -241,7 +241,6 @@ describe('@matrix-fsm/playground - Angular DI & Blueprint E2E Verification', () 
       providers: [
         { provide: CoffeeShopApiService, useClass: CoffeeShopApiService, deps: [] },
         { provide: CoffeeShopStore, useClass: CoffeeShopStore, deps: [] },
-        provideStateMachine(baristaFSM, BaristaStore),
       ],
     });
     const store = runInInjectionContext(injector, () => injector.get(CoffeeShopStore));
@@ -283,7 +282,6 @@ describe('@matrix-fsm/playground - Angular DI & Blueprint E2E Verification', () 
       providers: [
         { provide: CoffeeShopApiService, useClass: CoffeeShopApiService, deps: [] },
         { provide: CoffeeShopStore, useClass: CoffeeShopStore, deps: [] },
-        provideStateMachine(baristaFSM, BaristaStore),
       ],
     });
     const api = injector.get(CoffeeShopApiService);

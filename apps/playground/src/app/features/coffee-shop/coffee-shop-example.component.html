@@ -243,66 +243,68 @@
           <div class="state-view queue-view">
             <div class="step-badge">Sub-FSM: <code>baristaFSM ({{ store.fsmSubState() }})</code></div>
 
-            @switch (store.fsmSubState()) {
-              @case ('ticketQueued') {
-                <h4>☕ Order Ticket Queued at Barista Counter (<code>barista / ticketQueued</code>)</h4>
+            @if (store.actors.barista(); as barista) {
+              @switch (store.fsmSubState()) {
+                @case ('ticketQueued') {
+                  <h4>☕ Order Ticket Queued at Barista Counter (<code>barista / ticketQueued</code>)</h4>
 
-                @if (store.fsmContext().isFreeDrink) {
-                  <div class="free-celebration-banner">
-                    🎉 <strong>10TH DRINK FREE PROMOTION!</strong>
-                    <p>The Loyalty API validated that this is your 10th drink! No payment required!</p>
+                  @if (store.fsmContext().isFreeDrink) {
+                    <div class="free-celebration-banner">
+                      🎉 <strong>10TH DRINK FREE PROMOTION!</strong>
+                      <p>The Loyalty API validated that this is your 10th drink! No payment required!</p>
+                    </div>
+                  } @else {
+                    <div class="paid-confirmation">
+                      ✅ Payment of ${{ store.fsmContext().finalPrice.toFixed(2) }} confirmed by cashier.
+                    </div>
+                  }
+
+                  <div class="ticket-box">
+                    <div class="ticket-header">ORDER TICKET #{{ store.fsmContext().customerCard.cardId }}</div>
+                    <div class="ticket-item">
+                      <span class="emoji">{{ barista.selectedDrink.emoji }}</span>
+                      <span><strong>{{ barista.selectedDrink.name }}</strong></span>
+                    </div>
+                    <small>Special: Artisanal Extraction (Cohesive Sub-Machine Actor)</small>
                   </div>
-                } @else {
-                  <div class="paid-confirmation">
-                    ✅ Payment of ${{ store.fsmContext().finalPrice.toFixed(2) }} confirmed by cashier.
+
+                  <div class="btn-group">
+                    <button type="button" class="primary-btn" (click)="startBrewing()">
+                      ☕ Barista: Start Brewing (START_BREWING)
+                    </button>
+                    <button type="button" (click)="cancel()">
+                      Cancel Order (Parent Group-Interrupt)
+                    </button>
                   </div>
                 }
 
-                <div class="ticket-box">
-                  <div class="ticket-header">ORDER TICKET #{{ store.fsmContext().customerCard.cardId }}</div>
-                  <div class="ticket-item">
-                    <span class="emoji">{{ store.fsmContext().selectedDrink?.emoji }}</span>
-                    <span><strong>{{ store.fsmContext().selectedDrink?.name }}</strong></span>
+                @case ('brewingCoffee') {
+                  <h4>☕ Barista Brewing {{ barista.selectedDrink.name }} (<code>barista / awaiting('brewingCoffee')</code>)</h4>
+                  <p>
+                    Grinding beans, tamping with 20kg pressure, pulling a 28s double shot, and texturing milk...
+                  </p>
+                  <div class="steaming-animation">
+                    <span class="steam">♨️</span> Brewing in progress inside <code>baristaFSM</code>...
                   </div>
-                  <small>Special: Artisanal Extraction (Hierarchical Sub-FSM)</small>
-                </div>
-
-                <div class="btn-group">
-                  <button type="button" class="primary-btn" (click)="startBrewing()">
-                    ☕ Barista: Start Brewing (START_BREWING)
-                  </button>
-                  <button type="button" (click)="cancel()">
-                    Cancel Order (Parent Group-Interrupt)
-                  </button>
-                </div>
-              }
-
-              @case ('brewingCoffee') {
-                <h4>☕ Barista Brewing Coffee (<code>barista / awaiting('brewingCoffee')</code>)</h4>
-                <p>
-                  Grinding beans, tamping with 20kg pressure, pulling a 28s double shot, and texturing milk...
-                </p>
-                <div class="steaming-animation">
-                  <span class="steam">♨️</span> Brewing in progress inside <code>baristaFSM</code>...
-                </div>
-                <button type="button" class="danger-btn" (click)="cancel()">
-                  Customer Cancels (Group-Interrupts Barista Sub-FSM &amp; Fiber)
-                </button>
-              }
-
-              @case ('machineMaintenance') {
-                <h4>🔧 Espresso Machine Maintenance (<code>barista / machineMaintenance</code>)</h4>
-                @if (store.fsmContext().error; as err) {
-                  <div class="error-banner" role="alert">{{ err }}</div>
-                }
-                <div class="btn-group">
-                  <button type="button" class="primary-btn" (click)="store.send('RETRY_BREW')">
-                    🔄 Barista: Retry Extraction (RETRY_BREW)
-                  </button>
                   <button type="button" class="danger-btn" (click)="cancel()">
-                    Cancel Order
+                    Customer Cancels (Group-Interrupts Barista Sub-FSM &amp; Fiber)
                   </button>
-                </div>
+                }
+
+                @case ('maintenance') {
+                  <h4>🔧 Espresso Machine Maintenance (<code>barista / maintenance</code>)</h4>
+                  @if (barista.brewError; as err) {
+                    <div class="error-banner" role="alert">{{ err }}</div>
+                  }
+                  <div class="btn-group">
+                    <button type="button" class="primary-btn" (click)="store.send('RETRY_BREW')">
+                      🔄 Barista: Retry Extraction (RETRY_BREW)
+                    </button>
+                    <button type="button" class="danger-btn" (click)="cancel()">
+                      Cancel Order
+                    </button>
+                  </div>
+                }
               }
             }
           </div>
@@ -316,8 +318,8 @@
               <div class="drink-cup-icon">{{ store.fsmContext().selectedDrink?.emoji }}</div>
               <div>
                 <strong>{{ store.fsmContext().selectedDrink?.name }}</strong>
-                <p class="barista-quote">"{{ store.fsmContext().baristaResult?.baristaNote }}"</p>
-                <small class="temp">Served at: {{ store.fsmContext().baristaResult?.temperatureCelsius }}°C</small>
+                <p class="barista-quote">"{{ store.fsmContext().preparedCup?.baristaNote }}"</p>
+                <small class="temp">Served at: {{ store.fsmContext().preparedCup?.temperatureCelsius }}°C</small>
               </div>
             </div>
             <button type="button" class="primary-btn" (click)="takeCoffee()">

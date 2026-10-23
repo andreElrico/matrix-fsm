@@ -10,12 +10,11 @@ import { describe, expect, it } from 'vitest';
 import {
   awaiting,
   createFSM,
+  createMachineFeature,
   each,
   finalState,
-  stay,
-} from '@matrix-fsm/core';
-import {
   provideStateMachine,
+  stay,
   withMachineTasks,
   withStateMachine,
   type Subscribable,
@@ -745,5 +744,240 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     expect(store.fsmSubState()).toBeNull();
     expect(store.isPending()).toBe(false);
     expect(subAborted).toBe(true);
+  });
+
+  it('supports createMachineFeature (Sandwich-Pattern), store.actors.<id>() reactive signals, finalState payload selectors, Cooperative Cancel vs Hard Kill, and Runtime Fail-Fast Guard', async () => {
+    interface BaristaInputs {
+      readonly selectedDrink: { readonly name: string; readonly price: number };
+      readonly simulateBrewError?: boolean;
+    }
+
+    type BaristaEvents = {
+      START_BREWING: void;
+      RETRY_BREW: void;
+    };
+
+    type BaristaOutputs = {
+      COFFEE_READY: {
+        readonly drinkName: string;
+        readonly temperatureCelsius: number;
+      };
+    };
+
+    let brewAborted = false;
+
+    const baristaFeature = createMachineFeature<{
+      inputs: BaristaInputs;
+      events: BaristaEvents;
+      outputs: BaristaOutputs;
+      states: 'ticketQueued' | 'brewingCoffee' | 'maintenance';
+    }>()({
+      id: 'barista',
+      initial: 'ticketQueued',
+      transitions: [
+        ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee')],
+        [
+          'brewingCoffee',
+          'DONE',
+          finalState('COFFEE_READY', (ctx) => ({
+            drinkName: ctx.selectedDrink.name,
+            temperatureCelsius: ctx.temperatureCelsius!,
+          })),
+        ],
+        ['brewingCoffee', 'ERROR',         'maintenance',             { call: (m) => m._setBrewError }],
+        ['maintenance',   'RETRY_BREW',    awaiting('brewingCoffee')],
+      ],
+      state: {
+        temperatureCelsius: null as number | null,
+        brewError: null as string | null,
+      },
+      methods: (store) => ({
+        _setBrewError: (err: Error) =>
+          patchState(store, { brewError: err.message }),
+      }),
+      tasks: () => ({
+        brewingCoffee: (ctx, signal) =>
+          new Promise((resolve, reject) => {
+            if (ctx.simulateBrewError) {
+              reject(new Error('Boiler pressure low'));
+              return;
+            }
+            const timer = setTimeout(
+              () => resolve({ temperatureCelsius: 67, brewError: null }),
+              25,
+            );
+            signal.addEventListener('abort', () => {
+              clearTimeout(timer);
+              brewAborted = true;
+            });
+          }),
+      }),
+    });
+
+    interface ShopContext {
+      selectedDrink: { readonly name: string; readonly price: number } | null;
+      simulateBrewError: boolean;
+      preparedDrink: {
+        readonly drinkName: string;
+        readonly temperatureCelsius: number;
+      } | null;
+    }
+
+    interface ShopMethods {
+      _onCoffeeReady(output: {
+        readonly drinkName: string;
+        readonly temperatureCelsius: number;
+      }): void;
+    }
+
+    // Compile-time checks for `createMachineFeature`:
+    if (false as boolean) {
+      createFSM<{
+        events: { PAY: void };
+        context: ShopContext;
+      }>()({
+        id: 'missingInputCompileTest',
+        initial: 'browsing',
+        transitions: [
+          // @ts-expect-error - Missing required `{ input: (ctx) => BaristaInputs }`
+          ['browsing',     'PAY',          baristaFeature],
+          [baristaFeature, 'COFFEE_READY', 'ready'],
+        ],
+      });
+
+      createFSM<{
+        events: { PAY: void };
+        context: ShopContext;
+      }>()({
+        id: 'missingOutputCompileTest',
+        initial: 'browsing',
+        // @ts-expect-error - Missing required transition row for sub-machine output 'COFFEE_READY'
+        transitions: [
+          [
+            'browsing',
+            'PAY',
+            baristaFeature,
+            { input: (ctx) => ({ selectedDrink: ctx.selectedDrink! }) },
+          ],
+        ],
+      });
+    }
+
+    const shopFSM = createFSM<{
+      events: { PAY: void; CANCEL: void };
+      states: 'browsing' | 'ready';
+      context: ShopContext;
+      methods: ShopMethods;
+    }>()({
+      id: 'coffeeShop',
+      initial: 'browsing',
+      transitions: [
+        [
+          'browsing',
+          'PAY',
+          baristaFeature,
+          {
+            input: (ctx) => ({
+              selectedDrink: ctx.selectedDrink!,
+              simulateBrewError: ctx.simulateBrewError,
+            }),
+          },
+        ],
+        [baristaFeature, 'CANCEL',       'browsing'],
+        [baristaFeature, 'COFFEE_READY', 'ready',    { call: (m) => m._onCoffeeReady }],
+      ],
+    });
+
+    // Notice: Zero BaristaStore, zero provideStateMachine!
+    const ShopStore = signalStore(
+      withState<ShopContext>({
+        selectedDrink: { name: 'Oat Cappuccino', price: 4.8 },
+        simulateBrewError: true,
+        preparedDrink: null,
+      }),
+      withMethods(
+        (store): ShopMethods => ({
+          _onCoffeeReady: (output) =>
+            patchState(store, { preparedDrink: output }),
+        }),
+      ),
+      withStateMachine(shopFSM),
+    );
+
+    const store = new ShopStore();
+    expect(store.fsmState()).toBe('browsing');
+    // Inactive sub-machine -> store.actors.barista() is null
+    expect(store.actors.barista()).toBeNull();
+
+    // Enter baristaFeature with simulateBrewError: true
+    store.send('PAY');
+    expect(store.fsmState()).toBe('barista');
+    expect(store.fsmSubState()).toBe('ticketQueued');
+    expect(store.actors.barista()?.selectedDrink.name).toBe('Oat Cappuccino');
+    expect(store.actors.barista()?.brewError).toBeNull();
+
+    // Start brewing -> fails and transitions to 'maintenance' with brewError patched via patchState(store, ...)
+    store.send('START_BREWING');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(store.fsmSubState()).toBe('maintenance');
+    expect(store.actors.barista()?.brewError).toBe('Boiler pressure low');
+    // Zero internal state leaked into parent store!
+    expect('brewError' in store.fsmContext()).toBe(false);
+
+    // Fix error and retry -> succeeds and emits COFFEE_READY with mapped payload!
+    store.send('CANCEL');
+    expect(store.fsmState()).toBe('browsing');
+    expect(store.actors.barista()).toBeNull();
+
+    store.patchContext({ simulateBrewError: false });
+    store.send('PAY');
+    store.send('START_BREWING');
+    expect(store.fsmSubState()).toBe('brewingCoffee');
+    expect(store.isPending()).toBe(true);
+
+    // Test Hard Kill during brewing -> aborts AbortSignal immediately
+    store.send('CANCEL');
+    expect(brewAborted).toBe(true);
+    expect(store.fsmState()).toBe('browsing');
+    expect(store.actors.barista()).toBeNull();
+
+    // Re-enter and let brewing finish -> COFFEE_READY payload delivered to _onCoffeeReady
+    store.send('PAY');
+    store.send('START_BREWING');
+    await new Promise((r) => setTimeout(r, 40));
+    expect(store.fsmState()).toBe('ready');
+    expect(store.actors.barista()).toBeNull();
+    expect(store.preparedDrink()).toEqual({
+      drinkName: 'Oat Cappuccino',
+      temperatureCelsius: 67,
+    });
+
+    // Test Runtime Fail-Fast Guard when sub-machine emits an unhandled output via `as any`:
+    const unhandledSub = createMachineFeature<{
+      events: { FAIL_BEANS: void };
+      outputs: { BEAN_EMPTY: void };
+      states: 'idle';
+    }>()({
+      id: 'barista',
+      initial: 'idle',
+      transitions: [
+        ['idle', 'FAIL_BEANS', finalState('BEAN_EMPTY')],
+      ],
+    });
+    const brokenParentFSM = createFSM<{
+      events: { ENTER: void };
+    }>()({
+      id: 'coffeeShop',
+      initial: 'browsing',
+      transitions: [
+        ['browsing', 'ENTER', unhandledSub],
+      ] as any,
+    });
+    const BrokenStore = signalStore(withStateMachine(brokenParentFSM));
+    const brokenStore = new BrokenStore();
+    brokenStore.send('ENTER');
+    expect(() => brokenStore.send('FAIL_BEANS' as any)).toThrow(
+      "[MatrixFSM Error]: Sub-machine 'barista' emitted output 'BEAN_EMPTY', but parent 'coffeeShop' has no matching transition. Prevented silent deadlock!",
+    );
   });
 });

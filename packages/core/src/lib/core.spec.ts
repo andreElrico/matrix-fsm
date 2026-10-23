@@ -317,4 +317,145 @@ describe('@matrix-fsm/core', () => {
     );
     expect(diagram).toContain('authenticating --> loggedIn : DONE');
   });
+
+  it('enforces compile-time input contracts, output exhaustiveness (ValidateSubMachineOutputs), finalState payload selectors, intermediate emit, and runtime fail-fast guards', () => {
+    interface BaristaInputs {
+      readonly selectedDrink: string;
+    }
+    type BaristaOutputs = {
+      COFFEE_READY: { readonly drinkName: string; readonly temp: number };
+      BEAN_EMPTY: { readonly reason: string };
+    };
+
+    const strictBarista = createFSM<{
+      inputs: BaristaInputs;
+      events: { START_BREWING: void; OUT_OF_BEANS: void; PROGRESS: void };
+      outputs: BaristaOutputs & { STEAM_READY: void };
+      context: BaristaInputs & { temp: number };
+      states: 'ticketQueued' | 'brewingCoffee';
+    }>()({
+      id: 'barista',
+      initial: 'ticketQueued',
+      transitions: [
+        ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee'), { emit: 'STEAM_READY' }],
+        [
+          'brewingCoffee',
+          'DONE',
+          finalState('COFFEE_READY', (ctx) => ({
+            drinkName: ctx.selectedDrink,
+            temp: ctx.temp,
+          })),
+        ],
+        [
+          'brewingCoffee',
+          'OUT_OF_BEANS',
+          finalState('BEAN_EMPTY', () => ({ reason: 'Hopper empty' })),
+        ],
+        ['brewingCoffee', 'ERROR',         'ticketQueued'],
+      ],
+    });
+
+    // Compile-time verification:
+    // 1. Omitting `{ input: (ctx) => ... }` when entering `strictBarista` must be a compile error!
+    createFSM<{
+      events: { PAY: void };
+      context: { drink: string };
+    }>()({
+      id: 'missingInputTest',
+      initial: 'idle',
+      transitions: [
+        // @ts-expect-error - Missing required `{ input: (ctx) => BaristaInputs }` for sub-machine with `inputs`
+        ['idle',        'PAY',          strictBarista],
+        [strictBarista, 'COFFEE_READY', 'done'],
+        [strictBarista, 'BEAN_EMPTY',   'idle'],
+        [strictBarista, 'STEAM_READY',  stay()],
+      ],
+    });
+
+    // 2. Omitting a declared output handler row (`BEAN_EMPTY`) on `strictBarista` must be a compile error!
+    createFSM<{
+      events: { PAY: void };
+      context: { drink: string };
+    }>()({
+      id: 'missingOutputHandlerTest',
+      initial: 'idle',
+      // @ts-expect-error - Missing required transition rows for sub-machine output(s): 'BEAN_EMPTY' | 'STEAM_READY'
+      transitions: [
+        ['idle',        'PAY',          strictBarista, { input: (ctx) => ({ selectedDrink: ctx.drink }) }],
+        [strictBarista, 'COFFEE_READY', 'done'],
+      ],
+    });
+
+    // 3. Valid parent handling all outputs + strongly typed payload on `call: (m) => m._onReady`
+    let readyOutput: { readonly drinkName: string; readonly temp: number } | null = null;
+    let steamCount = 0;
+
+    interface ParentMethods {
+      _onReady(output: { readonly drinkName: string; readonly temp: number }): void;
+      _onSteam(): void;
+    }
+
+    const validShop = createFSM<{
+      events: { PAY: void };
+      context: { drink: string };
+      methods: ParentMethods;
+    }>()({
+      id: 'coffeeShop',
+      initial: 'idle',
+      transitions: [
+        ['idle',        'PAY',          strictBarista, { input: (ctx) => ({ selectedDrink: ctx.drink }) }],
+        [strictBarista, 'STEAM_READY',  stay(),        { call: (m) => m._onSteam }],
+        [strictBarista, 'COFFEE_READY', 'done',        { call: (m) => m._onReady }],
+        [strictBarista, 'BEAN_EMPTY',   'maintenance'],
+      ],
+    });
+
+    const instance = createMachineInstance(validShop, {
+      initialContext: { drink: 'Flat White', temp: 68 } as any,
+      methods: {
+        _onReady: (out) => {
+          readyOutput = out;
+        },
+        _onSteam: () => {
+          steamCount++;
+        },
+      },
+    });
+
+    instance.send('PAY');
+    expect(instance.state()).toBe('barista');
+    expect(instance.subState()).toBe('ticketQueued');
+
+    // Intermediate `emit: 'STEAM_READY'` triggers parent `stay()` without killing child!
+    instance.send('START_BREWING');
+    expect(steamCount).toBe(1);
+    expect(instance.state()).toBe('barista');
+    expect(instance.subState()).toBe('brewingCoffee');
+
+    // Terminal `finalState('COFFEE_READY', selector)` passes selector output to `_onReady`!
+    instance.send('DONE');
+    expect(instance.state()).toBe('done');
+    expect(readyOutput).toEqual({ drinkName: 'Flat White', temp: 68 });
+
+    // 4. Runtime Fail-Fast Guard when someone bypasses TypeScript via `as any`:
+    const brokenShop = createFSM<{
+      events: { PAY: void };
+      context: { drink: string };
+    }>()({
+      id: 'coffeeShop',
+      initial: 'idle',
+      transitions: [
+        ['idle',        'PAY',          strictBarista, { input: (ctx) => ({ selectedDrink: ctx.drink }) }],
+        [strictBarista, 'COFFEE_READY', 'done'],
+      ] as any,
+    });
+
+    const brokenInstance = createMachineInstance(brokenShop, {
+      initialContext: { drink: 'Espresso', temp: 65 } as any,
+    });
+    brokenInstance.send('PAY');
+    expect(() => brokenInstance.send('START_BREWING')).toThrow(
+      "[MatrixFSM Error]: Sub-machine 'barista' emitted output 'STEAM_READY', but parent 'coffeeShop' has no matching transition. Prevented silent deadlock!",
+    );
+  });
 });

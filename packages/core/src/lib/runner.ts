@@ -20,6 +20,7 @@ export interface MachineInstance<TFSM extends AnyFSMDefinition = AnyFSMDefinitio
   readonly isPending: () => boolean;
   readonly isDone: () => boolean;
   readonly finalOutcome: () => string | null;
+  readonly finalPayload?: () => unknown;
   readonly send: (event: string, payload?: unknown) => void;
   readonly patchContext: (patch: Partial<ExtractContext<TFSM>>) => void;
   readonly reset: () => void;
@@ -50,6 +51,9 @@ export interface MachineInstanceHooks<TFSM extends AnyFSMDefinition> {
       isPending: boolean;
       isDone: boolean;
       finalOutcome: string | null;
+      finalPayload?: unknown;
+      hasFinalPayloadSelector?: boolean;
+      emittedOutput?: { readonly type: string; readonly payload: unknown } | null;
       enteredSubMachine: SubMachineRef<any, any> | null;
       exitedSubMachine: SubMachineRef<any, any> | null;
     },
@@ -98,6 +102,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
   let activeSubMachine: MachineInstance<any> | null = null;
   let activeSubRef: SubMachineRef<any, any> | null = null;
   let doneOutcome: string | null = null;
+  let donePayload: unknown = undefined;
 
   const readEffectiveContext = (): TContext => {
     if (hooks?.getContext) {
@@ -136,15 +141,34 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
         hooks?.onPatch?.(patch);
       },
       onStateChange: (_childState, childCtx, childInfo) => {
+        if (childInfo.emittedOutput && activeSubRef) {
+          const refId = activeSubRef.id;
+          const outType = childInfo.emittedOutput.type;
+          const outPayload = childInfo.emittedOutput.payload;
+          if (!fsm.hasTransitionFor(refId, outType)) {
+            throw new Error(
+              `[MatrixFSM Error]: Sub-machine '${refId}' emitted output '${outType}', but parent '${fsm.id}' has no matching transition. Prevented silent deadlock!`,
+            );
+          }
+          send(outType, outPayload);
+        }
         if (childInfo.isDone) {
           const outcome = childInfo.finalOutcome ?? 'DONE';
+          const outputPayload = childInfo.hasFinalPayloadSelector
+            ? childInfo.finalPayload
+            : childCtx;
           const refToExit = activeSubRef;
           activeSubMachine = null;
           activeSubRef = null;
-          if (refToExit && fsm.hasTransitionFor(refToExit.id, outcome)) {
-            send(outcome, childCtx);
+          if (!refToExit) {
+            return;
+          }
+          if (fsm.hasTransitionFor(refToExit.id, outcome)) {
+            send(outcome, outputPayload);
           } else {
-            send('DONE', childCtx);
+            throw new Error(
+              `[MatrixFSM Error]: Sub-machine '${refToExit.id}' emitted output '${outcome}', but parent '${fsm.id}' has no matching transition. Prevented silent deadlock!`,
+            );
           }
         }
       },
@@ -152,31 +176,17 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
   };
 
   const send = (event: string, payload?: unknown): void => {
-    // 1. If inside a subMachine, check parent group-interrupt first, otherwise delegate to subMachine
+    // 1. If inside a subMachine:
+    //    - Cooperative Cancel / Child Event Priority: if child handles `event` in its current state, delegate first.
+    //    - Fallback / Hard Kill / Output Event: if parent handles `[subMachine, event, ...]`, evaluate parent transition.
     if (activeSubMachine && activeSubRef) {
       if (
-        event !== 'DONE' &&
-        event !== 'ERROR' &&
-        fsm.hasTransitionFor(activeSubRef.id, event) &&
-        !activeSubRef.machine.hasTransitionFor(activeSubMachine.state(), event)
-      ) {
-        // Parent group-interrupt (e.g. [paymentFSM, 'CANCEL', 'cart'])
-        const subState = activeSubMachine.state();
-        activeSubMachine = null;
-        activeSubRef = null;
-        hooks?.onExit?.[subState]?.(readEffectiveContext());
-      } else if (
         activeSubRef.machine.hasTransitionFor(activeSubMachine.state(), event)
       ) {
         activeSubMachine.patchContext(readEffectiveContext());
         activeSubMachine.send(event, payload);
         return;
-      } else if (fsm.hasTransitionFor(activeSubRef.id, event)) {
-        const subState = activeSubMachine.state();
-        activeSubMachine = null;
-        activeSubRef = null;
-        hooks?.onExit?.[subState]?.(readEffectiveContext());
-      } else {
+      } else if (!fsm.hasTransitionFor(activeSubRef.id, event)) {
         return;
       }
     }
@@ -192,6 +202,14 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
 
     if (!evaluation.matched) {
       return;
+    }
+
+    // If leaving an active subMachine (not staying), clean it up and fire its onExit hook
+    if (!evaluation.stayed && activeSubMachine && activeSubRef) {
+      const subState = activeSubMachine.state();
+      activeSubMachine = null;
+      activeSubRef = null;
+      hooks?.onExit?.[subState]?.(readEffectiveContext());
     }
 
     currentContext = evaluation.nextContext;
@@ -217,6 +235,9 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
         isPending: isPending(),
         isDone: isDone(),
         finalOutcome: doneOutcome,
+        finalPayload: donePayload,
+        hasFinalPayloadSelector: false,
+        emittedOutput: evaluation.emittedOutput,
         enteredSubMachine: null,
         exitedSubMachine: null,
       });
@@ -229,6 +250,9 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
 
     if (evaluation.finalOutcome !== null) {
       doneOutcome = evaluation.finalOutcome;
+      donePayload = evaluation.hasFinalPayloadSelector
+        ? evaluation.finalPayload
+        : readEffectiveContext();
     }
 
     if (evaluation.enteredSubMachine) {
@@ -244,6 +268,9 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       isPending: isPending(),
       isDone: isDone(),
       finalOutcome: doneOutcome,
+      finalPayload: evaluation.finalPayload,
+      hasFinalPayloadSelector: evaluation.hasFinalPayloadSelector,
+      emittedOutput: evaluation.emittedOutput,
       enteredSubMachine: evaluation.enteredSubMachine,
       exitedSubMachine: evaluation.exitedSubMachine,
     });
@@ -257,6 +284,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     activeSubMachine = null;
     activeSubRef = null;
     doneOutcome = null;
+    donePayload = undefined;
     currentState = fsm.initial as TState;
     currentContext = {
       ...fsm.context,
@@ -276,6 +304,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     isPending,
     isDone,
     finalOutcome: () => doneOutcome,
+    finalPayload: () => donePayload,
     send,
     patchContext,
     reset,

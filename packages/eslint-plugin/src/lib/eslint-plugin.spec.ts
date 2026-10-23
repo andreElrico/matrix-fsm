@@ -352,6 +352,51 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
       );
       expect(messages.map((m) => m.messageId)).toContain('forbiddenInjectCall');
     });
+
+    it('allows @angular/core inject() and service imports in *.feature.ts while still enforcing valid call selectors on createMachineFeature', () => {
+      const validFeature = verifyRule(
+        'pure-machine-definition',
+        `
+        import { inject } from '@angular/core';
+        import { createMachineFeature, awaiting } from '@matrix-fsm/angular';
+        import { CoffeeShopApiService } from './coffee-shop-api.service';
+
+        export const baristaFSM = createMachineFeature()({
+          id: 'barista',
+          initial: 'ticketQueued',
+          transitions: [
+            ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee')],
+            ['brewingCoffee', 'DONE',          'ticketQueued'],
+            ['brewingCoffee', 'ERROR',         'maintenance', { call: (m) => m._setBrewError }],
+          ],
+          tasks: (api = inject(CoffeeShopApiService)) => ({
+            brewingCoffee: async () => undefined,
+          }),
+        });
+        `,
+        'barista.feature.ts',
+      );
+      expect(validFeature.messages).toHaveLength(0);
+
+      const invalidCallSelectorInFeature = verifyRule(
+        'pure-machine-definition',
+        `
+        import { createMachineFeature } from '@matrix-fsm/angular';
+        export const baristaFSM = createMachineFeature()({
+          id: 'barista',
+          initial: 'ticketQueued',
+          transitions: [
+            ['ticketQueued', 'START_BREWING', 'maintenance', { call: (m) => { m._a(); m._b(); } }],
+          ],
+        });
+        `,
+        'barista.feature.ts',
+      );
+      expect(invalidCallSelectorInFeature.messages).toHaveLength(1);
+      expect(invalidCallSelectorInFeature.messages[0].messageId).toBe(
+        'invalidTransitionCallSelector',
+      );
+    });
   });
 
   describe('8. align-matrix-columns', () => {
