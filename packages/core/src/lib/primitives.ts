@@ -5,20 +5,28 @@
 import { createFSM } from './fsm.js';
 import type {
   AfterNode,
+  AllNode,
   AnyFSMDefinition,
+  AnyNode,
+  AnyStateNode,
   AnyTransitionRow,
   AwaitingNode,
+  CombinatorKind,
+  CombinatorNode,
   EachNode,
   EmptyObject,
   ExtractedTransitionRow,
   FinalNode,
   FSMConfig,
   FSMDefinition,
+  JoinMachineIds,
+  RaceNode,
   ResolveTransitionsContext,
   ResolveTransitionsMethods,
   StayNode,
   SubMachineRef,
   TransitionRow,
+  UnwrapSubMachineTuple,
 } from './types.js';
 
 /**
@@ -47,6 +55,19 @@ export function stay(): StayNode {
   return STAY_INSTANCE;
 }
 
+const ANY_STATE_INSTANCE: AnyStateNode = Object.freeze({
+  __type: 'anyState' as const,
+  __kind: 'anyState' as const,
+});
+
+/**
+ * Wildcard state marker for Column 1 (`FROM` only).
+ * Matches an event from any active state as a fallback when no state-specific transition matches.
+ */
+export function anyState(): AnyStateNode {
+  return ANY_STATE_INSTANCE;
+}
+
 /**
  * Terminal state marker for sub-machine or workflow outcomes.
  */
@@ -55,9 +76,11 @@ export function finalState<const TOutcome extends string>(
   outcome: TOutcome,
 ): FinalNode<TOutcome>;
 export function finalState(outcome?: string): FinalNode<string> {
+  const isBare = outcome === undefined;
   return Object.freeze({
     __type: 'finalState' as const,
     outcome: outcome ?? 'DONE',
+    isBare,
   });
 }
 
@@ -176,6 +199,87 @@ export function each<
   });
 }
 
+function createCombinator<
+  TKind extends CombinatorKind,
+  const TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
+>(
+  kind: TKind,
+  args: TMachines | readonly [TMachines],
+): CombinatorNode<TKind, UnwrapSubMachineTuple<TMachines>> {
+  const rawList = (
+    args.length === 1 && Array.isArray(args[0]) ? args[0] : args
+  ) as readonly (AnyFSMDefinition | SubMachineRef<any, any>)[];
+  const machines = rawList.map((m) =>
+    isSubMachineRef(m) ? m.machine : m,
+  ) as unknown as UnwrapSubMachineTuple<TMachines>;
+  const joinedIds = (machines as readonly AnyFSMDefinition[])
+    .map((m) => m.id)
+    .join(',');
+  return Object.freeze({
+    __type: kind,
+    __kind: kind,
+    id: `${kind}:${joinedIds}` as `${TKind}:${JoinMachineIds<UnwrapSubMachineTuple<TMachines>>}`,
+    machines: Object.freeze([...machines]) as unknown as UnwrapSubMachineTuple<TMachines>,
+  });
+}
+
+/**
+ * Promise.all-style Actor Combinator.
+ * Spawns all actors simultaneously, dispatches `'ALL_DONE'` when all actors reach `finalState()`,
+ * and immediately aborts all actors if the parent interrupts or any actor fails with an unhandled error.
+ */
+export function all<
+  const TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
+>(
+  ...machines: TMachines
+): AllNode<UnwrapSubMachineTuple<TMachines>>;
+export function all<
+  const TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
+>(
+  machines: TMachines,
+): AllNode<UnwrapSubMachineTuple<TMachines>>;
+export function all(...args: any[]): AllNode<any> {
+  return createCombinator('all', args as any);
+}
+
+/**
+ * Promise.race-style Actor Combinator.
+ * Spawns all actors simultaneously; as soon as the first actor reaches `finalState()`,
+ * immediately aborts all remaining actors in the same tick.
+ */
+export function race<
+  const TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
+>(
+  ...machines: TMachines
+): RaceNode<UnwrapSubMachineTuple<TMachines>>;
+export function race<
+  const TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
+>(
+  machines: TMachines,
+): RaceNode<UnwrapSubMachineTuple<TMachines>>;
+export function race(...args: any[]): RaceNode<any> {
+  return createCombinator('race', args as any);
+}
+
+/**
+ * Promise.any-style Actor Combinator.
+ * Spawns all actors simultaneously; resolves on the first actor reaching a non-error `finalState()`
+ * (aborting the remaining actors), and only dispatches `'ERROR'` if all actors fail.
+ */
+export function any<
+  const TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
+>(
+  ...machines: TMachines
+): AnyNode<UnwrapSubMachineTuple<TMachines>>;
+export function any<
+  const TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
+>(
+  machines: TMachines,
+): AnyNode<UnwrapSubMachineTuple<TMachines>>;
+export function any(...args: any[]): AnyNode<any> {
+  return createCombinator('any', args as any);
+}
+
 // ============================================================================
 // Runtime Type Guards
 // ============================================================================
@@ -193,6 +297,15 @@ export function isStayNode(value: unknown): value is StayNode {
     typeof value === 'object' &&
     value !== null &&
     (value as StayNode).__type === 'stay'
+  );
+}
+
+export function isAnyStateNode(value: unknown): value is AnyStateNode {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    ((value as AnyStateNode).__kind === 'anyState' ||
+      (value as AnyStateNode).__type === 'anyState')
   );
 }
 
@@ -230,6 +343,18 @@ export function isEachNode(
     typeof value === 'object' &&
     value !== null &&
     (value as EachNode).__type === 'each'
+  );
+}
+
+export function isCombinatorNode(
+  value: unknown,
+): value is CombinatorNode<CombinatorKind, readonly AnyFSMDefinition[]> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    ((value as CombinatorNode).__type === 'all' ||
+      (value as CombinatorNode).__type === 'race' ||
+      (value as CombinatorNode).__type === 'any')
   );
 }
 

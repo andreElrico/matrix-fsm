@@ -153,6 +153,24 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
       expect(messages).toHaveLength(1);
       expect(messages[0].messageId).toBe('unreachableTransition');
     });
+
+    it('reports error when a state-specific row is placed below an unguarded [anyState(), EVENT, ...] row', () => {
+      const { messages } = verifyRule(
+        'no-unreachable-transitions',
+        `
+        createFSM()({
+          id: 'app',
+          initial: 'idle',
+          transitions: [
+            [anyState(), 'LOGOUT', 'loggedOut'],
+            ['editing',  'LOGOUT', 'unsavedWarning'],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(1);
+      expect(messages[0].messageId).toBe('unreachableTransition');
+    });
   });
 
   describe('4. require-awaiting-handlers', () => {
@@ -528,6 +546,86 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
       );
       expect(messages).toHaveLength(1);
       expect(messages[0].messageId).toBe('conflictingFinalOutput');
+    });
+  });
+
+  describe('10. require-exit-for-targets', () => {
+    it('passes when resting string states have no outgoing transitions and transient targets have valid exits', () => {
+      const { messages } = verifyRule(
+        'require-exit-for-targets',
+        `
+        createFSM()({
+          id: 'checkout',
+          initial: 'cart',
+          transitions: [
+            ['cart',   'SAVE',  awaiting('saving')],
+            ['saving', 'DONE',  'orderConfirmed'],
+            ['saving', 'ERROR', 'cart'],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(0);
+    });
+
+    it('reports error when awaiting("saving") only has stay() or self-loop transitions in Column 1', () => {
+      const { messages } = verifyRule(
+        'require-exit-for-targets',
+        `
+        createFSM()({
+          id: 'checkout',
+          initial: 'cart',
+          transitions: [
+            ['cart',   'SAVE',  awaiting('saving')],
+            ['saving', 'DONE',  stay()],
+            ['saving', 'ERROR', 'saving'],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(1);
+      expect(messages[0].messageId).toBe('missingExitTransition');
+    });
+  });
+
+  describe('11. no-unreachable-states', () => {
+    it('passes when all FROM states are either initial, anyState(), or entered in Column 3 (including local spreads)', () => {
+      const { messages } = verifyRule(
+        'no-unreachable-states',
+        `
+        const extraRows = transitions([
+          ['idle', 'GO', 'editing'],
+        ]);
+        createFSM()({
+          id: 'editor',
+          initial: 'idle',
+          transitions: [
+            ...extraRows,
+            ['editing',  'SAVE',   'saved'],
+            [anyState(), 'LOGOUT', 'idle'],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(0);
+    });
+
+    it('reports error when an orphan state in Column 1 is neither initial nor entered in Column 3', () => {
+      const { messages } = verifyRule(
+        'no-unreachable-states',
+        `
+        createFSM()({
+          id: 'editor',
+          initial: 'idle',
+          transitions: [
+            ['idle',       'SAVE', 'saved'],
+            ['ghostState', 'EXIT', 'idle'],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(1);
+      expect(messages[0].messageId).toBe('unreachableState');
     });
   });
 });

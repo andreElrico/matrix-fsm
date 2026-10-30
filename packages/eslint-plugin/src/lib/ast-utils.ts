@@ -12,6 +12,9 @@ export interface ParsedTransitionRow {
   readonly optionsNode: TSESTree.Node | null;
   readonly fromKey: string | null;
   readonly viaKey: string | null;
+  readonly toKey: string | null;
+  readonly isTransientTarget: boolean;
+  readonly targetDisplayName: string;
   readonly groupKey: string | null;
   readonly hasGuard: boolean;
   readonly awaitingCall: {
@@ -41,34 +44,108 @@ export function extractNodeKey(
   }
   if (
     node.type === AST_NODE_TYPES.CallExpression &&
-    node.callee.type === AST_NODE_TYPES.Identifier &&
-    node.callee.name === 'each' &&
-    node.arguments.length >= 1
+    node.callee.type === AST_NODE_TYPES.Identifier
   ) {
-    const firstArg = extractNodeKey(node.arguments[0]);
-    if (firstArg) {
-      return `each:${firstArg}`;
+    const calleeName = node.callee.name;
+    if (calleeName === 'anyState' && node.arguments.length === 0) {
+      return 'anyState()';
     }
-  }
-  if (
-    node.type === AST_NODE_TYPES.CallExpression &&
-    node.callee.type === AST_NODE_TYPES.Identifier &&
-    node.callee.name === 'after' &&
-    node.arguments.length >= 1
-  ) {
-    const firstArg = node.arguments[0];
+    if (calleeName === 'each' && node.arguments.length >= 1) {
+      const firstArg = extractNodeKey(node.arguments[0]);
+      if (firstArg) {
+        return `each:${firstArg}`;
+      }
+    }
     if (
-      firstArg.type === AST_NODE_TYPES.Literal &&
-      typeof firstArg.value === 'number'
+      (calleeName === 'all' || calleeName === 'race' || calleeName === 'any') &&
+      node.arguments.length >= 1
     ) {
-      return `after(${firstArg.value})`;
+      const argKeys = node.arguments
+        .map((a) => extractNodeKey(a))
+        .filter((k): k is string => k !== null);
+      if (argKeys.length > 0) {
+        return `${calleeName}:${argKeys.join(',')}`;
+      }
     }
-    const argKey = extractNodeKey(firstArg);
-    if (argKey) {
-      return `after(${argKey})`;
+    if (calleeName === 'after' && node.arguments.length >= 1) {
+      const firstArg = node.arguments[0];
+      if (
+        firstArg.type === AST_NODE_TYPES.Literal &&
+        typeof firstArg.value === 'number'
+      ) {
+        return `after(${firstArg.value})`;
+      }
+      const argKey = extractNodeKey(firstArg);
+      if (argKey) {
+        return `after(${argKey})`;
+      }
     }
   }
   return null;
+}
+
+export function extractTargetInfo(node: TSESTree.Node | null | undefined): {
+  readonly toKey: string | null;
+  readonly isTransientTarget: boolean;
+  readonly targetDisplayName: string;
+} {
+  if (!node) {
+    return { toKey: null, isTransientTarget: false, targetDisplayName: '' };
+  }
+  const awaiting = extractAwaitingCall(node);
+  if (awaiting) {
+    return {
+      toKey: awaiting.stateName,
+      isTransientTarget: true,
+      targetDisplayName: `awaiting('${awaiting.stateName}')`,
+    };
+  }
+  if (
+    node.type === AST_NODE_TYPES.CallExpression &&
+    node.callee.type === AST_NODE_TYPES.Identifier
+  ) {
+    const calleeName = node.callee.name;
+    if (calleeName === 'stay') {
+      return {
+        toKey: 'stay()',
+        isTransientTarget: false,
+        targetDisplayName: 'stay()',
+      };
+    }
+    if (calleeName === 'finalState') {
+      return {
+        toKey: 'finalState()',
+        isTransientTarget: false,
+        targetDisplayName: 'finalState()',
+      };
+    }
+    if (
+      calleeName === 'each' ||
+      calleeName === 'all' ||
+      calleeName === 'race' ||
+      calleeName === 'any'
+    ) {
+      const key = extractNodeKey(node);
+      return {
+        toKey: key,
+        isTransientTarget: key !== null,
+        targetDisplayName: `${calleeName}(...)`,
+      };
+    }
+  }
+  if (node.type === AST_NODE_TYPES.Identifier) {
+    return {
+      toKey: `ref:${node.name}`,
+      isTransientTarget: true,
+      targetDisplayName: node.name,
+    };
+  }
+  const key = extractNodeKey(node);
+  return {
+    toKey: key,
+    isTransientTarget: false,
+    targetDisplayName: key ?? '',
+  };
 }
 
 export function extractAwaitingCall(
@@ -142,6 +219,8 @@ export function parseTransitionRow(
 
   const fromKey = extractNodeKey(fromEl);
   const viaKey = extractNodeKey(viaEl);
+  const { toKey, isTransientTarget, targetDisplayName } =
+    extractTargetInfo(toEl);
   const groupKey = fromKey && viaKey ? `${fromKey}::${viaKey}` : null;
   const optionsNode =
     optionsEl && optionsEl.type !== AST_NODE_TYPES.SpreadElement
@@ -156,6 +235,9 @@ export function parseTransitionRow(
     optionsNode,
     fromKey,
     viaKey,
+    toKey,
+    isTransientTarget,
+    targetDisplayName,
     groupKey,
     hasGuard: hasGuardOption(optionsNode),
     awaitingCall: extractAwaitingCall(toEl),
@@ -237,4 +319,35 @@ export function getAnyTransitionsArray(
   node: TSESTree.CallExpression,
 ): TSESTree.ArrayExpression | null {
   return getMachineTransitionsArray(node) ?? getExtractedTransitionsArray(node);
+}
+
+/**
+ * Extracts the `initial` state key from a `createFSM`, `createMachineFeature`, or `subMachine` call.
+ */
+export function getMachineInitialStateKey(
+  node: TSESTree.CallExpression,
+): string | null {
+  if (!isMachineCreatorCallee(node)) {
+    return null;
+  }
+  const configArg = node.arguments[0];
+  if (!configArg || configArg.type !== AST_NODE_TYPES.ObjectExpression) {
+    return null;
+  }
+  for (const prop of configArg.properties) {
+    if (
+      prop.type === AST_NODE_TYPES.Property &&
+      ((prop.key.type === AST_NODE_TYPES.Identifier &&
+        prop.key.name === 'initial') ||
+        (prop.key.type === AST_NODE_TYPES.Literal &&
+          prop.key.value === 'initial'))
+    ) {
+      const awaiting = extractAwaitingCall(prop.value);
+      if (awaiting) {
+        return awaiting.stateName;
+      }
+      return extractNodeKey(prop.value);
+    }
+  }
+  return null;
 }

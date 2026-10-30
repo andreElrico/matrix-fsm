@@ -4,7 +4,9 @@
 
 import {
   isAfterNode,
+  isAnyStateNode,
   isAwaitingNode,
+  isCombinatorNode,
   isEachNode,
   isFinalNode,
   isFSMDefinition,
@@ -14,6 +16,7 @@ import {
 import type {
   AnyFSMDefinition,
   AnyTransitionRow,
+  CombinatorNode,
   ContractContext,
   ContractEvents,
   ContractInput,
@@ -54,10 +57,13 @@ export function resolveSourceId(source: unknown): string {
   if (typeof source === 'string') {
     return source;
   }
+  if (isAnyStateNode(source)) {
+    return '*';
+  }
   if (isSubMachineRef(source) || isFSMDefinition(source)) {
     return source.id;
   }
-  if (isEachNode(source)) {
+  if (isEachNode(source) || isCombinatorNode(source)) {
     return source.id;
   }
   return String(source);
@@ -80,6 +86,7 @@ export function resolveTargetId(
   finalOutcome: string | null;
   subMachine: SubMachineRef<any, any> | null;
   eachNode: EachNode<any, any> | null;
+  combinatorNode: CombinatorNode<any, any> | null;
 } {
   if (isStayNode(target)) {
     return {
@@ -89,6 +96,7 @@ export function resolveTargetId(
       finalOutcome: null,
       subMachine: null,
       eachNode: null,
+      combinatorNode: null,
     };
   }
   if (isAwaitingNode(target)) {
@@ -99,6 +107,7 @@ export function resolveTargetId(
       finalOutcome: null,
       subMachine: null,
       eachNode: null,
+      combinatorNode: null,
     };
   }
   if (isFinalNode(target)) {
@@ -109,6 +118,7 @@ export function resolveTargetId(
       finalOutcome: target.outcome,
       subMachine: null,
       eachNode: null,
+      combinatorNode: null,
     };
   }
   const subRef = toSubMachineRef(target);
@@ -120,6 +130,7 @@ export function resolveTargetId(
       finalOutcome: null,
       subMachine: subRef,
       eachNode: null,
+      combinatorNode: null,
     };
   }
   if (isEachNode(target)) {
@@ -130,6 +141,18 @@ export function resolveTargetId(
       finalOutcome: null,
       subMachine: null,
       eachNode: target,
+      combinatorNode: null,
+    };
+  }
+  if (isCombinatorNode(target)) {
+    return {
+      stateName: target.id,
+      stayed: false,
+      isAwaiting: false,
+      finalOutcome: null,
+      subMachine: null,
+      eachNode: null,
+      combinatorNode: target,
     };
   }
   return {
@@ -139,6 +162,7 @@ export function resolveTargetId(
     finalOutcome: null,
     subMachine: null,
     eachNode: null,
+    combinatorNode: null,
   };
 }
 
@@ -172,6 +196,7 @@ function buildFSM<
   const awaitingStates = new Set<string>();
   const subMachines = new Map<string, SubMachineRef<any, any>>();
   const eachNodes = new Map<string, EachNode<any, any>>();
+  const combinatorNodes = new Map<string, CombinatorNode<any, any>>();
 
   for (const row of config.transitions) {
     const [from, via, to] = row as unknown as readonly [
@@ -181,12 +206,17 @@ function buildFSM<
     ];
 
     const fromSub = toSubMachineRef(from);
-    if (fromSub) {
+    if (isAnyStateNode(from)) {
+      // Wildcard source in Column 1; do not add to concrete states set
+    } else if (fromSub) {
       states.add(fromSub.id);
       subMachines.set(fromSub.id, fromSub);
     } else if (isEachNode(from)) {
       states.add(from.id);
       eachNodes.set(from.id, from);
+    } else if (isCombinatorNode(from)) {
+      states.add(from.id);
+      combinatorNodes.set(from.id, from);
     } else if (typeof from === 'string') {
       states.add(from);
       if (via === 'DONE' || via === 'ERROR') {
@@ -206,6 +236,9 @@ function buildFSM<
     } else if (isEachNode(to)) {
       states.add(to.id);
       eachNodes.set(to.id, to);
+    } else if (isCombinatorNode(to)) {
+      states.add(to.id);
+      combinatorNodes.set(to.id, to);
     } else if (!isStayNode(to) && typeof to === 'string') {
       states.add(to);
     }
@@ -223,14 +256,15 @@ function buildFSM<
     return false;
   };
 
-  const evaluate = (
+  const evaluateRowList = (
+    rowsToCheck: readonly AnyTransitionRow<TContext, any>[],
     currentState: string,
     event: string,
     payload: unknown,
     currentContext: Readonly<EffectiveContext>,
-  ): TransitionEvaluation<StateUnion, EffectiveContext, TMethods> => {
-    // Evaluate top-to-bottom (First-Match-Wins)
-    for (const row of config.transitions) {
+    matchWildcard: boolean,
+  ): TransitionEvaluation<StateUnion, EffectiveContext, TMethods> | null => {
+    for (const row of rowsToCheck) {
       const [from, via, to, options] = row as unknown as readonly [
         unknown,
         unknown,
@@ -238,10 +272,15 @@ function buildFSM<
         TransitionOptions<EffectiveContext, any, TMethods> | undefined,
       ];
 
+      const isWildcard = isAnyStateNode(from);
+      if (matchWildcard ? !isWildcard : isWildcard) {
+        continue;
+      }
+
       const fromId = resolveSourceId(from);
       const viaId = resolveViaId(via);
 
-      if (fromId !== currentState || viaId !== event) {
+      if ((!matchWildcard && fromId !== currentState) || viaId !== event) {
         continue;
       }
 
@@ -295,10 +334,13 @@ function buildFSM<
           ? effectiveFinalOutcome
           : resolved.stateName
       ) as StateUnion;
-      const hasFinalPayloadSelector = isFinal && outputSelector !== null;
-      const finalPayload = hasFinalPayloadSelector
-        ? emittedOutput?.payload
-        : undefined;
+      const hasFinalPayloadSelector =
+        isFinal &&
+        (outputSelector !== null ||
+          options?.output !== undefined ||
+          Boolean(isFinalNode(to) && to.isBare));
+      const finalPayload =
+        outputSelector !== null ? emittedOutput?.payload : undefined;
       const isTargetAwaiting =
         resolved.isAwaiting || awaitingStates.has(effectiveNextState);
 
@@ -327,7 +369,42 @@ function buildFSM<
         enteredSubMachine: resolved.subMachine,
         exitedSubMachine: exitedSub,
         enteredEach: resolved.eachNode,
+        enteredCombinator: resolved.combinatorNode,
       };
+    }
+    return null;
+  };
+
+  const evaluate = (
+    currentState: string,
+    event: string,
+    payload: unknown,
+    currentContext: Readonly<EffectiveContext>,
+  ): TransitionEvaluation<StateUnion, EffectiveContext, TMethods> => {
+    // Pass 1: State-specific rows `[currentState, event, ...]` (First-Match-Wins)
+    const specificMatch = evaluateRowList(
+      config.transitions,
+      currentState,
+      event,
+      payload,
+      currentContext,
+      false,
+    );
+    if (specificMatch) {
+      return specificMatch;
+    }
+
+    // Pass 2: Fallback global wildcard rows `[anyState(), event, ...]` (First-Match-Wins)
+    const wildcardMatch = evaluateRowList(
+      config.transitions,
+      currentState,
+      event,
+      payload,
+      currentContext,
+      true,
+    );
+    if (wildcardMatch) {
+      return wildcardMatch;
     }
 
     return {
@@ -348,6 +425,7 @@ function buildFSM<
       enteredSubMachine: null,
       exitedSubMachine: null,
       enteredEach: null,
+      enteredCombinator: null,
     };
   };
 
@@ -361,6 +439,7 @@ function buildFSM<
     awaitingStates,
     subMachines,
     eachNodes,
+    combinatorNodes,
     evaluate,
     hasTransitionFor,
   });

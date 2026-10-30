@@ -4,14 +4,20 @@
 
 import {
   isAfterNode,
+  isAnyStateNode,
   isAwaitingNode,
+  isCombinatorNode,
   isEachNode,
   isFinalNode,
   isFSMDefinition,
   isStayNode,
   isSubMachineRef,
 } from './primitives.js';
-import type { AnyFSMDefinition, TransitionOptions } from './types.js';
+import type {
+  AnyFSMDefinition,
+  AnyTransitionRow,
+  TransitionOptions,
+} from './types.js';
 
 function sanitizeMermaidId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_]/g, '_');
@@ -34,6 +40,27 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
     );
   }
 
+  // 2b. Render combinator badges (all / race / any)
+  if (fsm.combinatorNodes) {
+    for (const [, combNode] of fsm.combinatorNodes) {
+      const safeId = sanitizeMermaidId(combNode.id);
+      const childNames = combNode.machines
+        .map((m: AnyFSMDefinition) => m.id)
+        .join(', ');
+      lines.push(
+        `${indent}state "⇉ ${combNode.__type}(${childNames})" as ${safeId}`,
+      );
+    }
+  }
+
+  // 2c. Render anyState() wildcard badge if used in transitions
+  const hasAnyState = fsm.transitions.some((row: AnyTransitionRow) =>
+    isAnyStateNode((row as unknown as readonly [unknown])[0]),
+  );
+  if (hasAnyState) {
+    lines.push(`${indent}state "(*)" as anyState`);
+  }
+
   // 3. Render composite sub-machine blocks
   for (const [, subRef] of fsm.subMachines) {
     const safeSubId = sanitizeMermaidId(subRef.id);
@@ -54,10 +81,11 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
       TransitionOptions<any, any, any> | undefined,
     ];
 
-    const fromRaw =
-      isSubMachineRef(from) || isFSMDefinition(from)
+    const fromRaw = isAnyStateNode(from)
+      ? 'anyState'
+      : isSubMachineRef(from) || isFSMDefinition(from)
         ? from.id
-        : isEachNode(from)
+        : isEachNode(from) || isCombinatorNode(from)
           ? from.id
           : String(from);
     const fromId = sanitizeMermaidId(fromRaw);
@@ -92,7 +120,7 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
       ? to.state
       : isSubMachineRef(to) || isFSMDefinition(to)
         ? to.id
-        : isEachNode(to)
+        : isEachNode(to) || isCombinatorNode(to)
           ? to.id
           : String(to);
     const toId = sanitizeMermaidId(toRaw);

@@ -40,10 +40,27 @@ export const noUnreachableTransitions = createRule<[], MessageIds>({
         }
 
         const groups = new Map<string, ParsedTransitionRow[]>();
+        const unguardedAnyStateEvents = new Set<string>();
+        const shadowedByAnyState = new Set<ParsedTransitionRow>();
+
         for (const el of arrayNode.elements) {
           const parsed = parseTransitionRow(el);
           if (!parsed || !parsed.groupKey) {
             continue;
+          }
+          if (
+            parsed.fromKey !== 'anyState()' &&
+            parsed.viaKey &&
+            unguardedAnyStateEvents.has(parsed.viaKey)
+          ) {
+            shadowedByAnyState.add(parsed);
+          }
+          if (
+            parsed.fromKey === 'anyState()' &&
+            parsed.viaKey &&
+            !parsed.hasGuard
+          ) {
+            unguardedAnyStateEvents.add(parsed.viaKey);
           }
           const list = groups.get(parsed.groupKey) ?? [];
           list.push(parsed);
@@ -66,6 +83,17 @@ export const noUnreachableTransitions = createRule<[], MessageIds>({
               seenUnguarded = true;
             }
           }
+        }
+
+        for (const row of shadowedByAnyState) {
+          context.report({
+            node: row.node,
+            messageId: 'unreachableTransition',
+            data: {
+              from: row.fromKey ?? '',
+              via: row.viaKey ?? '',
+            },
+          });
         }
       },
     };

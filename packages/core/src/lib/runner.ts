@@ -6,6 +6,7 @@ import { resolveSourceId } from './fsm.js';
 import { isAfterNode } from './primitives.js';
 import type {
   AnyFSMDefinition,
+  CombinatorNode,
   ExtractContext,
   ExtractMethods,
   ExtractStates,
@@ -126,12 +127,18 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
   };
   let activeSubMachine: MachineInstance<any> | null = null;
   let activeSubRef: SubMachineRef<any, any> | null = null;
+  let activeCombinator: {
+    readonly node: CombinatorNode<any, any>;
+    readonly instances: MachineInstance<any>[];
+    readonly failedIndices: Set<number>;
+  } | null = null;
   let doneOutcome: string | null = null;
   let donePayload: unknown = undefined;
   const eventQueue: Array<{
     event: string;
     payload: unknown;
     fromChildOutput: boolean;
+    fromChildTerminal: boolean;
   }> = [];
   let isProcessing = false;
   const activeTimers: Array<ReturnType<typeof setTimeout>> = [];
@@ -142,6 +149,17 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       clearTimeout(timer);
     }
     activeTimers.length = 0;
+  };
+
+  const destroyActiveCombinator = (): void => {
+    if (!activeCombinator) {
+      return;
+    }
+    const combToDestroy = activeCombinator;
+    activeCombinator = null;
+    for (const inst of combToDestroy.instances) {
+      inst.destroy();
+    }
   };
 
   const scheduleStateTimers = (stateName: string): void => {
@@ -156,7 +174,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       ) {
         scheduledIds.add(via.id);
         const timerId = setTimeout(() => {
-          sendInternal(via.id, undefined, false);
+          sendInternal(via.id, undefined, false, false);
         }, via.ms);
         activeTimers.push(timerId);
       }
@@ -173,6 +191,9 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
   const isPending = (): boolean => {
     if (activeSubMachine) {
       return activeSubMachine.isPending();
+    }
+    if (activeCombinator) {
+      return activeCombinator.instances.some((inst) => inst.isPending());
     }
     return fsm.awaitingStates.has(currentState);
   };
@@ -206,7 +227,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
               `[MatrixFSM Error]: Sub-machine '${refId}' emitted output '${outType}', but parent '${fsm.id}' has no matching transition. Prevented silent deadlock!`,
             );
           }
-          sendInternal(outType, outPayload, true);
+          sendInternal(outType, outPayload, true, false);
         }
         if (childInfo.isDone) {
           const outcome = childInfo.finalOutcome ?? 'DONE';
@@ -220,7 +241,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
             return;
           }
           if (fsm.hasTransitionFor(refToExit.id, outcome)) {
-            sendInternal(outcome, outputPayload, true);
+            sendInternal(outcome, outputPayload, true, true);
           } else {
             throw new Error(
               `[MatrixFSM Error]: Sub-machine '${refToExit.id}' emitted output '${outcome}', but parent '${fsm.id}' has no matching transition. Prevented silent deadlock!`,
@@ -231,14 +252,100 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     });
   };
 
+  const enterCombinatorIfNeeded = (
+    combNode: CombinatorNode<any, any> | null | undefined,
+    inputMapped?: Record<string, unknown> | null,
+  ) => {
+    if (!combNode) {
+      return;
+    }
+    destroyActiveCombinator();
+    const instances: MachineInstance<any>[] = [];
+    const failedIndices = new Set<number>();
+    const failedErrors: unknown[] = new Array(combNode.machines.length);
+    const activeCombState = {
+      node: combNode,
+      instances,
+      failedIndices,
+    };
+    activeCombinator = activeCombState;
+
+    const dispatchCombinatorExit = (
+      preferredOutcome: string,
+      outputPayload: unknown,
+    ) => {
+      const combId = combNode.id;
+      destroyActiveCombinator();
+      if (fsm.hasTransitionFor(combId, preferredOutcome)) {
+        sendInternal(preferredOutcome, outputPayload, true, true);
+      } else if (fsm.hasTransitionFor(combId, 'ALL_DONE')) {
+        sendInternal('ALL_DONE', outputPayload, true, true);
+      } else if (fsm.hasTransitionFor(combId, 'DONE')) {
+        sendInternal('DONE', outputPayload, true, true);
+      }
+    };
+
+    combNode.machines.forEach((childMachine: AnyFSMDefinition, idx: number) => {
+      const childInst = createMachineInstance(childMachine, {
+        initialContext: {
+          ...readEffectiveContext(),
+          ...(inputMapped ?? {}),
+        },
+        methods: hooks?.methods,
+        debug: hooks?.debug,
+        onEnter: hooks?.onEnter as any,
+        onExit: hooks?.onExit as any,
+        onStateChange: (_childState, childCtx, childInfo) => {
+          if (activeCombinator !== activeCombState) {
+            return;
+          }
+          if (!childInfo.isDone) {
+            return;
+          }
+          const outcome = childInfo.finalOutcome ?? 'DONE';
+          const childPayload = childInfo.hasFinalPayloadSelector
+            ? childInfo.finalPayload
+            : childCtx;
+
+          if (combNode.__type === 'all') {
+            if (outcome === 'ERROR') {
+              dispatchCombinatorExit('ERROR', childPayload);
+              return;
+            }
+            if (instances.every((inst) => inst.isDone())) {
+              const allPayloads = instances.map((inst) =>
+                inst.finalPayload ? inst.finalPayload() : inst.context(),
+              );
+              dispatchCombinatorExit('ALL_DONE', allPayloads);
+            }
+          } else if (combNode.__type === 'race') {
+            dispatchCombinatorExit(outcome, childPayload);
+          } else if (combNode.__type === 'any') {
+            if (outcome === 'ERROR') {
+              failedIndices.add(idx);
+              failedErrors[idx] = childPayload;
+              if (failedIndices.size === combNode.machines.length) {
+                dispatchCombinatorExit('ERROR', failedErrors);
+              }
+            } else {
+              dispatchCombinatorExit(outcome, childPayload);
+            }
+          }
+        },
+      });
+      instances.push(childInst);
+    });
+  };
+
   const processOneEvent = (
     event: string,
     payload?: unknown,
     fromChildOutput = false,
+    fromChildTerminal = false,
   ): void => {
     // 1. If inside a subMachine:
     //    - Cooperative Cancel / Child Event Priority: if child handles `event` in its current state, delegate first.
-    //    - Fallback / Hard Kill / Output Event: if parent handles `[subMachine, event, ...]`, evaluate parent transition.
+    //    - Fallback / Hard Kill / Output Event: if parent handles `[subMachine, event, ...]` or `[anyState(), event, ...]`, evaluate parent transition.
     if (!fromChildOutput && activeSubMachine && activeSubRef) {
       if (
         activeSubRef.machine.hasTransitionFor(activeSubMachine.state(), event)
@@ -246,10 +353,25 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
         activeSubMachine.patchContext(readEffectiveContext());
         activeSubMachine.send(event, payload);
         return;
-      } else if (!fsm.hasTransitionFor(activeSubRef.id, event)) {
-        debugLog?.(
-          `[MatrixFSM:${fsm.id}] Ignored event '${event}' in state '${currentState}'`,
-        );
+      }
+    }
+
+    if (
+      !fromChildOutput &&
+      activeCombinator &&
+      !fsm.hasTransitionFor(activeCombinator.node.id, event)
+    ) {
+      let handledByAny = false;
+      for (let i = 0; i < activeCombinator.instances.length; i++) {
+        const inst = activeCombinator.instances[i];
+        const childMach = activeCombinator.node.machines[i];
+        if (!inst.isDone() && childMach.hasTransitionFor(inst.state(), event)) {
+          handledByAny = true;
+          inst.patchContext(readEffectiveContext());
+          inst.send(event, payload);
+        }
+      }
+      if (handledByAny) {
         return;
       }
     }
@@ -270,17 +392,26 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       return;
     }
 
+    if (fromChildTerminal && evaluation.stayed) {
+      throw new Error(
+        `[MatrixFSM Error]: Sub-machine '${prevState}' terminated with final output '${event}', but parent '${fsm.id}' responded with stay(). A parent must transition to a new state when a sub-machine reaches finalState()!`,
+      );
+    }
+
     debugLog?.(
       `[MatrixFSM:${fsm.id}] Transition '${prevState}' --(${event})--> '${evaluation.nextState}'`,
     );
 
-    // If leaving an active subMachine (not staying), clean it up and fire its onExit hook
+    // If leaving an active subMachine or combinator (not staying), clean it up and fire its onExit hook
     if (!evaluation.stayed && activeSubMachine && activeSubRef) {
       const subState = activeSubMachine.state();
       activeSubMachine.destroy();
       activeSubMachine = null;
       activeSubRef = null;
       hooks?.onExit?.[subState]?.(readEffectiveContext());
+    }
+    if (!evaluation.stayed && activeCombinator) {
+      destroyActiveCombinator();
     }
 
     if (!evaluation.stayed) {
@@ -318,7 +449,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
             : evaluation.emittedOutput.payload,
         }
       : null;
-    const resolvedFinalPayload = evaluation.hasFinalPayloadSelector
+    const resolvedFinalPayload = evaluation.outputSelector
       ? resolvedEmittedOutput?.payload
       : evaluation.finalPayload;
 
@@ -360,6 +491,13 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       );
     }
 
+    if (evaluation.enteredCombinator) {
+      enterCombinatorIfNeeded(
+        evaluation.enteredCombinator,
+        evaluation.inputMapped,
+      );
+    }
+
     hooks?.onEnter?.[currentState]?.(readEffectiveContext());
     scheduleStateTimers(currentState);
     hooks?.onStateChange?.(currentState, readEffectiveContext(), {
@@ -380,8 +518,9 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     event: string,
     payload?: unknown,
     fromChildOutput = false,
+    fromChildTerminal = false,
   ): void => {
-    eventQueue.push({ event, payload, fromChildOutput });
+    eventQueue.push({ event, payload, fromChildOutput, fromChildTerminal });
     if (isProcessing) {
       return;
     }
@@ -389,7 +528,12 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     try {
       while (eventQueue.length > 0) {
         const next = eventQueue.shift()!;
-        processOneEvent(next.event, next.payload, next.fromChildOutput);
+        processOneEvent(
+          next.event,
+          next.payload,
+          next.fromChildOutput,
+          next.fromChildTerminal,
+        );
       }
     } finally {
       isProcessing = false;
@@ -397,7 +541,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
   };
 
   const send = (event: string, payload?: unknown): void => {
-    sendInternal(event, payload, false);
+    sendInternal(event, payload, false, false);
   };
 
   const patchContext = (patch: Partial<TContext>): void => {
@@ -416,6 +560,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       activeSubMachine = null;
       activeSubRef = null;
     }
+    destroyActiveCombinator();
   };
 
   const reset = (): void => {

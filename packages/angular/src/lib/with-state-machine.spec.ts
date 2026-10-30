@@ -8,6 +8,9 @@ import {
 import { Data, Effect } from 'effect';
 import { describe, expect, it } from 'vitest';
 import {
+  all,
+  any,
+  anyState,
   awaiting,
   createFeatureTester,
   createFSM,
@@ -15,7 +18,9 @@ import {
   each,
   finalState,
   provideStateMachine,
+  race,
   stay,
+  whenSignal,
   withMachineTasks,
   withStateMachine,
   type Subscribable,
@@ -1201,5 +1206,516 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     expect(store.fsmState()).toBe('idle');
     expect(store.isPending()).toBe(false);
     expect(abortedDrinks).toEqual(['espresso', 'latte']);
+  });
+
+  describe('Cycle 9: Global Event Handling with anyState() in Angular SignalStore', () => {
+    it('hard-kills in-flight awaiting tasks and active sub-actors on global anyState() transition, while stay() is non-interrupting and child cooperative handlers take precedence', async () => {
+      let uploadAborted = false;
+      let childAborted = false;
+      const eventsLog: string[] = [];
+
+      const childActor = createMachineFeature<{
+        events: { BEGIN_WORK: void; PING: void; CHILD_FINISH: void };
+        states: 'ready' | 'working';
+      }>()({
+        id: 'childActor',
+        initial: 'ready',
+        transitions: [
+          ['ready',   'BEGIN_WORK',   awaiting('working')],
+          ['working', 'PING',         stay(),       { call: (m) => m._onChildPing }],
+          ['working', 'DONE',         finalState()],
+          ['working', 'ERROR',        'ready'],
+          ['working', 'CHILD_FINISH', finalState()],
+        ],
+        methods: () => ({
+          _onChildPing: () => eventsLog.push('childPing'),
+        }),
+        tasks: {
+          working: (_ctx, sig) =>
+            new Promise<void>((_resolve, reject) => {
+              sig.addEventListener('abort', () => {
+                childAborted = true;
+                reject(new DOMException('Aborted', 'AbortError'));
+              });
+            }),
+        },
+      });
+
+      const parentFSM = createFSM<{
+        events: {
+          START_UPLOAD: void;
+          ENTER_CHILD: void;
+          PING: void;
+          LOGOUT: void;
+        };
+        states: 'idle' | 'uploading' | 'done' | 'loggedOut';
+        methods: {
+          _onParentPing(): void;
+          _onLogout(): void;
+        };
+      }>()({
+        id: 'parentWithAnyState',
+        initial: 'idle',
+        transitions: [
+          ['idle',      'START_UPLOAD', awaiting('uploading')],
+          ['idle',      'ENTER_CHILD',  childActor],
+          ['uploading', 'DONE',         'done'],
+          ['uploading', 'ERROR',        'idle'],
+          [childActor,  'DONE',         'done'],
+          [anyState(),  'PING',         stay(),      { call: (m) => m._onParentPing }],
+          [anyState(),  'LOGOUT',       'loggedOut', { call: (m) => m._onLogout }],
+        ],
+      });
+
+      const Store = signalStore(
+        withStateMachine(parentFSM, {
+          methods: () => ({
+            _onParentPing: () => eventsLog.push('parentPing'),
+            _onLogout: () => eventsLog.push('logout'),
+          }),
+          tasks: () => ({
+            uploading: (_ctx, sig) =>
+              new Promise<void>((_resolve, reject) => {
+                sig.addEventListener('abort', () => {
+                  uploadAborted = true;
+                  reject(new DOMException('Aborted', 'AbortError'));
+                });
+              }),
+          }),
+        }),
+      );
+
+      const store = new Store();
+
+      // 1. Start awaiting('uploading'); global PING with stay() does NOT abort the task!
+      store.send('START_UPLOAD');
+      expect(store.fsmState()).toBe('uploading');
+      expect(store.isPending()).toBe(true);
+
+      store.send('PING');
+      expect(store.fsmState()).toBe('uploading');
+      expect(uploadAborted).toBe(false);
+      expect(eventsLog).toEqual(['parentPing']);
+
+      // 2. Global LOGOUT with target 'loggedOut' hard-kills the in-flight uploading task!
+      store.send('LOGOUT');
+      expect(store.fsmState()).toBe('loggedOut');
+      expect(uploadAborted).toBe(true);
+      expect(store.isPending()).toBe(false);
+      expect(eventsLog).toEqual(['parentPing', 'logout']);
+
+      // 3. Reset, enter childActor; child handles PING cooperatively before parent's [anyState(), 'PING', ...]
+      store.reset();
+      eventsLog.length = 0;
+      store.send('ENTER_CHILD');
+      expect(store.fsmState()).toBe('childActor');
+      store.send('BEGIN_WORK');
+      expect(store.fsmSubState()).toBe('working');
+
+      store.send('PING');
+      expect(eventsLog).toEqual(['childPing']);
+
+      // 4. Child does NOT handle LOGOUT -> parent's [anyState(), 'LOGOUT', 'loggedOut'] destroys childActor!
+      store.send('LOGOUT');
+      expect(store.fsmState()).toBe('loggedOut');
+      expect(childAborted).toBe(true);
+      expect(eventsLog).toEqual(['childPing', 'logout']);
+    });
+  });
+
+  describe('Cycle 10: Promise-Style Actor Combinators (all, race, any) & Cross-Store Signal Bridge (whenSignal)', () => {
+    it('all(m1, m2): resolves with tuple [out1, out2] on DONE and fails fast (aborting siblings) on first ERROR', async () => {
+      let m2Aborted = false;
+      let resolveM1!: () => void;
+      let resolveM2!: () => void;
+
+      const m1 = createMachineFeature<{
+        outputs: { DONE: { flightId: string }; ERROR: { reason: string } };
+        states: 'bookingFlight';
+      }>()({
+        id: 'flightActor',
+        initial: 'bookingFlight',
+        transitions: [
+          ['bookingFlight', 'DONE',  finalState(), { output: ['DONE', () => ({ flightId: 'FL-100' })] }],
+          ['bookingFlight', 'ERROR', finalState(), { output: ['ERROR', () => ({ reason: 'no-flights' })] }],
+        ],
+        tasks: {
+          bookingFlight: () =>
+            new Promise<void>((resolve) => {
+              resolveM1 = resolve;
+            }),
+        },
+      });
+
+      const m2 = createMachineFeature<{
+        outputs: { DONE: { hotelId: string }; ERROR: { reason: string } };
+        states: 'bookingHotel';
+      }>()({
+        id: 'hotelActor',
+        initial: 'bookingHotel',
+        transitions: [
+          ['bookingHotel', 'DONE',  finalState(), { output: ['DONE', () => ({ hotelId: 'HT-200' })] }],
+          ['bookingHotel', 'ERROR', finalState(), { output: ['ERROR', () => ({ reason: 'no-rooms' })] }],
+        ],
+        tasks: {
+          bookingHotel: (_ctx, sig) =>
+            new Promise<void>((resolve, reject) => {
+              resolveM2 = resolve;
+              sig.addEventListener('abort', () => {
+                m2Aborted = true;
+                reject(new DOMException('Aborted', 'AbortError'));
+              });
+            }),
+        },
+      });
+
+      const recordedPayloads: unknown[] = [];
+
+      const travelFSM = createFSM<{
+        events: { BOOK: void; FAIL_FLIGHT: void };
+        states: 'idle' | 'confirmed' | 'failed';
+        methods: {
+          _onAllBooked(tuple: [{ flightId: string }, { hotelId: string }]): void;
+          _onFailed(err: { reason: string }): void;
+        };
+      }>()({
+        id: 'travelAll',
+        initial: 'idle',
+        transitions: [
+          ['idle',      'BOOK',  all(m1, m2)],
+          [all(m1, m2), 'DONE',  'confirmed', { call: (m) => m._onAllBooked }],
+          [all(m1, m2), 'ERROR', 'failed',    { call: (m) => m._onFailed }],
+        ],
+      });
+
+      const TravelStore = signalStore(
+        withStateMachine(travelFSM, {
+          methods: () => ({
+            _onAllBooked: (tuple) => recordedPayloads.push(tuple),
+            _onFailed: (err) => recordedPayloads.push(err),
+          }),
+        }),
+      );
+
+      const store = new TravelStore();
+      store.send('BOOK');
+      expect(store.fsmState()).toBe('all:flightActor,hotelActor');
+
+      resolveM1();
+      await new Promise((r) => setTimeout(r, 5));
+      expect(store.fsmState()).toBe('all:flightActor,hotelActor');
+
+      resolveM2();
+      await new Promise((r) => setTimeout(r, 5));
+      expect(store.fsmState()).toBe('confirmed');
+      expect(recordedPayloads).toEqual([
+        [{ flightId: 'FL-100' }, { hotelId: 'HT-200' }],
+      ]);
+
+      // Fail-fast check: if m1 emits ERROR, m2 is immediately aborted and parent transitions to 'failed'
+      const m1Fail = createMachineFeature<{
+        outputs: { DONE: { flightId: string }; ERROR: { reason: string } };
+        states: 'bookingFlight';
+      }>()({
+        id: 'flightActorFail',
+        initial: 'bookingFlight',
+        transitions: [
+          ['bookingFlight', 'DONE',  finalState(), { output: ['ERROR', () => ({ reason: 'flight-rejected' })] }],
+          ['bookingFlight', 'ERROR', finalState(), { output: ['ERROR', () => ({ reason: 'flight-rejected' })] }],
+        ],
+        tasks: {
+          bookingFlight: async () => undefined,
+        },
+      });
+
+      const failFastFSM = createFSM<{
+        events: { BOOK: void };
+        states: 'idle' | 'confirmed' | 'failed';
+      }>()({
+        id: 'travelFailFast',
+        initial: 'idle',
+        transitions: [
+          ['idle',          'BOOK',  all(m1Fail, m2)],
+          [all(m1Fail, m2), 'DONE',  'confirmed'],
+          [all(m1Fail, m2), 'ERROR', 'failed'],
+        ],
+      });
+
+      const FailFastStore = signalStore(withStateMachine(failFastFSM));
+      const failStore = new FailFastStore();
+      failStore.send('BOOK');
+      await new Promise((r) => setTimeout(r, 10));
+      expect(failStore.fsmState()).toBe('failed');
+      expect(m2Aborted).toBe(true);
+    });
+
+    it('race(m1, m2): winner takes all and immediately aborts the loser', async () => {
+      let slowAborted = false;
+
+      const fastActor = createMachineFeature<{
+        outputs: { FOUND: string };
+        states: 'searching';
+      }>()({
+        id: 'fastActor',
+        initial: 'searching',
+        transitions: [
+          ['searching', 'DONE',  finalState(), { output: ['FOUND', () => 'cache-hit'] }],
+          ['searching', 'ERROR', finalState(), { output: ['FOUND', () => 'fallback'] }],
+        ],
+        tasks: {
+          searching: async () => undefined,
+        },
+      });
+
+      const slowActor = createMachineFeature<{
+        outputs: { TIMEOUT: void };
+        states: 'waiting';
+      }>()({
+        id: 'slowActor',
+        initial: 'waiting',
+        transitions: [
+          ['waiting', 'DONE',  finalState('TIMEOUT')],
+          ['waiting', 'ERROR', finalState('TIMEOUT')],
+        ],
+        tasks: {
+          waiting: (_ctx, sig) =>
+            new Promise<void>((_resolve, reject) => {
+              sig.addEventListener('abort', () => {
+                slowAborted = true;
+                reject(new DOMException('Aborted', 'AbortError'));
+              });
+            }),
+        },
+      });
+
+      const winners: string[] = [];
+
+      const raceFSM = createFSM<{
+        events: { START: void };
+        states: 'idle' | 'won' | 'timedOut';
+        methods: { _onFound(val: string): void };
+      }>()({
+        id: 'raceMachine',
+        initial: 'idle',
+        transitions: [
+          ['idle',                       'START',   race(fastActor, slowActor)],
+          [race(fastActor, slowActor),   'FOUND',   'won',                      { call: (m) => m._onFound }],
+          [race(fastActor, slowActor),   'TIMEOUT', 'timedOut'],
+        ],
+      });
+
+      const RaceStore = signalStore(
+        withStateMachine(raceFSM, {
+          methods: () => ({
+            _onFound: (val: string) => winners.push(val),
+          }),
+        }),
+      );
+
+      const store = new RaceStore();
+      store.send('START');
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(store.fsmState()).toBe('won');
+      expect(winners).toEqual(['cache-hit']);
+      expect(slowAborted).toBe(true);
+    });
+
+    it('any(m1, m2): ignores individual ERRORs until first DONE wins, or emits AggregateError tuple if all fail', async () => {
+      let backupAborted = false;
+
+      const failingPrimary = createMachineFeature<{
+        outputs: { DONE: string; ERROR: string };
+        states: 'connecting';
+      }>()({
+        id: 'failingPrimary',
+        initial: 'connecting',
+        transitions: [
+          ['connecting', 'DONE',  finalState(), { output: ['ERROR', () => 'primary-down'] }],
+          ['connecting', 'ERROR', finalState(), { output: ['ERROR', () => 'primary-down'] }],
+        ],
+        tasks: {
+          connecting: async () => undefined,
+        },
+      });
+
+      const succeedingMirror = createMachineFeature<{
+        outputs: { DONE: string; ERROR: string };
+        states: 'connecting';
+      }>()({
+        id: 'succeedingMirror',
+        initial: 'connecting',
+        transitions: [
+          ['connecting', 'DONE',  finalState(), { output: ['DONE', () => 'mirror-ok'] }],
+          ['connecting', 'ERROR', finalState(), { output: ['ERROR', () => 'mirror-down'] }],
+        ],
+        tasks: {
+          connecting: () => new Promise<void>((r) => setTimeout(r, 5)),
+        },
+      });
+
+      const slowBackup = createMachineFeature<{
+        outputs: { DONE: string; ERROR: string };
+        states: 'connecting';
+      }>()({
+        id: 'slowBackup',
+        initial: 'connecting',
+        transitions: [
+          ['connecting', 'DONE',  finalState(), { output: ['DONE', () => 'backup-ok'] }],
+          ['connecting', 'ERROR', finalState(), { output: ['ERROR', () => 'backup-down'] }],
+        ],
+        tasks: {
+          connecting: (_ctx, sig) =>
+            new Promise<void>((_resolve, reject) => {
+              sig.addEventListener('abort', () => {
+                backupAborted = true;
+                reject(new DOMException('Aborted', 'AbortError'));
+              });
+            }),
+        },
+      });
+
+      const results: unknown[] = [];
+
+      const anySuccessFSM = createFSM<{
+        events: { CONNECT: void };
+        states: 'idle' | 'connected' | 'allFailed';
+        methods: { _onConnected(res: string): void };
+      }>()({
+        id: 'anySuccess',
+        initial: 'idle',
+        transitions: [
+          ['idle',                                                 'CONNECT', any(failingPrimary, succeedingMirror, slowBackup)],
+          [any(failingPrimary, succeedingMirror, slowBackup),      'DONE',    'connected', { call: (m) => m._onConnected }],
+          [any(failingPrimary, succeedingMirror, slowBackup),      'ERROR',   'allFailed'],
+        ],
+      });
+
+      const AnySuccessStore = signalStore(
+        withStateMachine(anySuccessFSM, {
+          methods: () => ({
+            _onConnected: (res: string) => results.push(res),
+          }),
+        }),
+      );
+
+      const store = new AnySuccessStore();
+      store.send('CONNECT');
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(store.fsmState()).toBe('connected');
+      expect(results).toEqual(['mirror-ok']);
+      expect(backupAborted).toBe(true);
+
+      // Now test all failing -> emits ERROR with tuple of errors
+      const failingMirror = createMachineFeature<{
+        outputs: { DONE: string; ERROR: string };
+        states: 'connecting';
+      }>()({
+        id: 'failingMirror',
+        initial: 'connecting',
+        transitions: [
+          ['connecting', 'DONE',  finalState(), { output: ['ERROR', () => 'mirror-down'] }],
+          ['connecting', 'ERROR', finalState(), { output: ['ERROR', () => 'mirror-down'] }],
+        ],
+        tasks: {
+          connecting: async () => undefined,
+        },
+      });
+
+      const aggregateErrors: unknown[] = [];
+      const anyFailFSM = createFSM<{
+        events: { CONNECT: void };
+        states: 'idle' | 'connected' | 'allFailed';
+        methods: { _onAllFailed(errs: [string, string]): void };
+      }>()({
+        id: 'anyFail',
+        initial: 'idle',
+        transitions: [
+          ['idle',                               'CONNECT', any(failingPrimary, failingMirror)],
+          [any(failingPrimary, failingMirror),   'DONE',    'connected'],
+          [any(failingPrimary, failingMirror),   'ERROR',   'allFailed', { call: (m) => m._onAllFailed }],
+        ],
+      });
+
+      const AnyFailStore = signalStore(
+        withStateMachine(anyFailFSM, {
+          methods: () => ({
+            _onAllFailed: (errs) => aggregateErrors.push(errs),
+          }),
+        }),
+      );
+
+      const failStore = new AnyFailStore();
+      failStore.send('CONNECT');
+      await new Promise((r) => setTimeout(r, 15));
+
+      expect(failStore.fsmState()).toBe('allFailed');
+      expect(aggregateErrors).toEqual([['primary-down', 'mirror-down']]);
+    });
+
+    it('whenSignal(source, mapping): reactively bridges external Angular Signals into FSM events', () => {
+      const networkStatus = signal<'online' | 'offline'>('online');
+      const tokenExpired = signal(false);
+
+      const sessionFSM = createFSM<{
+        events: {
+          NETWORK_LOST: 'offline';
+          NETWORK_RESTORED: 'online';
+          SESSION_EXPIRED: boolean;
+        };
+        states: 'active' | 'offlinePaused' | 'loggedOut';
+        context: { lastStatus: string | null };
+        methods: {
+          _recordOffline(status: 'offline'): void;
+        };
+      }>()({
+        id: 'sessionBridge',
+        initial: 'active',
+        context: { lastStatus: null },
+        transitions: [
+          ['active',        'NETWORK_LOST',     'offlinePaused', { call: (m) => m._recordOffline }],
+          ['offlinePaused', 'NETWORK_RESTORED', 'active'],
+          [anyState(),      'SESSION_EXPIRED',  'loggedOut'],
+        ],
+      });
+
+      const SessionStore = signalStore(
+        withState({ lastStatus: null as string | null }),
+        withStateMachine(sessionFSM, {
+          methods: (store) => ({
+            _recordOffline: (status: 'offline') =>
+              patchState(store, { lastStatus: status }),
+          }),
+          on: () => [
+            whenSignal(networkStatus, {
+              offline: 'NETWORK_LOST',
+              online: 'NETWORK_RESTORED',
+            }),
+            whenSignal(tokenExpired, (expired) =>
+              expired ? 'SESSION_EXPIRED' : null,
+            ),
+          ],
+        }),
+      );
+
+      const store = new SessionStore();
+      // Initial signal evaluation does not fire transitions
+      expect(store.fsmState()).toBe('active');
+      expect(store.lastStatus()).toBeNull();
+
+      // Flip networkStatus -> 'offline': triggers NETWORK_LOST synchronously!
+      networkStatus.set('offline');
+      expect(store.fsmState()).toBe('offlinePaused');
+      expect(store.lastStatus()).toBe('offline');
+
+      // Flip networkStatus -> 'online': triggers NETWORK_RESTORED!
+      networkStatus.set('online');
+      expect(store.fsmState()).toBe('active');
+
+      // Flip tokenExpired -> true: triggers SESSION_EXPIRED via [anyState(), 'SESSION_EXPIRED', 'loggedOut']!
+      tokenExpired.set(true);
+      expect(store.fsmState()).toBe('loggedOut');
+    });
   });
 });

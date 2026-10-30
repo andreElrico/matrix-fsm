@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
   after,
+  all,
+  any,
+  anyState,
   awaiting,
   createFSM,
   createMachineInstance,
   each,
   finalState,
+  race,
   stay,
   toMermaid,
   transitions,
@@ -17,6 +21,7 @@ import {
   type ExtractFinalOutcomes,
   type ExtractMethods,
   type ExtractStates,
+  type ExtractTerminalOutputs,
   type RequiredTasksMap,
 } from '../index.js';
 
@@ -238,6 +243,7 @@ describe('@matrix-fsm/core', () => {
       initial: 'cart',
       transitions: [
         ['cart',     'CANCEL',       paymentSub],
+        [paymentSub, 'PAID',         'orderConfirmed'],
         // @ts-expect-error - 'TYPO_OUTCOME' is not a finalState of paymentSub or an event of parent
         [paymentSub, 'TYPO_OUTCOME', 'orderConfirmed'],
       ],
@@ -658,6 +664,189 @@ describe('@matrix-fsm/core', () => {
 
       vi.advanceTimersByTime(1);
       expect(instance.getState()).toBe('idle'); // Exakt nach 3000ms im 2. Besuch geschlossen!
+    });
+  });
+
+  describe('Cycle 8: Mathematical Graph Conservation & Sub-Actor Finalization Safety', () => {
+    it('enforces compile-time prohibition of stay() on terminal sub-machine outputs while allowing stay() on streaming outputs', () => {
+      const streamingSub = createFSM<{
+        events: { TICK: void; FINISH: void };
+        states: 'working';
+        outputs: { PROGRESS: number; COMPLETED: { total: number } };
+      }>()({
+        id: 'streamingSub',
+        initial: 'working',
+        transitions: [
+          ['working', 'TICK',   stay(),       { output: ['PROGRESS', () => 50] }],
+          ['working', 'FINISH', finalState(), { output: ['COMPLETED', () => ({ total: 100 })] }],
+        ],
+      });
+
+      expectTypeOf<ExtractTerminalOutputs<typeof streamingSub>>().toEqualTypeOf<'COMPLETED'>();
+
+      // Valid: stay() on streaming PROGRESS, transition on terminal COMPLETED
+      createFSM<{
+        events: { START: void };
+        states: 'idle' | 'done';
+      }>()({
+        id: 'validParent',
+        initial: 'idle',
+        transitions: [
+          ['idle',       'START',     streamingSub],
+          [streamingSub, 'PROGRESS',  stay()],
+          [streamingSub, 'COMPLETED', 'done'],
+        ],
+      });
+
+      // Invalid: stay() on terminal COMPLETED (both direct and fallback)
+      createFSM<{
+        events: { START: void };
+        states: 'idle' | 'done';
+      }>()({
+        id: 'invalidStayOnTerminal',
+        initial: 'idle',
+        transitions: [
+          ['idle',       'START',     streamingSub],
+          [streamingSub, 'PROGRESS',  stay()],
+          // @ts-expect-error - stay() is forbidden when handling terminal sub-machine output 'COMPLETED'
+          [streamingSub, 'COMPLETED', stay()],
+        ],
+      });
+    });
+
+    it('enforces parent handling of implicit DONE from bare finalState() and forbids finalState(NAME) for non-void outputs', () => {
+      const bareDoneSub = createFSM<{
+        events: { FINISH: void };
+        states: 'active';
+      }>()({
+        id: 'bareDoneSub',
+        initial: 'active',
+        transitions: [['active', 'FINISH', finalState()]],
+      });
+
+      expectTypeOf<ExtractTerminalOutputs<typeof bareDoneSub>>().toEqualTypeOf<'DONE'>();
+
+      // Missing 'DONE' handler triggers compile-time error on bareDoneSub in Column 3
+      createFSM<{
+        events: { GO: void };
+        states: 'idle' | 'complete';
+      }>()({
+        id: 'missingImplicitDoneParent',
+        initial: 'idle',
+        transitions: [
+          // @ts-expect-error - MissingSubMachineOutputs<'DONE'> because bare finalState() implicitly emits 'DONE'
+          ['idle', 'GO', bareDoneSub],
+        ],
+      });
+
+      // Passing non-void output key to finalState('NAME') triggers compile-time error
+      createFSM<{
+        events: { FINISH: void };
+        states: 'active';
+        outputs: { RESULT: { count: number }; CANCELLED: void };
+      }>()({
+        id: 'nonVoidShorthandCheck',
+        initial: 'active',
+        transitions: [
+          // @ts-expect-error - 'RESULT' requires a payload and cannot use void shorthand finalState('RESULT')
+          ['active', 'FINISH', finalState('RESULT')],
+        ],
+      });
+    });
+
+    it('throws a descriptive runtime Dev-Guard error if a parent responds to a terminal finalState() output with stay()', () => {
+      const childSub = createFSM<{
+        events: { COMPLETE: void };
+        states: 'running';
+      }>()({
+        id: 'childSub',
+        initial: 'running',
+        transitions: [['running', 'COMPLETE', finalState()]],
+      });
+
+      const brokenParent = createFSM<any>()({
+        id: 'brokenParent',
+        initial: 'idle',
+        transitions: [
+          ['idle',   'START', childSub],
+          [childSub, 'DONE',  stay()],
+        ],
+      });
+
+      const instance = createMachineInstance(brokenParent, { context: {} });
+      instance.send('START');
+      expect(() => instance.send('COMPLETE')).toThrowError(
+        /Sub-machine 'childSub' terminated with final output 'DONE', but parent 'brokenParent' responded with stay\(\)/,
+      );
+    });
+  });
+
+  describe('Cycle 9: Global Event Handling with anyState()', () => {
+    it('evaluates state-specific transitions before anyState() fallback rows and supports stay() vs target transitions', () => {
+      const logs: string[] = [];
+      const appFSM = createFSM<{
+        events: { LOGOUT: void; PING: void; STEP: void };
+        states: 'idle' | 'editing' | 'unsavedWarning' | 'loggedOut';
+        methods: {
+          _warnUnsaved(): void;
+          _forceLogout(): void;
+          _recordPing(): void;
+        };
+      }>()({
+        id: 'app',
+        initial: 'idle',
+        transitions: [
+          ['idle',       'STEP',   'editing'],
+          ['editing',    'LOGOUT', 'unsavedWarning', { call: (m) => m._warnUnsaved }],
+          [anyState(),   'LOGOUT', 'loggedOut',      { call: (m) => m._forceLogout }],
+          [anyState(),   'PING',   stay(),           { call: (m) => m._recordPing }],
+        ],
+      });
+
+      // Compile-time check: anyState() is forbidden in Column 3 (TO)
+      createFSM<{
+        events: { GO: void };
+        states: 'idle';
+      }>()({
+        id: 'invalidAnyStateTarget',
+        initial: 'idle',
+        transitions: [
+          // @ts-expect-error - anyState() is only allowed in Column 1 (FROM), never in Column 3 (TO)
+          ['idle', 'GO', anyState()],
+        ],
+      });
+
+      const instance = createMachineInstance(appFSM, {
+        context: {},
+        methods: {
+          _warnUnsaved: () => logs.push('warnUnsaved'),
+          _forceLogout: () => logs.push('forceLogout'),
+          _recordPing: () => logs.push('ping'),
+        },
+      });
+
+      // 1. Global stay() does not leave current state
+      instance.send('PING');
+      expect(instance.state()).toBe('idle');
+      expect(logs).toEqual(['ping']);
+
+      // 2. Move to 'editing', where specific ['editing', 'LOGOUT', ...] overrides [anyState(), 'LOGOUT', ...]
+      instance.send('STEP');
+      expect(instance.state()).toBe('editing');
+
+      instance.send('LOGOUT');
+      expect(instance.state()).toBe('unsavedWarning');
+      expect(logs).toEqual(['ping', 'warnUnsaved']);
+
+      // 3. In 'unsavedWarning', no specific LOGOUT row exists -> falls back to [anyState(), 'LOGOUT', 'loggedOut']
+      instance.send('LOGOUT');
+      expect(instance.state()).toBe('loggedOut');
+      expect(logs).toEqual(['ping', 'warnUnsaved', 'forceLogout']);
+
+      // Mermaid rendering includes (*) wildcard node
+      const diagram = toMermaid(appFSM);
+      expect(diagram).toContain('state "(*)" as anyState');
+      expect(diagram).toContain('anyState --> loggedOut : LOGOUT');
     });
   });
 });

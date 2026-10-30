@@ -3,9 +3,11 @@ import { awaitingNamingConvention } from './lib/rules/awaiting-naming-convention
 import { completeExtractedGroups } from './lib/rules/complete-extracted-groups.js';
 import { groupContiguousTransitions } from './lib/rules/group-contiguous-transitions.js';
 import { noConflictingFinalOutput } from './lib/rules/no-conflicting-final-output.js';
+import { noUnreachableStates } from './lib/rules/no-unreachable-states.js';
 import { noUnreachableTransitions } from './lib/rules/no-unreachable-transitions.js';
 import { pureMachineDefinition } from './lib/rules/pure-machine-definition.js';
 import { requireAwaitingHandlers } from './lib/rules/require-awaiting-handlers.js';
+import { requireExitForTargets } from './lib/rules/require-exit-for-targets.js';
 import { requireFallbackTransition } from './lib/rules/require-fallback-transition.js';
 
 export const rules = {
@@ -18,6 +20,8 @@ export const rules = {
   'complete-extracted-groups': completeExtractedGroups,
   'pure-machine-definition': pureMachineDefinition,
   'no-conflicting-final-output': noConflictingFinalOutput,
+  'require-exit-for-targets': requireExitForTargets,
+  'no-unreachable-states': noUnreachableStates,
 };
 
 export const plugin = {
@@ -43,6 +47,8 @@ export const configs = {
       '@matrix-fsm/complete-extracted-groups': 'error',
       '@matrix-fsm/pure-machine-definition': 'error',
       '@matrix-fsm/no-conflicting-final-output': 'error',
+      '@matrix-fsm/require-exit-for-targets': 'error',
+      '@matrix-fsm/no-unreachable-states': 'error',
     },
   },
 };
@@ -55,8 +61,10 @@ export {
   completeExtractedGroups,
   groupContiguousTransitions,
   noConflictingFinalOutput,
+  noUnreachableStates,
   noUnreachableTransitions,
   pureMachineDefinition,
   requireAwaitingHandlers,
+  requireExitForTargets,
   requireFallbackTransition,
 };
