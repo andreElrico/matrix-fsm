@@ -65,7 +65,8 @@
       }
     },
     "lint": {
-      "executor": "@nx/eslint:lint"
+      "executor": "@nx/eslint:lint",
+      "dependsOn": ["@matrix-fsm/eslint-plugin:build"]
     },
     "serve-static": {
       "continuous": true,

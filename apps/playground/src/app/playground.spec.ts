@@ -40,10 +40,10 @@ function setupPlaygroundInjector() {
 }
 
 describe('@matrix-fsm/playground - Angular DI & Blueprint E2E Verification', () => {
-  it('verifies auth.machine.ts passes all 7 AST rules of @matrix-fsm/eslint-plugin with zero errors', () => {
+  it('verifies auth.feature.ts passes all 13 AST rules of @matrix-fsm/eslint-plugin with zero errors', () => {
     const machinePath = path.resolve(
       import.meta.dirname,
-      './features/auth/auth.machine.ts',
+      './features/auth/auth.feature.ts',
     );
     const machineSource = fs.readFileSync(machinePath, 'utf-8');
 
@@ -64,17 +64,19 @@ describe('@matrix-fsm/playground - Angular DI & Blueprint E2E Verification', () 
           rules: matrixFsmConfigs.recommended.rules as Linter.RulesRecord,
         },
       ],
-      { filename: 'auth.machine.ts' },
+      { filename: 'auth.feature.ts' },
     );
 
     expect(messages).toEqual([]);
   });
 
-  it('executes the complete 3-layer AuthFeatureStore flow via Angular DI', async () => {
+  it('executes the complete 3-layer AuthFeatureStore flow via Angular DI (createMachineFeature + effectTaskAdapter + store.can)', async () => {
     const { globalAuth, authApi, store, mermaidDiagram } =
       setupPlaygroundInjector();
 
     expect(store.fsmState()).toBe('loginView');
+    expect(store.can('LOGIN')).toBe(true);
+    expect(store.can('LOGOUT')).toBe(false);
     expect(mermaidDiagram).toContain(
       'state "⚡ authenticating" as authenticating',
     );

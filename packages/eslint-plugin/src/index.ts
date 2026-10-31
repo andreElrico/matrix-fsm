@@ -28,16 +28,27 @@ export const rules = {
   'no-unreachable-states': noUnreachableStates,
 };
 
-export const plugin = {
+export const plugin: {
+  meta: { name: string; version: string };
+  rules: typeof rules;
+  configs: {
+    recommended: {
+      plugins: Record<string, unknown>;
+      rules: Record<string, string>;
+    };
+  };
+} = {
   meta: {
     name: '@matrix-fsm/eslint-plugin',
     version: '0.0.1',
   },
   rules,
+  configs: null as any,
 };
 
 export const configs = {
   recommended: {
+    files: ['**/*.ts', '**/*.tsx', '**/*.mts', '**/*.cts'],
     plugins: {
       '@matrix-fsm': plugin,
     },
@@ -58,6 +69,8 @@ export const configs = {
     },
   },
 };
+
+plugin.configs = configs;
 
 export default plugin;
 

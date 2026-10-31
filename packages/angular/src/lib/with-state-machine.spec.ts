@@ -1,4 +1,4 @@
-import { inject, InjectionToken, signal } from '@angular/core';
+import { computed, inject, InjectionToken, signal } from '@angular/core';
 import {
   patchState,
   signalStore,
@@ -2704,6 +2704,367 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         to: 'browsing',
         payload: { drink: 'Cortado' },
       });
+    });
+  });
+
+  describe('Cycle 31 (Masterplan Cycle 1): Optional Union Event Payloads & createMachineFeature Validation Without Explicit states', () => {
+    it('allows calling store.send() with 0 or 1 argument when event payload is a union with void, and enforces call/input validation when states is omitted in createMachineFeature', () => {
+      const childWithInput = createMachineFeature<{
+        inputs: { readonly requiredToken: string };
+        outputs: { DONE: { readonly ok: boolean } };
+        events: { COMPLETE: void };
+      }>()({
+        id: 'childWithInput',
+        initial: 'working',
+        transitions: [
+          ['working', 'COMPLETE', finalState(), { output: ['DONE', () => ({ ok: true })] }],
+        ],
+        state: {},
+      });
+
+      const parentFeature = createMachineFeature<{
+        events: {
+          OPTIONAL_NOTE: { readonly note?: string } | void;
+          REQUIRED_AMOUNT: { readonly amount: number };
+          GO_CHILD: void;
+        };
+      }>()({
+        id: 'optionalUnionFeature',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'OPTIONAL_NOTE', stay(), { call: (m) => m._onOptional }],
+          ['idle', 'REQUIRED_AMOUNT', stay(), { call: (m) => m._onAmount }],
+          [
+            'idle',
+            'GO_CHILD',
+            childWithInput,
+            { input: () => ({ requiredToken: 'abc' }) },
+          ],
+          [childWithInput, 'DONE', 'idle'],
+        ],
+        state: {
+          lastNote: null as string | null,
+          total: 0,
+        },
+        methods: (store) => ({
+          _onOptional: (payload: { readonly note?: string } | void) =>
+            patchState(store, { lastNote: payload?.note ?? 'none' }),
+          _onAmount: ({ amount }: { readonly amount: number }) =>
+            patchState(store, { total: store.total() + amount }),
+        }),
+      });
+
+      // Verify compile-time @ts-expect-error when states is omitted in createMachineFeature:
+      createMachineFeature<{
+        events: { GO: { readonly count: number } };
+        methods: {
+          _wrongMethod: (p: { readonly wrongProp: string }) => void;
+        };
+      }>()({
+        id: 'invalidWithoutStates',
+        initial: 'idle',
+        transitions: [
+          // @ts-expect-error Missing required input when transitioning into childWithInput
+          ['idle', 'GO', childWithInput],
+          [
+            'idle',
+            'GO',
+            stay(),
+            // @ts-expect-error Incompatible payload type for _wrongMethod when states is omitted
+            { call: (m) => m._wrongMethod },
+          ],
+          [childWithInput, 'DONE', 'idle'],
+        ],
+        state: {},
+        methods: () => ({
+          _wrongMethod: (_p: { readonly wrongProp: string }) => undefined,
+        }),
+      });
+
+      const Store = signalStore(withStateMachine(parentFeature));
+      const store = new Store();
+
+      // 0-arg call on union with void:
+      store.send('OPTIONAL_NOTE');
+      expect(store.lastNote()).toBe('none');
+
+      // 1-arg call on union with void:
+      store.send('OPTIONAL_NOTE', { note: 'extra hot' });
+      expect(store.lastNote()).toBe('extra hot');
+
+      store.send('REQUIRED_AMOUNT', { amount: 42 });
+      expect(store.total()).toBe(42);
+    });
+  });
+
+  describe('Cycle 33 (Masterplan Cycle 3): Empty Array [] Synchronous FIFO ALL_DONE Dispatch in each()', () => {
+    it('synchronously dispatches ALL_DONE with [] in the same send() call when entering each() with an empty array in SignalStore and createFeatureTester', () => {
+      const itemFeature = createMachineFeature<{
+        inputs: {
+          readonly drink: { readonly id: string; readonly name: string };
+        };
+        outputs: {
+          COFFEE_READY: { readonly drinkName: string };
+        };
+        events: { FINISH: void };
+      }>()({
+        id: 'itemFeature',
+        initial: 'brewing',
+        transitions: [
+          [
+            'brewing',
+            'FINISH',
+            finalState(),
+            { output: ['COFFEE_READY', (ctx) => ({ drinkName: ctx.drink.name })] },
+          ],
+        ],
+        state: {},
+      });
+
+      const batchFeature = createMachineFeature<{
+        events: { START_BATCH: void };
+      }>()({
+        id: 'emptyEachBatch',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'START_BATCH', each('drinks', itemFeature)],
+          [
+            each('drinks', itemFeature),
+            'ALL_DONE',
+            'orderReady',
+            { call: (m) => m._saveAll },
+          ],
+        ],
+        state: {
+          drinks: [] as Array<{ readonly id: string; readonly name: string }>,
+          completedCups: null as ReadonlyArray<{ readonly drinkName: string }> | null,
+        },
+        methods: (store) => ({
+          _saveAll: (cups: ReadonlyArray<{ readonly drinkName: string }>) =>
+            patchState(store, { completedCups: cups }),
+        }),
+      });
+
+      const Store = signalStore(withStateMachine(batchFeature));
+      const store = new Store();
+
+      store.send('START_BATCH');
+      // Must transition synchronously in 0 ticks with []!
+      expect(store.state()).toBe('orderReady');
+      expect(store.completedCups()).toEqual([]);
+
+      const tester = createFeatureTester(batchFeature);
+      tester.send('START_BATCH');
+      expect(tester.state()).toBe('orderReady');
+      expect(tester.context().completedCups).toEqual([]);
+    });
+  });
+
+  describe('Cycle 34 (Masterplan Cycle 4): Recursive restoreSnapshot() for Combinators & Actor-Keyed Combinator Inputs in SignalStore', () => {
+    it('unwraps actor-keyed combinator inputs in SignalStore, exposes store.actors for combinator children, and recursively restores combinator child snapshots', () => {
+      const baristaFeature = createMachineFeature<{
+        inputs: { readonly drink: string };
+        outputs: { COFFEE_READY: { readonly cup: string } };
+        events: { GRIND_DONE: void; BREW_DONE: void };
+      }>()({
+        id: 'barista',
+        initial: 'grinding',
+        transitions: [
+          ['grinding', 'GRIND_DONE', 'brewing', { call: (m) => m._onGround }],
+          [
+            'brewing',
+            'BREW_DONE',
+            finalState(),
+            { output: ['COFFEE_READY', (ctx) => ({ cup: `Hot ${ctx.drink}` })] },
+          ],
+        ],
+        state: {
+          ground: false,
+        },
+        methods: (store) => ({
+          _onGround: () => patchState(store, { ground: true }),
+        }),
+      });
+
+      const bakeryFeature = createMachineFeature<{
+        inputs: { readonly pastry: string };
+        outputs: { BAKERY_READY: { readonly item: string } };
+        events: { BAKE_DONE: void };
+      }>()({
+        id: 'bakery',
+        initial: 'baking',
+        transitions: [
+          [
+            'baking',
+            'BAKE_DONE',
+            finalState(),
+            { output: ['BAKERY_READY', (ctx) => ({ item: `Warm ${ctx.pastry}` })] },
+          ],
+        ],
+        state: {},
+      });
+
+      const orderFeature = createMachineFeature<{
+        events: {
+          START: void;
+          GRIND_DONE: void;
+          BREW_DONE: void;
+          BAKE_DONE: void;
+        };
+      }>()({
+        id: 'orderCombinatorFeature',
+        initial: 'idle',
+        transitions: [
+          [
+            'idle',
+            'START',
+            all(baristaFeature, bakeryFeature),
+            {
+              input: () => ({
+                barista: { drink: 'Flat White' },
+                bakery: { pastry: 'Pain au Chocolat' },
+              }),
+            },
+          ],
+          [
+            all(baristaFeature, bakeryFeature),
+            'ALL_DONE',
+            'completed',
+            { call: (m) => m._onAllDone },
+          ],
+        ],
+        state: {
+          summary: null as {
+            readonly barista: { readonly cup: string };
+            readonly bakery: { readonly item: string };
+          } | null,
+        },
+        methods: (store) => ({
+          _onAllDone: (res: {
+            readonly barista: { readonly cup: string };
+            readonly bakery: { readonly item: string };
+          }) => patchState(store, { summary: res }),
+        }),
+      });
+
+      const OrderStore = signalStore(withStateMachine(orderFeature));
+      const store1 = new OrderStore();
+
+      store1.send('START');
+      expect(store1.state()).toBe('all:barista,bakery');
+      expect(store1.actors.barista()?.drink).toBe('Flat White');
+      expect(store1.actors.bakery()?.pastry).toBe('Pain au Chocolat');
+
+      // Advance barista to 'brewing'
+      store1.send('GRIND_DONE');
+      expect(store1.actors.barista()?.ground).toBe(true);
+
+      const snap = store1.getSnapshot();
+      expect(snap.children?.['barista']?.state).toBe('brewing');
+      expect(snap.children?.['bakery']?.state).toBe('baking');
+
+      // Restore into a brand new store2
+      const store2 = new OrderStore();
+      store2.restoreSnapshot(snap);
+
+      expect(store2.state()).toBe('all:barista,bakery');
+      expect(store2.actors.barista()?.drink).toBe('Flat White');
+      expect(store2.actors.barista()?.ground).toBe(true);
+      expect(store2.getSnapshot().children?.['barista']?.state).toBe('brewing');
+
+      // Complete both children on store2
+      store2.send('BREW_DONE');
+      store2.send('BAKE_DONE');
+
+      expect(store2.state()).toBe('completed');
+      expect(store2.summary()).toEqual({
+        barista: { cup: 'Hot Flat White' },
+        bakery: { item: 'Warm Pain au Chocolat' },
+      });
+    });
+  });
+
+  describe('Cycle 36 (Masterplan Cycle 6): Zoneless-Reactive store.can(event, payload?), tester.can() & Synchronous Sub-Actor store.actors Live Sync', () => {
+    it('reactively tracks store state and context signals inside computed(() => store.can(...)), supports tester.can(), and immediately reflects synchronous sub-actor stay() call mutations in store.actors', () => {
+      const baristaActor = createMachineFeature<{
+        inputs: { readonly drink: string };
+        events: { ADD_SHOT: void; FINISH: void };
+        outputs: { COFFEE_READY: { readonly shots: number } };
+      }>()({
+        id: 'barista',
+        initial: 'brewing',
+        transitions: [
+          ['brewing', 'ADD_SHOT', stay(), { call: (m) => m._addShot }],
+          [
+            'brewing',
+            'FINISH',
+            finalState(),
+            {
+              guard: (ctx) => ctx.shots >= 1,
+              output: ['COFFEE_READY', (ctx) => ({ shots: ctx.shots })],
+            },
+          ],
+        ],
+        state: {
+          shots: 1,
+        },
+        methods: (store) => ({
+          _addShot: () => patchState(store, { shots: store.shots() + 1 }),
+        }),
+      });
+
+      const shopFeature = createMachineFeature<{
+        events: {
+          PAY: void;
+          ADD_SHOT: void;
+          FINISH: void;
+        };
+      }>()({
+        id: 'reactiveCanShop',
+        initial: 'browsing',
+        transitions: [
+          [
+            'browsing',
+            'PAY',
+            baristaActor,
+            {
+              guard: (ctx) => ctx.balance >= 10,
+              input: () => ({ drink: 'Espresso' }),
+            },
+          ],
+          [baristaActor, 'COFFEE_READY', 'done'],
+        ],
+        state: {
+          balance: 5,
+        },
+      });
+
+      const ShopStore = signalStore(withStateMachine(shopFeature));
+      const store = new ShopStore();
+
+      // Zoneless computed() signal tracking store.can('PAY'):
+      const canPay = computed(() => store.can('PAY'));
+      expect(canPay()).toBe(false);
+
+      // Mutate store balance without changing fsmState -> canPay() recomputes reactively!
+      store.patchContext({ balance: 15 });
+      expect(canPay()).toBe(true);
+
+      // Transition into baristaActor and verify synchronous stay() call mutation in store.actors.barista()
+      store.send('PAY');
+      expect(store.state()).toBe('barista');
+      expect(store.can('PAY')).toBe(false);
+      expect(store.can('ADD_SHOT')).toBe(true);
+      expect(store.actors.barista()?.shots).toBe(1);
+
+      store.send('ADD_SHOT');
+      expect(store.actors.barista()?.shots).toBe(2);
+
+      // Verify tester.can() on createFeatureTester
+      const tester = createFeatureTester(shopFeature);
+      expect(tester.can('PAY')).toBe(false);
+      tester.patchContext({ balance: 20 });
+      expect(tester.can('PAY')).toBe(true);
     });
   });
 });

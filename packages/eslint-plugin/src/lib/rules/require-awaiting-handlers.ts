@@ -86,15 +86,46 @@ export const requireAwaitingHandlers = createRule<[], MessageIds>({
         const errorStates = new Set<string>();
 
         for (const row of allRows) {
-          if (row.fromKey && row.viaKey === 'DONE') {
-            doneStates.add(row.fromKey);
-          }
-          if (row.fromKey && row.viaKey === 'ERROR') {
-            errorStates.add(row.fromKey);
+          const viaKeys =
+            row.viaNode.type === AST_NODE_TYPES.ArrayExpression
+              ? row.viaNode.elements
+                  .map((el) =>
+                    el &&
+                    el.type === AST_NODE_TYPES.Literal &&
+                    typeof el.value === 'string'
+                      ? el.value
+                      : null,
+                  )
+                  .filter((k): k is string => k !== null)
+              : row.viaKey
+                ? [row.viaKey]
+                : [];
+          for (const fKey of row.fromKeys) {
+            if (viaKeys.includes('DONE') || viaKeys.includes('ALL_DONE')) {
+              doneStates.add(fKey);
+            }
+            if (viaKeys.includes('ERROR')) {
+              errorStates.add(fKey);
+            }
           }
         }
 
         for (const row of allRows) {
+          if (row.anyCombinatorCall) {
+            const { stateKey, callNode } = row.anyCombinatorCall;
+            const hasError =
+              errorStates.has(stateKey) || errorStates.has('anyState()');
+            if (!hasError) {
+              context.report({
+                node: callNode,
+                messageId: 'missingAwaitingHandlers',
+                data: {
+                  state: 'any(...)',
+                  missing: `[any(...), 'ERROR', ...]`,
+                },
+              });
+            }
+          }
           if (!row.awaitingCall) {
             continue;
           }

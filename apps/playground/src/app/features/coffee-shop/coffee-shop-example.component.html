@@ -166,7 +166,12 @@
                 Selected:
                 <strong>{{ store.fsmContext().selectedDrink?.name ?? 'None' }}</strong>
               </span>
-              <button type="button" class="primary-btn" (click)="placeOrder()">
+              <button
+                type="button"
+                class="primary-btn"
+                [disabled]="!store.can('PLACE_ORDER')"
+                (click)="placeOrder()"
+              >
                 🧑‍💼 Hand Order to Cashier (PLACE_ORDER)
               </button>
             </div>
@@ -229,10 +234,15 @@
               </div>
             </div>
             <div class="btn-group">
-              <button type="button" class="primary-btn" (click)="pay()">
+              <button
+                type="button"
+                class="primary-btn"
+                [disabled]="!store.can('PAY')"
+                (click)="pay()"
+              >
                 💳 Customer: Pay ${{ store.fsmContext().finalPrice.toFixed(2) }} (PAY)
               </button>
-              <button type="button" (click)="cancel()">
+              <button type="button" [disabled]="!store.can('CANCEL')" (click)="cancel()">
                 Cancel Order
               </button>
             </div>

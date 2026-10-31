@@ -753,4 +753,126 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
       expect(messages[0].messageId).toBe('missingExitTransition');
     });
   });
+
+  describe('13. Cycle 37 (Masterplan Cycle 7): Column 1 (FROM) Arrays, Unguarded always() Shadowing & any() Mandatory ERROR Handler', () => {
+    it('no-unreachable-states: unwraps Column 1 (FROM) arrays and flags unreachable elements inside the array', () => {
+      const { messages: validMsgs } = verifyRule(
+        'no-unreachable-states',
+        `
+        createFSM()({
+          id: 'wizard',
+          initial: 'idle',
+          transitions: [
+            ['idle', 'START', 'step1'],
+            ['step1', 'FAIL', 'error'],
+            [['step1', 'error'], 'RESET', 'idle'],
+          ],
+        });
+        `,
+      );
+      expect(validMsgs).toHaveLength(0);
+
+      const { messages: invalidMsgs } = verifyRule(
+        'no-unreachable-states',
+        `
+        createFSM()({
+          id: 'wizard',
+          initial: 'idle',
+          transitions: [
+            ['idle', 'START', 'step1'],
+            [['step1', 'ghostState'], 'RESET', 'idle'],
+          ],
+        });
+        `,
+      );
+      expect(invalidMsgs).toHaveLength(1);
+      expect(invalidMsgs[0].messageId).toBe('unreachableState');
+    });
+
+    it('require-exit-for-targets: counts Column 1 (FROM) arrays as valid exit transitions for all elements in the array', () => {
+      const { messages } = verifyRule(
+        'require-exit-for-targets',
+        `
+        createFSM()({
+          id: 'multiSub',
+          initial: 'idle',
+          transitions: [
+            ['idle', 'GO_A', subA],
+            ['idle', 'GO_B', subB],
+            [[subA, subB], 'DONE', 'completed'],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(0);
+    });
+
+    it('no-shadowed-transitions: detects shadowing from Column 1 (FROM) arrays and unguarded always() transitions', () => {
+      const { messages: fromArrayMsgs } = verifyRule(
+        'no-shadowed-transitions',
+        `
+        createFSM()({
+          id: 'fromArrayShadow',
+          initial: 'idle',
+          transitions: [
+            [['idle', 'active'], 'RESET', 'idle'],
+            ['active',           'RESET', 'special', { guard: isSpecial }],
+          ],
+        });
+        `,
+      );
+      expect(fromArrayMsgs).toHaveLength(1);
+      expect(fromArrayMsgs[0].messageId).toBe('unreachableTransition');
+
+      const { messages: alwaysMsgs } = verifyRule(
+        'no-shadowed-transitions',
+        `
+        createFSM()({
+          id: 'alwaysShadow',
+          initial: 'checking',
+          transitions: [
+            ['checking', always(), 'done'],
+            ['checking', 'CANCEL', 'idle'],
+          ],
+        });
+        `,
+      );
+      expect(alwaysMsgs).toHaveLength(1);
+      expect(alwaysMsgs[0].messageId).toBe('unreachableTransition');
+    });
+
+    it('require-awaiting-handlers: requires an ERROR transition handler when entering any(subA, subB) in Column 3', () => {
+      const { messages: invalidMsgs } = verifyRule(
+        'require-awaiting-handlers',
+        `
+        createFSM()({
+          id: 'anyMissingError',
+          initial: 'idle',
+          transitions: [
+            ['idle', 'START', any(subA, subB)],
+            [any(subA, subB), 'DONE', 'completed'],
+          ],
+        });
+        `,
+      );
+      expect(invalidMsgs).toHaveLength(1);
+      expect(invalidMsgs[0].messageId).toBe('missingAwaitingHandlers');
+
+      const { messages: validMsgs } = verifyRule(
+        'require-awaiting-handlers',
+        `
+        createFSM()({
+          id: 'anyWithError',
+          initial: 'idle',
+          transitions: [
+            ['idle', 'START', any(subA, subB)],
+            [any(subA, subB), 'DONE', 'completed'],
+            [any(subA, subB), 'ERROR', 'failed'],
+          ],
+        });
+        `,
+      );
+      expect(validMsgs).toHaveLength(0);
+    });
+  });
 });

@@ -121,25 +121,27 @@ export const noUnreachableStates = createRule<[], MessageIds>({
 
         const reportedStates = new Set<string>();
         for (const row of allRows) {
-          if (
-            !row.fromKey ||
-            row.fromKey === 'anyState()' ||
-            reachableStates.has(row.fromKey) ||
-            reportedStates.has(row.fromKey)
-          ) {
-            continue;
+          for (const fKey of row.fromKeys) {
+            if (
+              !fKey ||
+              fKey === 'anyState()' ||
+              reachableStates.has(fKey) ||
+              reportedStates.has(fKey)
+            ) {
+              continue;
+            }
+            reportedStates.add(fKey);
+            const displayName = fKey.startsWith('ref:')
+              ? fKey.slice(4)
+              : fKey;
+            context.report({
+              node: row.fromNode,
+              messageId: 'unreachableState',
+              data: {
+                state: displayName,
+              },
+            });
           }
-          reportedStates.add(row.fromKey);
-          const displayName = row.fromKey.startsWith('ref:')
-            ? row.fromKey.slice(4)
-            : row.fromKey;
-          context.report({
-            node: row.fromNode,
-            messageId: 'unreachableState',
-            data: {
-              state: displayName,
-            },
-          });
         }
       },
     };

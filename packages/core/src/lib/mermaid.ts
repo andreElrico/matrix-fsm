@@ -82,61 +82,64 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
       TransitionOptions<any, any, any> | undefined,
     ];
 
-    const fromRaw = isAnyStateNode(from)
-      ? 'anyState'
-      : isAwaitingNode(from)
-        ? from.state
-        : isSubMachineRef(from) || isFSMDefinition(from)
-          ? from.id
-          : isEachNode(from) || isCombinatorNode(from)
-            ? from.id
-            : String(from);
-    const fromId = sanitizeMermaidId(fromRaw);
-    const formatViaSingle = (v: unknown): string =>
-      isAfterNode(v)
-        ? `after(${v.ms}ms)`
-        : isAlwaysNode(v)
-          ? 'always()'
-          : String(v);
-    const viaLabel = Array.isArray(via)
-      ? via.map(formatViaSingle).join(' | ')
-      : formatViaSingle(via);
+    const fromItems = Array.isArray(from) ? from : [from];
+    for (const fromItem of fromItems) {
+      const fromRaw = isAnyStateNode(fromItem)
+        ? 'anyState'
+        : isAwaitingNode(fromItem)
+          ? fromItem.state
+          : isSubMachineRef(fromItem) || isFSMDefinition(fromItem)
+            ? fromItem.id
+            : isEachNode(fromItem) || isCombinatorNode(fromItem)
+              ? fromItem.id
+              : String(fromItem);
+      const fromId = sanitizeMermaidId(fromRaw);
+      const formatViaSingle = (v: unknown): string =>
+        isAfterNode(v)
+          ? `after(${v.ms}ms)`
+          : isAlwaysNode(v)
+            ? 'always()'
+            : String(v);
+      const viaLabel = Array.isArray(via)
+        ? via.map(formatViaSingle).join(' | ')
+        : formatViaSingle(via);
 
-    const guardName = options?.guard
-      ? options.guard.name
-        ? ` [${options.guard.name}]`
-        : ' [guard]'
-      : '';
+      const guardName = options?.guard
+        ? options.guard.name
+          ? ` [${options.guard.name}]`
+          : ' [guard]'
+        : '';
 
-    if (isStayNode(to)) {
-      lines.push(
-        `${indent}${fromId} --> ${fromId} : ${viaLabel}${guardName} (stay)`,
-      );
-      continue;
-    }
+      if (isStayNode(to)) {
+        lines.push(
+          `${indent}${fromId} --> ${fromId} : ${viaLabel}${guardName} (stay)`,
+        );
+        continue;
+      }
 
-    if (isFinalNode(to)) {
-      const outcomeLabel = options?.output
-        ? typeof options.output === 'string'
-          ? options.output
-          : String(options.output[0])
-        : to.outcome;
-      lines.push(
-        `${indent}${fromId} --> [*] : ${viaLabel}${guardName} (${outcomeLabel})`,
-      );
-      continue;
-    }
+      if (isFinalNode(to)) {
+        const outcomeLabel = options?.output
+          ? typeof options.output === 'string'
+            ? options.output
+            : String(options.output[0])
+          : to.outcome;
+        lines.push(
+          `${indent}${fromId} --> [*] : ${viaLabel}${guardName} (${outcomeLabel})`,
+        );
+        continue;
+      }
 
-    const toRaw = isAwaitingNode(to)
-      ? to.state
-      : isSubMachineRef(to) || isFSMDefinition(to)
-        ? to.id
-        : isEachNode(to) || isCombinatorNode(to)
+      const toRaw = isAwaitingNode(to)
+        ? to.state
+        : isSubMachineRef(to) || isFSMDefinition(to)
           ? to.id
-          : String(to);
-    const toId = sanitizeMermaidId(toRaw);
+          : isEachNode(to) || isCombinatorNode(to)
+            ? to.id
+            : String(to);
+      const toId = sanitizeMermaidId(toRaw);
 
-    lines.push(`${indent}${fromId} --> ${toId} : ${viaLabel}${guardName}`);
+      lines.push(`${indent}${fromId} --> ${toId} : ${viaLabel}${guardName}`);
+    }
   }
 
   return lines;
@@ -230,9 +233,10 @@ export function getShortestPaths(
         unknown,
         TransitionOptions<any, any, any> | undefined,
       ];
-      const matchesSource = isAnyStateNode(from)
-        ? true
-        : extractStateKey(from) === current;
+      const fromItems = Array.isArray(from) ? from : [from];
+      const matchesSource = fromItems.some((item) =>
+        isAnyStateNode(item) ? true : extractStateKey(item) === current,
+      );
       if (!matchesSource) {
         continue;
       }
@@ -240,16 +244,24 @@ export function getShortestPaths(
       if (!targetKey || targetKey in result) {
         continue;
       }
-      result[targetKey] = [
-        ...pathSoFar,
-        {
-          from: current,
-          via: formatViaKey(via),
-          to: targetKey,
-          hasGuard: Boolean(options?.guard),
-        },
-      ];
-      queue.push(targetKey);
+      const isEpsilonAlways =
+        isAlwaysNode(via) ||
+        (Array.isArray(via) && via.some((v) => isAlwaysNode(v)));
+      if (isEpsilonAlways) {
+        result[targetKey] = [...pathSoFar];
+        queue.unshift(targetKey);
+      } else {
+        result[targetKey] = [
+          ...pathSoFar,
+          {
+            from: current,
+            via: formatViaKey(via),
+            to: targetKey,
+            hasGuard: Boolean(options?.guard),
+          },
+        ];
+        queue.push(targetKey);
+      }
     }
   }
 

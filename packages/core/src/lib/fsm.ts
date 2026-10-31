@@ -73,6 +73,13 @@ export function resolveSourceId(source: unknown): string {
   return String(source);
 }
 
+export function resolveSourceIds(source: unknown): string[] {
+  if (Array.isArray(source)) {
+    return source.flatMap((el) => resolveSourceIds(el));
+  }
+  return [resolveSourceId(source)];
+}
+
 export function resolveViaId(via: unknown): string {
   if (isAfterNode(via) || isAlwaysNode(via)) {
     return via.id;
@@ -216,25 +223,28 @@ function buildFSM<
       unknown,
     ];
 
-    const fromSub = toSubMachineRef(from);
-    if (isAnyStateNode(from)) {
-      // Wildcard source in Column 1; do not add to concrete states set
-    } else if (isAwaitingNode(from)) {
-      states.add(from.state);
-      awaitingStates.add(from.state);
-    } else if (fromSub) {
-      states.add(fromSub.id);
-      subMachines.set(fromSub.id, fromSub);
-    } else if (isEachNode(from)) {
-      states.add(from.id);
-      eachNodes.set(from.id, from);
-    } else if (isCombinatorNode(from)) {
-      states.add(from.id);
-      combinatorNodes.set(from.id, from);
-    } else if (typeof from === 'string') {
-      states.add(from);
-      if (via === 'DONE' || via === 'ERROR') {
-        awaitingStates.add(from);
+    const fromItems = Array.isArray(from) ? from : [from];
+    for (const fromItem of fromItems) {
+      const fromSub = toSubMachineRef(fromItem);
+      if (isAnyStateNode(fromItem)) {
+        // Wildcard source in Column 1; do not add to concrete states set
+      } else if (isAwaitingNode(fromItem)) {
+        states.add(fromItem.state);
+        awaitingStates.add(fromItem.state);
+      } else if (fromSub) {
+        states.add(fromSub.id);
+        subMachines.set(fromSub.id, fromSub);
+      } else if (isEachNode(fromItem)) {
+        states.add(fromItem.id);
+        eachNodes.set(fromItem.id, fromItem);
+      } else if (isCombinatorNode(fromItem)) {
+        states.add(fromItem.id);
+        combinatorNodes.set(fromItem.id, fromItem);
+      } else if (typeof fromItem === 'string') {
+        states.add(fromItem);
+        if (via === 'DONE' || via === 'ERROR') {
+          awaitingStates.add(fromItem);
+        }
       }
     }
 
@@ -263,7 +273,10 @@ function buildFSM<
   const hasTransitionFor = (state: string, event: string): boolean => {
     for (const row of config.transitions) {
       const [from, via] = row as unknown as readonly [unknown, unknown];
-      if (resolveSourceId(from) === state && resolveViaMatches(via, event)) {
+      if (
+        resolveSourceIds(from).includes(state) &&
+        resolveViaMatches(via, event)
+      ) {
         return true;
       }
     }
@@ -286,14 +299,16 @@ function buildFSM<
         TransitionOptions<EffectiveContext, any, TMethods> | undefined,
       ];
 
-      const isWildcard = isAnyStateNode(from);
+      const fromIds = resolveSourceIds(from);
+      const isWildcard = fromIds.includes('*');
       if (matchWildcard ? !isWildcard : isWildcard) {
         continue;
       }
 
-      const fromId = resolveSourceId(from);
-
-      if ((!matchWildcard && fromId !== currentState) || !resolveViaMatches(via, event)) {
+      if (
+        (!matchWildcard && !fromIds.includes(currentState)) ||
+        !resolveViaMatches(via, event)
+      ) {
         continue;
       }
 

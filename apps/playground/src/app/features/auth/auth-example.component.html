@@ -111,7 +111,12 @@
                 placeholder="••••••••"
               />
             </label>
-            <button type="button" class="primary-btn" (click)="store.send('LOGIN')">
+            <button
+              type="button"
+              class="primary-btn"
+              [disabled]="!store.can('LOGIN')"
+              (click)="store.send('LOGIN')"
+            >
               Dispatch LOGIN
             </button>
           </div>

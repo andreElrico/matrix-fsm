@@ -53,7 +53,7 @@ export const baristaFSM = createMachineFeature<{
   transitions: [
     /* FROM            VIA               TO                         OPTIONS */
     ['ticketQueued',   'START_BREWING',  awaiting('brewingCoffee')],
-    ['brewingCoffee',  'DONE',           finalState(),              { output: ['COFFEE_READY', (ctx) => ({ drinkName: ctx.selectedDrink.name, result: ctx.baristaResult! })] }],
+    ['brewingCoffee',  'DONE',           finalState(),              { output: ['COFFEE_READY', (ctx) => ({ drinkName: ctx.selectedDrink.name, result: ctx.baristaResult ?? { baristaNote: '', temperatureCelsius: 67 } })] }],
     ['brewingCoffee',  'ERROR',          'maintenance',             { call: (m) => m._setBrewError }],
     ['maintenance',    'RETRY_BREW',     awaiting('brewingCoffee')],
   ],

@@ -5,6 +5,7 @@
 
 import { ESLintUtils, type TSESTree } from '@typescript-eslint/utils';
 import {
+  extractNodeKey,
   getAnyTransitionsArray,
   parseTransitionRow,
   type ParsedTransitionRow,
@@ -42,11 +43,7 @@ export const noUnreachableTransitions = createRule<[], MessageIds>({
         const extractViaKeys = (row: ParsedTransitionRow): string[] => {
           if (row.viaNode.type === 'ArrayExpression') {
             return row.viaNode.elements
-              .map((el) =>
-                el && el.type === 'Literal' && typeof el.value === 'string'
-                  ? el.value
-                  : null,
-              )
+              .map((el) => extractNodeKey(el))
               .filter((k): k is string => k !== null);
           }
           return row.viaKey ? [row.viaKey] : [];
@@ -54,32 +51,44 @@ export const noUnreachableTransitions = createRule<[], MessageIds>({
 
         const groups = new Map<string, ParsedTransitionRow[]>();
         const unguardedAnyStateEvents = new Set<string>();
+        const unguardedAlwaysStates = new Set<string>();
         const shadowedByAnyState = new Set<ParsedTransitionRow>();
         const reportedNodes = new Set<TSESTree.Node>();
 
         for (const el of arrayNode.elements) {
           const parsed = parseTransitionRow(el);
-          if (!parsed || !parsed.fromKey) {
+          if (!parsed || parsed.fromKeys.length === 0) {
             continue;
           }
           const viaKeys = extractViaKeys(parsed);
           if (viaKeys.length === 0) {
             continue;
           }
-          for (const vKey of viaKeys) {
+          for (const fKey of parsed.fromKeys) {
             if (
-              parsed.fromKey !== 'anyState()' &&
-              unguardedAnyStateEvents.has(vKey)
+              unguardedAlwaysStates.has(fKey) ||
+              unguardedAlwaysStates.has('anyState()')
             ) {
               shadowedByAnyState.add(parsed);
             }
-            if (parsed.fromKey === 'anyState()' && !parsed.hasGuard) {
-              unguardedAnyStateEvents.add(vKey);
+            for (const vKey of viaKeys) {
+              if (
+                fKey !== 'anyState()' &&
+                unguardedAnyStateEvents.has(vKey)
+              ) {
+                shadowedByAnyState.add(parsed);
+              }
+              if (fKey === 'anyState()' && !parsed.hasGuard) {
+                unguardedAnyStateEvents.add(vKey);
+              }
+              if (vKey === 'always()' && !parsed.hasGuard) {
+                unguardedAlwaysStates.add(fKey);
+              }
+              const gKey = `${fKey}::${vKey}`;
+              const list = groups.get(gKey) ?? [];
+              list.push(parsed);
+              groups.set(gKey, list);
             }
-            const gKey = `${parsed.fromKey}::${vKey}`;
-            const list = groups.get(gKey) ?? [];
-            list.push(parsed);
-            groups.set(gKey, list);
           }
         }
 

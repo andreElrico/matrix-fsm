@@ -190,6 +190,13 @@ export const pureMachineDefinition = createRule<[], MessageIds>({
         }
       },
       'Program:exit'() {
+        const isMachineFilename = /\.machine\.[cm]?[jt]sx?$/i.test(filename);
+        const isRelevantMachineFile =
+          isMachineFilename || transitionArrays.length > 0;
+        if (!isRelevantMachineFile) {
+          return;
+        }
+
         const allowFileLevelDI = isExemptFile || hasCreateMachineFeature;
 
         if (!allowFileLevelDI) {

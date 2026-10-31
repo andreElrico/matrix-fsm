@@ -1482,7 +1482,6 @@ describe('@matrix-fsm/core', () => {
       expect(paths['receipt']).toEqual([
         { from: 'browsing', via: 'SELECT', to: 'selected', hasGuard: false },
         { from: 'selected', via: 'PAY', to: 'paid', hasGuard: false },
-        { from: 'paid', via: 'always()', to: 'receipt', hasGuard: false },
       ]);
 
       const telemetry: Array<{
@@ -1532,6 +1531,717 @@ describe('@matrix-fsm/core', () => {
         via: '__always__',
         to: 'receipt',
       });
+    });
+  });
+
+  describe('Cycle 31 (Masterplan Cycle 1): Type Soundness for Combinators, each(), Terminal-Only Output Payloads & any() Error Validation', () => {
+    it('strictly filters combinator and each() output payloads to terminal outputs only (excluding stay() outputs), supports flat and actor-keyed combinator inputs, and enforces ERROR handler for any()', () => {
+      const subBarista = createFSM<{
+        inputs: { readonly drink: string };
+        outputs: {
+          PROGRESS: { readonly percent: number };
+          COFFEE_READY: { readonly cup: string };
+        };
+        events: { STEP: void; FINISH: void };
+      }>()({
+        id: 'subBarista',
+        initial: 'brewing',
+        transitions: [
+          ['brewing', 'STEP', stay(), { output: ['PROGRESS', () => ({ percent: 50 })] }],
+          ['brewing', 'FINISH', finalState(), { output: ['COFFEE_READY', () => ({ cup: 'Espresso' })] }],
+        ],
+      });
+
+      const subBakery = createFSM<{
+        inputs: { readonly dough: string };
+        outputs: {
+          BAKERY_READY: { readonly pastry: string };
+        };
+        events: { BAKE_DONE: void };
+      }>()({
+        id: 'subBakery',
+        initial: 'baking',
+        transitions: [
+          ['baking', 'BAKE_DONE', finalState(), { output: ['BAKERY_READY', () => ({ pastry: 'Croissant' })] }],
+        ],
+      });
+
+      const parentFlatAndKeyed = createFSM<{
+        context: { readonly items: readonly { readonly id: string; readonly drink: string }[] };
+        events: {
+          START_ALL_FLAT: void;
+          START_ALL_KEYED: void;
+          START_RACE: void;
+          START_ANY: void;
+          START_EACH: void;
+        };
+        methods: {
+          _onAllDone: (payload: {
+            readonly subBarista: { readonly cup: string };
+            readonly subBakery: { readonly pastry: string };
+          }) => void;
+          _onRaceDone: (payload: { readonly cup: string } | { readonly pastry: string }) => void;
+          _onAnyDone: (payload: { readonly cup: string } | { readonly pastry: string }) => void;
+          _onEachDone: (payload: ReadonlyArray<{ readonly cup: string }>) => void;
+          // Wrong handlers that expect intermediate PROGRESS payload or non-array each payload:
+          _wrongAllWithProgress: (payload: { readonly percent: number }) => void;
+          _wrongEachSingle: (payload: { readonly cup: string }) => void;
+        };
+      }>()({
+        id: 'parentCombinatorTypes',
+        initial: 'idle',
+        context: { items: [{ id: '1', drink: 'Latte' }] },
+        transitions: [
+          // 1a. Flat merged input into all(subBarista, subBakery)
+          [
+            'idle',
+            'START_ALL_FLAT',
+            all(subBarista, subBakery),
+            { input: () => ({ drink: 'Espresso', dough: 'Puff' }) },
+          ],
+          // 1b. Actor-keyed input into all(subBarista, subBakery)
+          [
+            'idle',
+            'START_ALL_KEYED',
+            all(subBarista, subBakery),
+            {
+              input: () => ({
+                subBarista: { drink: 'Espresso' },
+                subBakery: { dough: 'Puff' },
+              }),
+            },
+          ],
+          // 1c. Terminal-only ALL_DONE payload on all(subBarista, subBakery)
+          [
+            all(subBarista, subBakery),
+            'ALL_DONE',
+            'done',
+            { call: (m) => m._onAllDone },
+          ],
+          // 2. race() terminal-only union payload
+          [
+            'idle',
+            'START_RACE',
+            race(subBarista, subBakery),
+            { input: () => ({ drink: 'Espresso', dough: 'Puff' }) },
+          ],
+          [
+            race(subBarista, subBakery),
+            'DONE',
+            'done',
+            { call: (m) => m._onRaceDone },
+          ],
+          // 3. any() with required ERROR handler
+          [
+            'idle',
+            'START_ANY',
+            any(subBarista, subBakery),
+            { input: () => ({ drink: 'Espresso', dough: 'Puff' }) },
+          ],
+          [
+            any(subBarista, subBakery),
+            'DONE',
+            'done',
+            { call: (m) => m._onAnyDone },
+          ],
+          [any(subBarista, subBakery), 'ERROR', 'failed'],
+          // 4. each() terminal-only array payload
+          ['idle', 'START_EACH', each('items', subBarista)],
+          [
+            each('items', subBarista),
+            'ALL_DONE',
+            'done',
+            { call: (m) => m._onEachDone },
+          ],
+        ],
+      });
+
+      expect(parentFlatAndKeyed.id).toBe('parentCombinatorTypes');
+
+      // Compile-time error when intermediate PROGRESS handler is used on ALL_DONE or single item handler on each()
+      createFSM<{
+        context: { readonly items: readonly { readonly id: string; readonly drink: string }[] };
+        events: { GO: void };
+        methods: {
+          _wrongAllWithProgress: (payload: { readonly percent: number }) => void;
+          _wrongEachSingle: (payload: { readonly cup: string }) => void;
+        };
+      }>()({
+        id: 'invalidPayloads',
+        initial: 'idle',
+        context: { items: [] },
+        transitions: [
+          // @ts-expect-error Missing required input for all(subBarista, subBakery)
+          ['idle', 'GO', all(subBarista, subBakery)],
+          [
+            all(subBarista, subBakery),
+            'ALL_DONE',
+            'done',
+            // @ts-expect-error _wrongAllWithProgress is incompatible with { subBarista: { cup: string }, subBakery: { pastry: string } }
+            { call: (m) => m._wrongAllWithProgress },
+          ],
+          [
+            each('items', subBarista),
+            'ALL_DONE',
+            'done',
+            // @ts-expect-error _wrongEachSingle expects single object instead of ReadonlyArray<{ cup: string }>
+            { call: (m) => m._wrongEachSingle },
+          ],
+        ],
+      });
+
+      // Compile-time error when any() is missing 'ERROR' exit handler
+      createFSM<{
+        events: { GO: void };
+      }>()({
+        id: 'missingAnyErrorHandler',
+        initial: 'idle',
+        transitions: [
+          [
+            'idle',
+            'GO',
+            // @ts-expect-error any() requires 'ERROR' handler in transitions
+            any(subBarista, subBakery),
+            { input: () => ({ drink: 'A', dough: 'B' }) },
+          ],
+          [any(subBarista, subBakery), 'DONE', 'done'],
+        ],
+      });
+    });
+  });
+
+  describe('Cycle 32 (Masterplan Cycle 2): Column 1 (FROM) State Array Support ([["stateA", "stateB"], "EVENT", "target"])', () => {
+    it('supports arrays of states and actors in Column 1 (FROM) at compile time, runtime, toMermaid(), and getShortestPaths()', () => {
+      let resetCount = 0;
+
+      const fsm = createFSM<{
+        events: {
+          START: void;
+          NEXT: void;
+          FAIL: void;
+          RESET: void;
+        };
+        states: 'idle' | 'step1' | 'step2' | 'error';
+        methods: {
+          _onReset: () => void;
+        };
+      }>()({
+        id: 'fromArrayFsm',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'START', 'step1'],
+          ['step1', 'NEXT', 'step2'],
+          [['step1', 'step2'], 'FAIL', 'error'],
+          [
+            ['step1', 'step2', 'error'],
+            'RESET',
+            'idle',
+            { call: (m) => m._onReset },
+          ],
+        ],
+      });
+
+      const inst = createMachineInstance(fsm, {
+        methods: {
+          _onReset: () => {
+            resetCount += 1;
+          },
+        },
+      });
+
+      inst.send('START');
+      expect(inst.state()).toBe('step1');
+
+      inst.send('RESET');
+      expect(inst.state()).toBe('idle');
+      expect(resetCount).toBe(1);
+
+      inst.send('START');
+      inst.send('NEXT');
+      expect(inst.state()).toBe('step2');
+
+      inst.send('FAIL');
+      expect(inst.state()).toBe('error');
+
+      inst.send('RESET');
+      expect(inst.state()).toBe('idle');
+      expect(resetCount).toBe(2);
+
+      const mermaid = toMermaid(fsm);
+      expect(mermaid).toContain('step1 --> error : FAIL');
+      expect(mermaid).toContain('step2 --> error : FAIL');
+      expect(mermaid).toContain('step1 --> idle : RESET');
+      expect(mermaid).toContain('step2 --> idle : RESET');
+      expect(mermaid).toContain('error --> idle : RESET');
+
+      const paths = getShortestPaths(fsm);
+      expect(paths['error']).toEqual([
+        { from: 'idle', via: 'START', to: 'step1', hasGuard: false },
+        { from: 'step1', via: 'FAIL', to: 'error', hasGuard: false },
+      ]);
+    });
+  });
+
+  describe('Cycle 33 (Masterplan Cycle 3): each(arrayKey, childFSM) Runtime in Core & Synchronous Empty-Array [] FIFO Dispatch', () => {
+    it('executes a 1:N parallel pool of child instances for each(key, childFSM) and aggregates ordered terminal outputs on ALL_DONE, and synchronously dispatches ALL_DONE with [] when array is empty', () => {
+      const baristaItemFSM = createFSM<{
+        inputs: {
+          readonly drink: { readonly id: string; readonly name: string };
+        };
+        outputs: {
+          COFFEE_READY: { readonly drinkName: string };
+        };
+        events: { BREW_DONE: void };
+      }>()({
+        id: 'baristaItem',
+        initial: 'brewing',
+        transitions: [
+          [
+            'brewing',
+            'BREW_DONE',
+            finalState(),
+            { output: ['COFFEE_READY', (ctx) => ({ drinkName: ctx.drink.name })] },
+          ],
+        ],
+      });
+
+      const savedBatches: Array<ReadonlyArray<{ readonly drinkName: string }>> = [];
+      let currentDrinks: ReadonlyArray<{ readonly id: string; readonly name: string }> = [
+        { id: '1', name: 'Espresso' },
+        { id: '2', name: 'Latte' },
+      ];
+
+      const batchParentFSM = createFSM<{
+        context: {
+          readonly drinks: ReadonlyArray<{ readonly id: string; readonly name: string }>;
+        };
+        events: {
+          START_BATCH: void;
+          BREW_DONE: void;
+          RESET: void;
+        };
+        methods: {
+          _saveAll: (results: ReadonlyArray<{ readonly drinkName: string }>) => void;
+        };
+      }>()({
+        id: 'batchParentCore',
+        initial: 'idle',
+        context: { drinks: currentDrinks },
+        transitions: [
+          ['idle', 'START_BATCH', each('drinks', baristaItemFSM)],
+          [
+            each('drinks', baristaItemFSM),
+            'ALL_DONE',
+            'orderReady',
+            { call: (m) => m._saveAll },
+          ],
+          ['orderReady', 'RESET', 'idle'],
+        ],
+      });
+
+      const inst = createMachineInstance(batchParentFSM, {
+        getContext: () => ({ drinks: currentDrinks }),
+        methods: {
+          _saveAll: (results) => {
+            savedBatches.push(results);
+          },
+        },
+      });
+
+      inst.send('START_BATCH');
+      expect(inst.state()).toBe('each:drinks');
+
+      // Broadcast BREW_DONE to all active each() child instances
+      inst.send('BREW_DONE');
+      expect(inst.state()).toBe('orderReady');
+      expect(savedBatches).toEqual([
+        [{ drinkName: 'Espresso' }, { drinkName: 'Latte' }],
+      ]);
+
+      // Now test empty array [] synchronous FIFO completion:
+      inst.send('RESET');
+      expect(inst.state()).toBe('idle');
+      currentDrinks = [];
+
+      inst.send('START_BATCH');
+      // Must complete synchronously in 0 ticks with [] payload!
+      expect(inst.state()).toBe('orderReady');
+      expect(savedBatches[1]).toEqual([]);
+    });
+  });
+
+  describe('Cycle 34 (Masterplan Cycle 4): Recursive restoreSnapshot() for Combinators & each(), plus Keyed Combinator Inputs', () => {
+    it('supports actor-keyed combinator inputs and recursively captures and restores snapshots for active combinators (all/race/any) and each() pools', () => {
+      const baristaActor = createFSM<{
+        inputs: { readonly drink: string };
+        context: { readonly drink: string; readonly step: string };
+        outputs: { COFFEE_READY: { readonly cup: string } };
+        events: { GRIND_DONE: void; BREW_DONE: void };
+        methods: { _markBrewing: () => void };
+      }>()({
+        id: 'baristaActor',
+        initial: 'grinding',
+        context: { drink: '', step: 'raw' },
+        transitions: [
+          ['grinding', 'GRIND_DONE', 'brewing', { call: (m) => m._markBrewing }],
+          [
+            'brewing',
+            'BREW_DONE',
+            finalState(),
+            { output: ['COFFEE_READY', (ctx) => ({ cup: `Hot ${ctx.drink}` })] },
+          ],
+        ],
+      });
+
+      const bakeryActor = createFSM<{
+        inputs: { readonly pastry: string };
+        outputs: { BAKERY_READY: { readonly item: string } };
+        events: { BAKE_DONE: void };
+      }>()({
+        id: 'bakeryActor',
+        initial: 'baking',
+        transitions: [
+          [
+            'baking',
+            'BAKE_DONE',
+            finalState(),
+            { output: ['BAKERY_READY', (ctx) => ({ item: `Warm ${ctx.pastry}` })] },
+          ],
+        ],
+      });
+
+      let finalAllResult: {
+        readonly baristaActor: { readonly cup: string };
+        readonly bakeryActor: { readonly item: string };
+      } | null = null;
+
+      const orderFSM = createFSM<{
+        events: {
+          START: void;
+          GRIND_DONE: void;
+          BREW_DONE: void;
+          BAKE_DONE: void;
+        };
+        methods: {
+          _onAllDone: (res: {
+            readonly baristaActor: { readonly cup: string };
+            readonly bakeryActor: { readonly item: string };
+          }) => void;
+        };
+      }>()({
+        id: 'orderCombinatorSnap',
+        initial: 'idle',
+        transitions: [
+          [
+            'idle',
+            'START',
+            all(baristaActor, bakeryActor),
+            {
+              input: () => ({
+                baristaActor: { drink: 'Cortado' },
+                bakeryActor: { pastry: 'Croissant' },
+              }),
+            },
+          ],
+          [
+            all(baristaActor, bakeryActor),
+            'ALL_DONE',
+            'completed',
+            { call: (m) => m._onAllDone },
+          ],
+        ],
+      });
+
+      const inst1 = createMachineInstance(orderFSM, {
+        methods: {
+          _onAllDone: (res) => {
+            finalAllResult = res;
+          },
+        },
+      });
+
+      inst1.send('START');
+      expect(inst1.state()).toBe('all:baristaActor,bakeryActor');
+
+      // Advance baristaActor to 'brewing'
+      inst1.send('GRIND_DONE');
+      const snap = inst1.getSnapshot();
+      expect(snap.children?.['baristaActor']?.state).toBe('brewing');
+      expect(snap.children?.['bakeryActor']?.state).toBe('baking');
+
+      // Restore into a fresh instance inst2
+      const inst2 = createMachineInstance(orderFSM, {
+        methods: {
+          _onAllDone: (res) => {
+            finalAllResult = res;
+          },
+        },
+      });
+      inst2.restoreSnapshot(snap);
+      expect(inst2.state()).toBe('all:baristaActor,bakeryActor');
+      expect(inst2.getSnapshot().children?.['baristaActor']?.state).toBe('brewing');
+
+      // Finish both actors from their restored states
+      inst2.send('BREW_DONE');
+      inst2.send('BAKE_DONE');
+
+      expect(inst2.state()).toBe('completed');
+      expect(finalAllResult).toEqual({
+        baristaActor: { cup: 'Hot Cortado' },
+        bakeryActor: { item: 'Warm Croissant' },
+      });
+    });
+  });
+
+  describe('Cycle 35 (Masterplan Cycle 5): Executable getShortestPaths() (0-Event always() Epsilon Edges), always() with output & finalState(), and Parent after(ms) on Active Sub-Actors', () => {
+    it('treats always() as a 0-event epsilon edge in getShortestPaths() so returned paths contain only real triggerable events and can be replayed directly', () => {
+      const subA = createFSM()({
+        id: 'subPathA',
+        initial: 'working',
+        transitions: [['working', 'DONE_A', finalState()]],
+      });
+      const subB = createFSM()({
+        id: 'subPathB',
+        initial: 'working',
+        transitions: [['working', 'DONE_B', finalState()]],
+      });
+
+      const fsm = createFSM<{
+        events: { START_ALL: void };
+      }>()({
+        id: 'epsilonPaths',
+        initial: 'step1',
+        transitions: [
+          ['step1', always(), 'step2'],
+          ['step2', 'START_ALL', all(subA, subB)],
+          [all(subA, subB), 'ALL_DONE', 'completed'],
+        ],
+      });
+
+      const paths = getShortestPaths(fsm);
+      // 'step2' is reached via 0 external events because always() fires automatically on entry!
+      expect(paths['step1']).toEqual([]);
+      expect(paths['step2']).toEqual([]);
+      expect(paths['all:subPathA,subPathB']).toEqual([
+        {
+          from: 'step2',
+          via: 'START_ALL',
+          to: 'all:subPathA,subPathB',
+          hasGuard: false,
+        },
+      ]);
+      expect(paths['completed']).toEqual([
+        {
+          from: 'step2',
+          via: 'START_ALL',
+          to: 'all:subPathA,subPathB',
+          hasGuard: false,
+        },
+        {
+          from: 'all:subPathA,subPathB',
+          via: 'ALL_DONE',
+          to: 'completed',
+          hasGuard: false,
+        },
+      ]);
+
+      // Replay paths['step2'] (0 events) on a fresh instance -> lands in 'step2'!
+      const inst = createMachineInstance(fsm);
+      for (const step of paths['step2']) {
+        inst.send(step.via);
+      }
+      expect(inst.state()).toBe('step2');
+    });
+
+    it('supports always() with output and finalState() in sub-actors and keeps parent after(ms) timer active across internal child transitions', () => {
+      vi.useFakeTimers();
+      try {
+        const fastCachedChild = createFSM<{
+          inputs: { readonly cached: boolean };
+          outputs: {
+            READY: { readonly source: string };
+          };
+          events: { FETCH_DONE: void };
+        }>()({
+          id: 'fastCachedChild',
+          initial: 'checkingCache',
+          transitions: [
+            [
+              'checkingCache',
+              always(),
+              finalState(),
+              {
+                guard: (ctx) => ctx.cached,
+                output: ['READY', () => ({ source: 'cache' })],
+              },
+            ],
+            ['checkingCache', always(), 'fetching'],
+            ['fetching', after(1000), 'processing'],
+            [
+              'processing',
+              'FETCH_DONE',
+              finalState(),
+              { output: ['READY', () => ({ source: 'network' })] },
+            ],
+          ],
+        });
+
+        let readySource: string | null = null;
+        let useCache = true;
+
+        const parentFSM = createFSM<{
+          events: { START: void; FETCH_DONE: void; RESET: void };
+          methods: { _onReady: (p: { readonly source: string }) => void };
+        }>()({
+          id: 'parentTimeoutSub',
+          initial: 'idle',
+          transitions: [
+            [
+              'idle',
+              'START',
+              fastCachedChild,
+              { input: () => ({ cached: useCache }) },
+            ],
+            [
+              fastCachedChild,
+              'READY',
+              'done',
+              { call: (m) => m._onReady },
+            ],
+            [fastCachedChild, after(5000), 'timeout'],
+            [['done', 'timeout'], 'RESET', 'idle'],
+          ],
+        });
+
+        const inst = createMachineInstance(parentFSM, {
+          methods: {
+            _onReady: ({ source }) => {
+              readySource = source;
+            },
+          },
+        });
+
+        // 1. Synchronous zero-tick completion via always() -> finalState() with output:
+        inst.send('START');
+        expect(inst.state()).toBe('done');
+        expect(readySource).toBe('cache');
+
+        // 2. Non-cached child: transitions internally at t = 1000ms ('fetching' -> 'processing'),
+        //    parent's after(5000) timer is NOT cancelled by child's internal transition, and fires at t = 5000ms!
+        inst.send('RESET');
+        useCache = false;
+        readySource = null;
+
+        inst.send('START');
+        expect(inst.state()).toBe('fastCachedChild');
+        expect(inst.subState()).toBe('fetching');
+
+        vi.advanceTimersByTime(1000);
+        expect(inst.state()).toBe('fastCachedChild');
+        expect(inst.subState()).toBe('processing');
+
+        vi.advanceTimersByTime(4000);
+        expect(inst.state()).toBe('timeout');
+        expect(inst.subState()).toBeNull();
+
+        // 3. When child finishes at t = 3000ms, parent's 5000ms timer is cancelled and never fires at t = 5000ms!
+        inst.send('RESET');
+        inst.send('START');
+        vi.advanceTimersByTime(1000);
+        expect(inst.subState()).toBe('processing');
+
+        vi.advanceTimersByTime(2000);
+        inst.send('FETCH_DONE');
+        expect(inst.state()).toBe('done');
+        expect(readySource).toBe('network');
+
+        vi.advanceTimersByTime(5000);
+        expect(inst.state()).toBe('done');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('Cycle 36 (Masterplan Cycle 6): Dry-Run instance.can(event, payload?) Without Side Effects', () => {
+    it('evaluates whether an event can fire in the current state or active sub-actor/combinator (including guards) without mutating state or invoking call methods', () => {
+      let sideEffectCalls = 0;
+
+      const subPayment = createFSM<{
+        events: {
+          CONFIRM_PIN: { readonly pin: string };
+        };
+      }>()({
+        id: 'subPayment',
+        initial: 'enteringPin',
+        transitions: [
+          [
+            'enteringPin',
+            'CONFIRM_PIN',
+            finalState(),
+            { guard: (_ctx, p) => p.pin.length === 4 },
+          ],
+        ],
+      });
+
+      const balance = 5;
+      const checkoutFSM = createFSM<{
+        context: { readonly balance: number };
+        events: {
+          PAY: { readonly price: number };
+          CONFIRM_PIN: { readonly pin: string };
+          CANCEL: void;
+        };
+        methods: {
+          _deduct: () => void;
+        };
+      }>()({
+        id: 'dryRunCanFsm',
+        initial: 'cart',
+        context: { balance: 5 },
+        transitions: [
+          [
+            'cart',
+            'PAY',
+            subPayment,
+            {
+              guard: (ctx, p) => ctx.balance >= p.price,
+              call: (m) => m._deduct,
+            },
+          ],
+          [subPayment, 'DONE', 'paid'],
+          [anyState(), 'CANCEL', 'cart'],
+        ],
+      });
+
+      const inst = createMachineInstance(checkoutFSM, {
+        getContext: () => ({ balance }),
+        methods: {
+          _deduct: () => {
+            sideEffectCalls += 1;
+          },
+        },
+      });
+
+      // 1. Guard returns false when balance (5) < price (10)
+      expect(inst.can('PAY', { price: 10 })).toBe(false);
+      // 2. Guard returns true when balance (5) >= price (5)
+      expect(inst.can('PAY', { price: 5 })).toBe(true);
+      // 3. Unhandled event in 'cart'
+      expect(inst.can('CONFIRM_PIN', { pin: '1234' })).toBe(false);
+      // 4. Wildcard anyState() event
+      expect(inst.can('CANCEL')).toBe(true);
+      // Verify zero side effects occurred during .can() calls!
+      expect(inst.state()).toBe('cart');
+      expect(sideEffectCalls).toBe(0);
+
+      // Enter subPayment and test delegation of .can() to active sub-actor
+      inst.send('PAY', { price: 5 });
+      expect(inst.state()).toBe('subPayment');
+      expect(sideEffectCalls).toBe(1);
+
+      expect(inst.can('CONFIRM_PIN', { pin: '12' })).toBe(false);
+      expect(inst.can('CONFIRM_PIN', { pin: '1234' })).toBe(true);
     });
   });
 });

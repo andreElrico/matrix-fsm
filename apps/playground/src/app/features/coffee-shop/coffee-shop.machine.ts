@@ -13,6 +13,7 @@ import { baristaFSM } from './barista.feature';
 import { CoffeeShopApiService } from './coffee-shop-api.service';
 import {
   calculateNextStamps,
+  COFFEE_MENU,
   initialCoffeeShopContext,
   type CoffeeShopContext,
   type CoffeeShopEvents,
@@ -47,7 +48,7 @@ export const coffeeShopFSM = createMachineFeature<{
     // 10th drink is FREE -> bypass payment and route directly into Barista Sub-FSM with typed input!
     ['checkingLoyalty',     'DONE',                     baristaFSM,                   {
                                                                                         guard: isFreeDrink,
-                                                                                        input: (ctx) => ({ selectedDrink: ctx.selectedDrink! }),
+                                                                                        input: (ctx) => ({ selectedDrink: ctx.selectedDrink ?? COFFEE_MENU[0] }),
                                                                                       }],
     ['checkingLoyalty',     'DONE',                     'awaitingPayment'],
 
@@ -59,7 +60,7 @@ export const coffeeShopFSM = createMachineFeature<{
     // Customer payment at register -> enters Barista Sub-FSM with typed input:
     ['awaitingPayment',     'PAY',                      baristaFSM,                   {
                                                                                         call: (m) => m._markPaid,
-                                                                                        input: (ctx) => ({ selectedDrink: ctx.selectedDrink! }),
+                                                                                        input: (ctx) => ({ selectedDrink: ctx.selectedDrink ?? COFFEE_MENU[0] }),
                                                                                       }],
     ['awaitingPayment',     'CANCEL',                   'customerBrowsing'],
 

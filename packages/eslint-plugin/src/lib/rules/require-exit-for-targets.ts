@@ -100,13 +100,15 @@ export const requireExitForTargets = createRule<[], MessageIds>({
 
         const statesWithValidExit = new Set<string>();
         for (const row of allRows) {
-          if (
-            row.fromKey &&
-            row.toKey &&
-            row.toKey !== 'stay()' &&
-            row.toKey !== row.fromKey
-          ) {
-            statesWithValidExit.add(row.fromKey);
+          for (const fKey of row.fromKeys) {
+            if (
+              fKey &&
+              row.toKey &&
+              row.toKey !== 'stay()' &&
+              row.toKey !== fKey
+            ) {
+              statesWithValidExit.add(fKey);
+            }
           }
         }
 

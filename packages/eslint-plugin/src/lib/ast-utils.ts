@@ -11,6 +11,7 @@ export interface ParsedTransitionRow {
   readonly toNode: TSESTree.Node;
   readonly optionsNode: TSESTree.Node | null;
   readonly fromKey: string | null;
+  readonly fromKeys: readonly string[];
   readonly viaKey: string | null;
   readonly toKey: string | null;
   readonly toChildKeys: readonly string[];
@@ -22,6 +23,27 @@ export interface ParsedTransitionRow {
     readonly callNode: TSESTree.CallExpression;
     readonly stateName: string;
   } | null;
+  readonly anyCombinatorCall: {
+    readonly callNode: TSESTree.CallExpression;
+    readonly stateKey: string;
+  } | null;
+}
+
+export function extractFromKeys(
+  node: TSESTree.Node | null | undefined,
+): string[] {
+  if (!node) {
+    return [];
+  }
+  if (node.type === AST_NODE_TYPES.ArrayExpression) {
+    return node.elements.flatMap((el) => extractFromKeys(el));
+  }
+  const awaiting = extractAwaitingCall(node);
+  if (awaiting) {
+    return [awaiting.stateName];
+  }
+  const key = extractNodeKey(node);
+  return key !== null ? [key] : [];
 }
 
 export function extractNodeKey(
@@ -267,7 +289,8 @@ export function parseTransitionRow(
     return null;
   }
 
-  const fromKey = extractNodeKey(fromEl);
+  const fromKeys = extractFromKeys(fromEl);
+  const fromKey = extractNodeKey(fromEl) ?? fromKeys[0] ?? null;
   const viaKey = extractNodeKey(viaEl);
   const { toKey, toChildKeys, isTransientTarget, targetDisplayName } =
     extractTargetInfo(toEl);
@@ -275,6 +298,13 @@ export function parseTransitionRow(
   const optionsNode =
     optionsEl && optionsEl.type !== AST_NODE_TYPES.SpreadElement
       ? optionsEl
+      : null;
+  const anyCombinatorCall =
+    toEl.type === AST_NODE_TYPES.CallExpression &&
+    toEl.callee.type === AST_NODE_TYPES.Identifier &&
+    toEl.callee.name === 'any' &&
+    toKey
+      ? { callNode: toEl, stateKey: toKey }
       : null;
 
   return {
@@ -284,6 +314,7 @@ export function parseTransitionRow(
     toNode: toEl,
     optionsNode,
     fromKey,
+    fromKeys,
     viaKey,
     toKey,
     toChildKeys,
@@ -292,6 +323,7 @@ export function parseTransitionRow(
     groupKey,
     hasGuard: hasGuardOption(optionsNode),
     awaitingCall: extractAwaitingCall(toEl),
+    anyCombinatorCall,
   };
 }
 
