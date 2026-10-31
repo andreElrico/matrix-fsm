@@ -664,4 +664,93 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
       expect(messages).toHaveLength(0);
     });
   });
+
+  describe('12. Cycle 29: no-shadowed-transitions & no-duplicate-combinator-actors', () => {
+    it('no-shadowed-transitions: reports error when an unguarded [FROM, VIA] row shadows a later guarded row (First-Match-Wins)', () => {
+      const { messages } = verifyRule(
+        'no-shadowed-transitions',
+        `
+        createFSM()({
+          id: 'checkout',
+          initial: 'cart',
+          transitions: [
+            ['cart', 'PAY', 'paymentFailed'],
+            ['cart', 'PAY', 'paymentSuccess', { guard: isValid }],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(1);
+    });
+
+    it('no-shadowed-transitions: reports error when an unguarded VIA array row shadows a later specific event row', () => {
+      const { messages } = verifyRule(
+        'no-shadowed-transitions',
+        `
+        createFSM()({
+          id: 'checkout',
+          initial: 'cart',
+          transitions: [
+            ['cart', ['PAY', 'CANCEL'], 'idle'],
+            ['cart', 'PAY',             'processing', { guard: isValid }],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(1);
+    });
+
+    it('no-duplicate-combinator-actors: reports error when all(baristaFSM, baristaFSM) contains duplicate actors', () => {
+      const { messages } = verifyRule(
+        'no-duplicate-combinator-actors',
+        `
+        createFSM()({
+          id: 'cafe',
+          initial: 'ordering',
+          transitions: [
+            ['ordering', 'PAY',      all(baristaFSM, baristaFSM)],
+            [all(baristaFSM, baristaFSM), 'ALL_DONE', 'completed'],
+          ],
+        });
+        `,
+      );
+      expect(messages.length).toBeGreaterThanOrEqual(1);
+      expect(messages[0].messageId).toBe('duplicateCombinatorActor');
+    });
+
+    it('no-duplicate-combinator-actors: passes when all(baristaFSM, bakeryFSM) has distinct actors', () => {
+      const { messages } = verifyRule(
+        'no-duplicate-combinator-actors',
+        `
+        createFSM()({
+          id: 'cafe',
+          initial: 'ordering',
+          transitions: [
+            ['ordering', 'PAY',      all(baristaFSM, bakeryFSM)],
+            [all(baristaFSM, bakeryFSM), 'ALL_DONE', 'completed'],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(0);
+    });
+
+    it('require-exit-for-targets: reports error when all(baristaFSM, bakeryFSM) in Column 3 has no exit row in Column 1', () => {
+      const { messages } = verifyRule(
+        'require-exit-for-targets',
+        `
+        createFSM()({
+          id: 'cafe',
+          initial: 'ordering',
+          transitions: [
+            ['ordering', 'PAY', all(baristaFSM, bakeryFSM)],
+            [baristaFSM, 'COFFEE_READY', stay()],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(1);
+      expect(messages[0].messageId).toBe('missingExitTransition');
+    });
+  });
 });

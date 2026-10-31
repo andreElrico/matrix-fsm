@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'v
 import {
   after,
   all,
+  always,
   any,
   anyState,
   awaiting,
@@ -9,6 +10,8 @@ import {
   createMachineInstance,
   each,
   finalState,
+  getShortestPaths,
+  MatrixFsmInfiniteLoopError,
   race,
   stay,
   toMermaid,
@@ -986,6 +989,548 @@ describe('@matrix-fsm/core', () => {
           ['idle',          'START', all(subA, subB)],
           [all(subA, subB), 'DONE',  'completed'],
         ],
+      });
+    });
+  });
+
+  describe('Cycle 18: 8-Phase Microstep Pipeline, Live Context Sync & Zero-Tick Child Safety', () => {
+    it('executes call BEFORE input/output so input and output selectors immediately see the freshly mutated context', () => {
+      const childFSM = createFSM<{
+        inputs: { selectedDrink: string };
+        events: { FINISH: void };
+        context: { selectedDrink: string | null };
+        states: 'brewing';
+      }>()({
+        id: 'barista',
+        initial: 'brewing',
+        context: { selectedDrink: null },
+        transitions: [
+          ['brewing', 'FINISH', finalState('COFFEE_READY')],
+        ],
+      });
+
+      const parentFSM = createFSM<{
+        events: { QUICK_ORDER: { drink: string } };
+        context: { selectedDrink: string | null };
+        outputs: { ORDER_STARTED: { drink: string } };
+        states: 'idle' | 'done';
+        methods: { _selectDrink(payload: { drink: string }): void };
+      }>()({
+        id: 'shop',
+        initial: 'idle',
+        context: { selectedDrink: null },
+        transitions: [
+          [
+            'idle',
+            'QUICK_ORDER',
+            childFSM,
+            {
+              call: (m) => m._selectDrink,
+              input: (ctx) => ({ selectedDrink: ctx.selectedDrink! }),
+              output: ['ORDER_STARTED', (ctx) => ({ drink: ctx.selectedDrink! })],
+            },
+          ],
+          [childFSM, 'COFFEE_READY', 'done'],
+        ],
+      });
+
+      let liveCtx = { selectedDrink: null as string | null };
+      let emittedOut: unknown = null;
+
+      const instance = createMachineInstance(parentFSM, {
+        getContext: () => liveCtx,
+        methods: {
+          _selectDrink: ({ drink }: { readonly drink: string }) => {
+            liveCtx = { ...liveCtx, selectedDrink: drink };
+          },
+        },
+        onStateChange: (_s, _c, info) => {
+          if (info.emittedOutput) {
+            emittedOut = info.emittedOutput;
+          }
+        },
+      });
+
+      instance.send('QUICK_ORDER', { drink: 'Espresso' });
+      expect(instance.state()).toBe('barista');
+      expect(instance.subContext()?.['selectedDrink']).toBe('Espresso');
+      expect(emittedOut).toEqual({
+        type: 'ORDER_STARTED',
+        payload: { drink: 'Espresso' },
+      });
+    });
+  });
+
+  describe('Cycle 19: Self-Transition Re-Entry vs. stay() with Epoch Protection', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('resets after(ms) timer and invokes onExit/onEnter on explicit self-transition, whereas stay() does NOT', () => {
+      const lifecycleLog: string[] = [];
+
+      const activeFSM = createFSM<{
+        events: { ACTIVITY: void; PING: void };
+        states: 'active' | 'idle';
+      }>()({
+        id: 'activityTracker',
+        initial: 'active',
+        transitions: [
+          ['active', 'ACTIVITY',  'active'],
+          ['active', 'PING',      stay()],
+          ['active', after(3000), 'idle'],
+        ],
+      });
+
+      const instance = createMachineInstance(activeFSM, {
+        onExit: { active: () => lifecycleLog.push('exit:active') },
+        onEnter: { active: () => lifecycleLog.push('enter:active') },
+      });
+
+      expect(instance.state()).toBe('active');
+
+      // Advance 2000ms and dispatch PING -> stay() does NOT reset after(3000) timer or trigger exit/enter!
+      vi.advanceTimersByTime(2000);
+      instance.send('PING');
+      expect(lifecycleLog).toEqual([]);
+
+      // Advance 500ms (total 2500ms) and dispatch ACTIVITY -> explicit self-transition resets after(3000) timer!
+      vi.advanceTimersByTime(500);
+      instance.send('ACTIVITY');
+      expect(lifecycleLog).toEqual(['exit:active', 'enter:active']);
+      expect((instance as any).epoch).toBeGreaterThanOrEqual(1);
+
+      // Advance 1000ms (3500ms from initial, 1000ms from ACTIVITY) -> still 'active'!
+      vi.advanceTimersByTime(1000);
+      expect(instance.state()).toBe('active');
+
+      // Advance remaining 2000ms (3000ms from ACTIVITY) -> transitions to 'idle'!
+      vi.advanceTimersByTime(2000);
+      expect(instance.state()).toBe('idle');
+    });
+  });
+
+  describe('Cycle 20, 24 & 25: Row-Level Payload Type Safety (ExpectedCallSignature, guard, input, output & VIA Arrays)', () => {
+    it('enforces strict row-level payload types for call, guard, input, and output and supports VIA arrays at runtime', () => {
+      interface TestMethods {
+        _reset: () => void;
+        _logOptional: (reason?: string) => void;
+        _selectDrink: (drink: { readonly id: string }) => void;
+        _wrongParamType: (count: number) => void;
+        _twoRequired: (a: { readonly id: string }, b: number) => void;
+        _selectOptional: (drink?: { readonly id: string }) => void;
+      }
+
+      const childActor = createFSM<{
+        inputs: { readonly itemId: string };
+        events: { DONE_CHILD: void };
+        outputs: { CHILD_READY: { readonly result: string } };
+        states: 'working';
+      }>()({
+        id: 'childActor',
+        initial: 'working',
+        transitions: [
+          [
+            'working',
+            'DONE_CHILD',
+            finalState(),
+            { output: ['CHILD_READY', () => ({ result: 'ok' })] },
+          ],
+        ],
+      });
+
+      const validFsm = createFSM<{
+        context: { readonly count: number; readonly lastId: string | null };
+        events: {
+          CANCEL: void;
+          RESET: void;
+          SELECT: { readonly id: string };
+        };
+        outputs: {
+          SELECTED_OUT: { readonly outId: string };
+        };
+        states: 'idle' | 'selected' | 'done';
+        methods: TestMethods;
+      }>()({
+        id: 'rowPayloadSafety',
+        initial: 'idle',
+        transitions: [
+          // 1. void event with parameterless method -> VALID
+          ['idle', 'CANCEL', 'idle', { call: (m) => m._reset }],
+          // 2. void event with optional parameter method -> VALID
+          ['idle', 'RESET', 'idle', { call: (m) => m._logOptional }],
+          // 3. typed payload event with matching parameter method, guard, and output -> VALID
+          [
+            'idle',
+            'SELECT',
+            'selected',
+            {
+              guard: (ctx, payload) => {
+                const _checkId: string = payload.id;
+                return ctx.count >= 0 && _checkId.length > 0;
+              },
+              call: (m) => m._selectDrink,
+              output: [
+                'SELECTED_OUT',
+                (_ctx, payload) => {
+                  const _checkId: string = payload.id;
+                  return { outId: _checkId };
+                },
+              ],
+            },
+          ],
+          // 4. typed payload event with parameterless method -> VALID (JavaScript functions can ignore extra args)
+          ['selected', 'SELECT', 'selected', { call: (m) => m._reset }],
+          // 5. typed payload event transitioning into sub-machine with input(ctx, payload) -> VALID
+          [
+            'selected',
+            'SELECT',
+            childActor,
+            {
+              input: (_ctx, payload) => {
+                const _checkId: string = payload.id;
+                return { itemId: _checkId };
+              },
+            },
+          ],
+          [childActor, 'CHILD_READY', 'done'],
+          // 6. VIA array ['SELECT', 'CANCEL'] (Union `{ id: string } | void`) with optional parameter method -> VALID
+          [
+            'selected',
+            ['SELECT', 'CANCEL'],
+            'idle',
+            { call: (m) => m._selectOptional },
+          ],
+          // 7. VIA array ['CANCEL', 'RESET'] (both void) with parameterless method -> VALID
+          [
+            'done',
+            ['CANCEL', 'RESET'],
+            'idle',
+            { call: (m) => m._reset },
+          ],
+        ],
+      });
+
+      // Compile-time negative proof 1: void event with required parameter method -> MUST BE @ts-expect-error
+      createFSM<{
+        events: { CANCEL: void };
+        states: 'idle';
+        methods: TestMethods;
+      }>()({
+        id: 'invalidVoidCall',
+        initial: 'idle',
+        transitions: [
+          // @ts-expect-error — CANCEL has void payload; _selectDrink requires { id: string }!
+          ['idle', 'CANCEL', 'idle', { call: (m) => m._selectDrink }],
+        ],
+      });
+
+      // Compile-time negative proof 2: payload event with incompatible parameter type -> MUST BE @ts-expect-error
+      createFSM<{
+        events: { SELECT: { readonly id: string } };
+        states: 'idle';
+        methods: TestMethods;
+      }>()({
+        id: 'invalidWrongParamType',
+        initial: 'idle',
+        transitions: [
+          // @ts-expect-error — SELECT payload is { id: string }, not number!
+          ['idle', 'SELECT', 'idle', { call: (m) => m._wrongParamType }],
+        ],
+      });
+
+      // Compile-time negative proof 3: VIA array ['SELECT', 'CANCEL'] (Union `{ id: string } | void`) with non-optional parameter method -> MUST BE @ts-expect-error
+      createFSM<{
+        events: {
+          SELECT: { readonly id: string };
+          CANCEL: void;
+        };
+        states: 'idle';
+        methods: TestMethods;
+      }>()({
+        id: 'invalidMixedUnionCall',
+        initial: 'idle',
+        transitions: [
+          // @ts-expect-error — CANCEL is void, so _selectDrink(drink: { id: string }) is unsafe when CANCEL fires!
+          ['idle', ['SELECT', 'CANCEL'], 'idle', { call: (m) => m._selectDrink }],
+        ],
+      });
+
+      // Verify runtime execution of VIA arrays!
+      const calls: string[] = [];
+      const instance = createMachineInstance(validFsm, {
+        context: { count: 0, lastId: null },
+        methods: {
+          _reset: () => calls.push('reset'),
+          _logOptional: (r?: string) => calls.push(`log:${r ?? 'none'}`),
+          _selectDrink: (d: { readonly id: string }) => calls.push(`select:${d.id}`),
+          _wrongParamType: () => undefined,
+          _twoRequired: () => undefined,
+          _selectOptional: (d?: { readonly id: string }) => calls.push(`opt:${d?.id ?? 'void'}`),
+        },
+      });
+
+      expect(validFsm.hasTransitionFor('selected', 'SELECT')).toBe(true);
+      expect(validFsm.hasTransitionFor('selected', 'CANCEL')).toBe(true);
+      expect(validFsm.hasTransitionFor('done', 'RESET')).toBe(true);
+
+      instance.send('SELECT', { id: 'latte' });
+      expect(instance.state()).toBe('selected');
+      expect(calls).toEqual(['select:latte']);
+
+      instance.send('CANCEL');
+      expect(instance.state()).toBe('idle');
+      expect(calls).toEqual(['select:latte', 'opt:void']);
+    });
+  });
+
+  describe('Cycle 26: Eventless Conditional Branching (always()) with Infinite-Loop Guard', () => {
+    it('synchronously branches on state entry via always() in the same microstep', () => {
+      const cartFsm = createFSM<{
+        context: { readonly items: string[] };
+        events: { CHECK: void };
+        states: 'idle' | 'checkingCart' | 'checkout' | 'emptyCart';
+      }>()({
+        id: 'cartBranching',
+        initial: 'idle',
+        context: { items: [] as string[] },
+        transitions: [
+          ['idle',         'CHECK',  'checkingCart'],
+          ['checkingCart', always(), 'checkout',  { guard: (ctx) => ctx.items.length > 0 }],
+          ['checkingCart', always(), 'emptyCart'],
+        ],
+      });
+
+      const emptyInstance = createMachineInstance(cartFsm, {
+        context: { items: [] },
+      });
+      emptyInstance.send('CHECK');
+      expect(emptyInstance.state()).toBe('emptyCart');
+
+      const nonEmptyInstance = createMachineInstance(cartFsm, {
+        context: { items: ['Espresso'] },
+      });
+      nonEmptyInstance.send('CHECK');
+      expect(nonEmptyInstance.state()).toBe('checkout');
+    });
+
+    it('throws MatrixFsmInfiniteLoopError after MAX_SYNC_MICROSTEPS = 100 on cyclic unguarded always() transitions', () => {
+      const cyclicFsm = createFSM<{
+        events: { START: void };
+        states: 'idle' | 'a' | 'b';
+      }>()({
+        id: 'cyclicAlways',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'START',  'a'],
+          ['a',    always(), 'b'],
+          ['b',    always(), 'a'],
+        ],
+      });
+
+      const instance = createMachineInstance(cyclicFsm);
+      expect(() => instance.send('START')).toThrowError(
+        MatrixFsmInfiniteLoopError,
+      );
+    });
+  });
+
+  describe('Cycles 27, 28 & 30: Snapshot Persistence, toMermaid(), inspect Telemetry & getShortestPaths()', () => {
+    it('supports getSnapshot() and restoreSnapshot() on createMachineInstance and restarts after(ms) timers on restored state', () => {
+      vi.useFakeTimers();
+      try {
+        const timerFsm = createFSM<{
+          context: { readonly step: number };
+          events: { NEXT: void };
+          states: 'idle' | 'waiting' | 'completed';
+          methods: { _inc: () => void };
+        }>()({
+          id: 'snapMachine',
+          initial: 'idle',
+          context: { step: 0 },
+          transitions: [
+            ['idle',    'NEXT',      'waiting',   { call: (m) => m._inc }],
+            ['waiting', after(1000), 'completed', { call: (m) => m._inc }],
+          ],
+        });
+
+        let step = 0;
+        const instA = createMachineInstance(timerFsm, {
+          getContext: () => ({ step }),
+          methods: {
+            _inc: () => {
+              step += 1;
+            },
+          },
+        });
+
+        instA.send('NEXT');
+        expect(instA.state()).toBe('waiting');
+        expect(instA.context().step).toBe(1);
+
+        const snap = instA.getSnapshot();
+        expect(snap.state).toBe('waiting');
+        expect(snap.context).toEqual({ step: 1 });
+        instA.destroy();
+
+        let stepB = 0;
+        const instB = createMachineInstance(timerFsm, {
+          getContext: () => ({ step: stepB }),
+          methods: {
+            _inc: () => {
+              stepB += 1;
+            },
+          },
+        });
+        expect(instB.state()).toBe('idle');
+
+        stepB = snap.context.step;
+        instB.restoreSnapshot(snap);
+        expect(instB.state()).toBe('waiting');
+        expect(instB.context().step).toBe(1);
+
+        // Restoring into 'waiting' must re-arm the after(1000) timer!
+        vi.advanceTimersByTime(1000);
+        expect(instB.state()).toBe('completed');
+        expect(instB.context().step).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('renders always(), VIA arrays, awaiting(), after(ms), all(), and finalState() in toMermaid(fsm)', () => {
+      const subA = createFSM<{
+        events: { FINISH_A: void };
+        states: 'workingA';
+      }>()({
+        id: 'barista',
+        initial: 'workingA',
+        transitions: [['workingA', 'FINISH_A', finalState()]],
+      });
+      const subB = createFSM<{
+        events: { FINISH_B: void };
+        states: 'workingB';
+      }>()({
+        id: 'bakery',
+        initial: 'workingB',
+        transitions: [['workingB', 'FINISH_B', finalState()]],
+      });
+
+      const fullFsm = createFSM<{
+        context: { readonly vip: boolean };
+        events: {
+          ORDER: void;
+          CANCEL: void;
+          ABORT: void;
+        };
+        states: 'idle' | 'checking' | 'preparing' | 'done';
+      }>()({
+        id: 'shopFlow',
+        initial: 'idle',
+        context: { vip: false },
+        transitions: [
+          ['idle',            'ORDER',              awaiting('checking')],
+          ['checking',        'DONE',               'preparing'],
+          ['preparing',       always(),             all(subA, subB), { guard: (ctx) => ctx.vip }],
+          ['preparing',       after(500),           all(subA, subB)],
+          [all(subA, subB),   'ALL_DONE',           finalState()],
+          ['preparing',       ['CANCEL', 'ABORT'],  'idle'],
+        ],
+      });
+
+      const diagram = toMermaid(fullFsm);
+      expect(diagram).toContain('stateDiagram-v2');
+      expect(diagram).toContain('[*] --> idle');
+      expect(diagram).toContain('state "⚡ checking" as checking');
+      expect(diagram).toContain('state "⇉ all(barista, bakery)" as all_barista_bakery');
+      expect(diagram).toContain('preparing --> all_barista_bakery : always()');
+      expect(diagram).toContain('preparing --> all_barista_bakery : after(500ms)');
+      expect(diagram).toContain('preparing --> idle : CANCEL | ABORT');
+      expect(diagram).toContain('all_barista_bakery --> [*] : ALL_DONE (DONE)');
+    });
+
+    it('computes deterministic shortest event paths via getShortestPaths(fsm) and emits inspect telemetry events', () => {
+      const fsm = createFSM<{
+        context: { readonly count: number };
+        events: {
+          SELECT: { readonly item: string };
+          PAY: void;
+          RESET: void;
+        };
+        states: 'browsing' | 'selected' | 'paid' | 'receipt';
+        methods: { _select: (p: { readonly item: string }) => void };
+      }>()({
+        id: 'checkoutPaths',
+        initial: 'browsing',
+        context: { count: 0 },
+        transitions: [
+          ['browsing', 'SELECT',   'selected', { call: (m) => m._select }],
+          ['selected', 'PAY',      'paid'],
+          ['paid',     always(),   'receipt'],
+          ['receipt',  'RESET',    'browsing'],
+        ],
+      });
+
+      const paths = getShortestPaths(fsm);
+      expect(paths['browsing']).toEqual([]);
+      expect(paths['selected']).toEqual([
+        { from: 'browsing', via: 'SELECT', to: 'selected', hasGuard: false },
+      ]);
+      expect(paths['paid']).toEqual([
+        { from: 'browsing', via: 'SELECT', to: 'selected', hasGuard: false },
+        { from: 'selected', via: 'PAY', to: 'paid', hasGuard: false },
+      ]);
+      expect(paths['receipt']).toEqual([
+        { from: 'browsing', via: 'SELECT', to: 'selected', hasGuard: false },
+        { from: 'selected', via: 'PAY', to: 'paid', hasGuard: false },
+        { from: 'paid', via: 'always()', to: 'receipt', hasGuard: false },
+      ]);
+
+      const telemetry: Array<{
+        readonly machineId: string;
+        readonly from: string;
+        readonly via: string;
+        readonly to: string;
+        readonly payload: unknown;
+        readonly nextContext: unknown;
+      }> = [];
+
+      let count = 0;
+      const inst = createMachineInstance(fsm, {
+        getContext: () => ({ count }),
+        methods: {
+          _select: () => {
+            count += 1;
+          },
+        },
+        inspect: (ev) => telemetry.push(ev),
+      });
+
+      inst.send('SELECT', { item: 'Muffin' });
+      expect(inst.state()).toBe('selected');
+
+      inst.send('PAY');
+      expect(inst.state()).toBe('receipt');
+
+      expect(telemetry).toHaveLength(3);
+      expect(telemetry[0]).toMatchObject({
+        machineId: 'checkoutPaths',
+        from: 'browsing',
+        via: 'SELECT',
+        to: 'selected',
+        payload: { item: 'Muffin' },
+        nextContext: { count: 1 },
+      });
+      expect(telemetry[1]).toMatchObject({
+        machineId: 'checkoutPaths',
+        from: 'selected',
+        via: 'PAY',
+        to: 'paid',
+      });
+      expect(telemetry[2]).toMatchObject({
+        machineId: 'checkoutPaths',
+        from: 'paid',
+        via: '__always__',
+        to: 'receipt',
       });
     });
   });

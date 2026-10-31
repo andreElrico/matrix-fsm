@@ -107,6 +107,12 @@ export interface AfterNode<TMs extends number = number> {
   readonly id: `__after_${TMs}__`;
 }
 
+export interface AlwaysNode {
+  readonly __type: 'always';
+  readonly __kind: 'always';
+  readonly id: '__always__';
+}
+
 export interface SubMachineRef<
   TFSM extends AnyFSMDefinition = AnyFSMDefinition,
   TId extends string = string,
@@ -189,6 +195,19 @@ export type TransitionMethod<TPayload = any, TContext = any> = (
   ctx: ReadonlyContext<TContext>,
 ) => void;
 
+export type ExpectedCallSignature<RowPayload, TContext = any> =
+  [0] extends [1 & RowPayload]
+    ? (payload: any, ctx: ReadonlyContext<TContext>) => unknown
+    : [RowPayload] extends [void | undefined]
+      ? () => unknown
+      : void extends RowPayload
+        ? (() => unknown) &
+            ((
+              payload: Exclude<RowPayload, void | undefined>,
+              ctx: ReadonlyContext<TContext>,
+            ) => unknown)
+        : (payload: RowPayload, ctx: ReadonlyContext<TContext>) => unknown;
+
 export type TransitionCallSelector<
   TMethods = Record<string, any>,
   TPayload = any,
@@ -199,6 +218,16 @@ export type TransitionCallSelector<
     ) =>
       | ((payload: TPayload, ctx: ReadonlyContext<TContext>) => void)
       | undefined)
+  | Extract<keyof TMethods, string>;
+
+export type StrictTransitionCallSelector<
+  TMethods = Record<string, any>,
+  TPayload = any,
+  TContext = any,
+> =
+  | ((
+      methods: TMethods,
+    ) => ExpectedCallSignature<TPayload, TContext> | undefined)
   | Extract<keyof TMethods, string>;
 
 export type AllowedOutputKey<TOutputs> =
@@ -301,6 +330,7 @@ export interface TransitionOptions<
   TMethods = any,
   TInput = any,
   TOutputs = EmptyObject,
+  TOutputContext = TContext,
 > {
   readonly guard?: (
     ctx: ReadonlyContext<TContext>,
@@ -326,8 +356,30 @@ export interface TransitionOptions<
    * - `{ output: ['HEARTBEAT'] }`
    * - `{ output: ['COFFEE_READY', (ctx, eventPayload) => ({ drinkName: ctx.selectedDrink.name })] }`
    */
-  readonly output?: TransitionOutputTuple<TOutputs, TContext, TPayload>;
+  readonly output?: TransitionOutputTuple<TOutputs, TOutputContext, TPayload>;
 }
+
+type IsUnion<T, U = T> = T extends any
+  ? [U] extends [T]
+    ? false
+    : true
+  : false;
+
+export type StrictTransitionOptions<
+  TContext = any,
+  TPayload = any,
+  TMethods = any,
+  TInput = any,
+  TOutputs = EmptyObject,
+> = Omit<
+  TransitionOptions<TContext, TPayload, TMethods, TInput, TOutputs>,
+  'call' | 'output'
+> & {
+  readonly call?: StrictTransitionCallSelector<TMethods, TPayload, TContext>;
+  readonly output?: IsUnion<Extract<keyof TOutputs, string>> extends true
+    ? unknown
+    : TransitionOutputTuple<TOutputs, TContext, TPayload>;
+};
 
 export type TransitionOptionsWithoutOutput<
   TContext = any,
@@ -347,7 +399,7 @@ export type TransitionOptionsWithRequiredInput<
   TMethods = any,
   TInput = any,
   TOutputs = EmptyObject,
-> = TransitionOptions<TContext, TPayload, TMethods, TInput, TOutputs> & {
+> = StrictTransitionOptions<TContext, TPayload, TMethods, TInput, TOutputs> & {
   readonly input: (
     ctx: ReadonlyContext<TContext>,
     eventPayload: TPayload,
@@ -360,6 +412,7 @@ export type TransitionFrom<
   TMethods = any,
 > =
   | TState
+  | AwaitingNode<TState>
   | AnyStateNode
   | AnyFSMDefinition
   | SubMachineRef<any, any>
@@ -375,8 +428,10 @@ export type TransitionVia<
   TMethods = any,
 > =
   | TEvent
+  | readonly (TEvent | BuiltInLifecycleEvent)[]
   | BuiltInLifecycleEvent
   | AfterNode<number>
+  | AlwaysNode
   | ExtractedMarker<TContext, TMethods>;
 
 export type TransitionToNonNamedFinal<
@@ -409,21 +464,31 @@ export type TransitionRow<
   TState extends string = string,
   TMethods = any,
   TOutputs = EmptyObject,
+  TOutputContext = TContext,
 > =
   | readonly [
       from:
         | TState
+        | AwaitingNode<TState>
         | AnyStateNode
         | EachNode<any, any>
         | CombinatorNode<any, any>
         | ExtractedMarker<TContext, TMethods>,
       via: TransitionVia<TEvent, TContext, TMethods>,
       to: TransitionToNonNamedFinal<TState, TContext, TMethods>,
-      options?: TransitionOptions<TContext, any, TMethods, any, TOutputs>,
+      options?: TransitionOptions<
+        TContext,
+        any,
+        TMethods,
+        any,
+        TOutputs,
+        TOutputContext
+      >,
     ]
   | readonly [
       from:
         | TState
+        | AwaitingNode<TState>
         | AnyStateNode
         | EachNode<any, any>
         | CombinatorNode<any, any>
@@ -436,7 +501,14 @@ export type TransitionRow<
       from: AnyFSMDefinition | SubMachineRef<any, any> | CombinatorNode<any, any>,
       via: string,
       to: TransitionToNonNamedFinal<TState, TContext, TMethods>,
-      options?: TransitionOptions<TContext, any, TMethods, any, TOutputs>,
+      options?: TransitionOptions<
+        TContext,
+        any,
+        TMethods,
+        any,
+        TOutputs,
+        TOutputContext
+      >,
     ]
   | readonly [
       from: AnyFSMDefinition | SubMachineRef<any, any> | CombinatorNode<any, any>,
@@ -488,6 +560,10 @@ export interface TransitionEvaluation<
   readonly nextState: TState;
   readonly nextContext: TContext;
   readonly callSelector: TransitionCallSelector<TMethods, any, TContext> | null;
+  readonly inputSelector?: ((
+    ctx: ReadonlyContext<TContext>,
+    eventPayload: any,
+  ) => Record<string, unknown>) | null;
   readonly inputMapped: Record<string, unknown> | null;
   readonly stayed: boolean;
   readonly isAwaiting: boolean;
@@ -731,6 +807,17 @@ type IsTerminalSubMachineOutput<From, Via> =
           ? true
           : false;
 
+type IsChildOfAllInTransitions<From, TTransitions extends readonly any[]> =
+  From extends { readonly id: infer ChildId extends string }
+    ? TTransitions[number] extends infer Row
+      ? Row extends readonly [any, any, CombinatorNode<'all', infer TMachines>, ...any[]]
+        ? ChildId extends TMachines[number]['id']
+          ? true
+          : false
+        : false
+      : false
+    : false;
+
 export type ValidateSubMachineTarget<
   From,
   Via,
@@ -742,10 +829,12 @@ export type ValidateSubMachineTarget<
     }
   : IsTerminalSubMachineOutput<From, Via> extends true
     ? IsStayNode<To> extends true
-      ? {
-          readonly __error: 'Cannot use stay() when handling a terminal finalState() output from a sub-machine; the sub-machine has already terminated';
-          readonly terminalOutput: Via;
-        }
+      ? true extends IsChildOfAllInTransitions<From, TTransitions>
+        ? To
+        : {
+            readonly __error: 'Cannot use stay() when handling a terminal finalState() output from a sub-machine; the sub-machine has already terminated';
+            readonly terminalOutput: Via;
+          }
       : ValidateSubMachineOutputs<To, TTransitions>
     : ValidateSubMachineOutputs<To, TTransitions>;
 
@@ -799,6 +888,31 @@ type ResolveSubMachineOutputPayload<From, Via> =
       : ExtractOutputsMap<From>[Via]
     : any;
 
+type ResolveSingleViaPayload<From, SingleVia, TEventsMap> =
+  IsSubMachineNode<From> extends true
+    ? ResolveSubMachineOutputPayload<From, SingleVia>
+    : SingleVia extends AfterNode<any> | AlwaysNode
+      ? void
+      : [0] extends [1 & TEventsMap]
+        ? any
+        : TEventsMap extends object
+          ? string extends keyof TEventsMap
+            ? any
+            : keyof TEventsMap extends never
+              ? any
+              : SingleVia extends keyof TEventsMap
+                ? TEventsMap[SingleVia]
+                : any
+          : any;
+
+export type ResolveRowPayload<
+  From,
+  Via,
+  TEventsMap = Record<string, any>,
+> = Via extends readonly (infer SingleVia)[]
+  ? ResolveSingleViaPayload<From, SingleVia, TEventsMap>
+  : ResolveSingleViaPayload<From, Via, TEventsMap>;
+
 type IsNamedFinalNode<To> =
   [0] extends [1 & To]
     ? false
@@ -838,7 +952,7 @@ type ValidateRowOptions<
       : []
     : Rest extends readonly [any]
       ? [
-          options?: TransitionOptions<
+          options?: StrictTransitionOptions<
             TContext,
             TPayload,
             TMethods,
@@ -859,12 +973,14 @@ type ValidateRowOptions<
  * 5. When `FROM` is a sub-machine and `VIA` is a terminal output (`ExtractTerminalOutputs<From>`), forbids `stay()` in Column 3 (`TO`).
  * 6. Forbids `anyState()` in Column 3 (`TO`).
  */
+
 export type ValidateTransitionRows<
   TTransitions extends readonly any[],
   TContext = any,
   TEvent extends string = string,
   TMethods = any,
   TOutputs = EmptyObject,
+  TEventsMap = Record<string, any>,
 > = {
   readonly [K in keyof TTransitions]: TTransitions[K] extends readonly [
     infer From,
@@ -906,7 +1022,7 @@ export type ValidateTransitionRows<
                 ...ValidateRowOptions<
                   Rest,
                   TContext,
-                  any,
+                  ResolveRowPayload<From, Via, TEventsMap>,
                   TMethods,
                   To,
                   TOutputs
@@ -920,7 +1036,7 @@ export type ValidateTransitionRows<
                   ...ValidateRowOptions<
                     Rest,
                     TContext,
-                    any,
+                    ResolveRowPayload<From, Via, TEventsMap>,
                     TMethods,
                     To,
                     TOutputs
@@ -934,13 +1050,27 @@ export type ValidateTransitionRows<
                   ...ValidateRowOptions<
                     Rest,
                     TContext,
-                    any,
+                    ResolveRowPayload<From, Via, TEventsMap>,
                     TMethods,
                     To,
                     TOutputs
                   >,
                 ]
-              : TTransitions[K]
+              : Rest extends readonly [any]
+                ? readonly [
+                    from: From,
+                    via: Via,
+                    to: To,
+                    ...ValidateRowOptions<
+                      Rest,
+                      TContext,
+                      ResolveRowPayload<From, Via, TEventsMap>,
+                      TMethods,
+                      To,
+                      TOutputs
+                    >,
+                  ]
+                : TTransitions[K]
     : TTransitions[K];
 };
 

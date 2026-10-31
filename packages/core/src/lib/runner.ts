@@ -3,7 +3,11 @@
  */
 
 import { resolveSourceId } from './fsm.js';
-import { isAfterNode } from './primitives.js';
+import {
+  isAfterNode,
+  MAX_SYNC_MICROSTEPS,
+  MatrixFsmInfiniteLoopError,
+} from './primitives.js';
 import type {
   AnyFSMDefinition,
   CombinatorNode,
@@ -14,10 +18,33 @@ import type {
   TransitionCallSelector,
 } from './types.js';
 
+export interface MachineSnapshot<TFSM extends AnyFSMDefinition = AnyFSMDefinition> {
+  readonly state: ExtractStates<TFSM>;
+  readonly context: Readonly<ExtractContext<TFSM>>;
+  readonly stateEpoch: number;
+  readonly children?: Readonly<Record<string, MachineSnapshot<any>>>;
+}
+
+export interface InspectEvent<TFSM extends AnyFSMDefinition = AnyFSMDefinition> {
+  readonly machineId: string;
+  readonly from: string;
+  readonly via: string;
+  readonly to: string;
+  readonly payload: unknown;
+  readonly nextContext: Readonly<ExtractContext<TFSM>>;
+  readonly timestamp: number;
+}
+
+export type InspectCallback<TFSM extends AnyFSMDefinition = AnyFSMDefinition> = (
+  event: InspectEvent<TFSM>,
+) => void;
+
 export interface MachineInstance<TFSM extends AnyFSMDefinition = AnyFSMDefinition> {
   readonly id: string;
   readonly state: () => ExtractStates<TFSM>;
   readonly getState: () => ExtractStates<TFSM>;
+  readonly epoch: number;
+  readonly stateEpoch: () => number;
   readonly subState: () => string | null;
   readonly subContext: () => Readonly<Record<string, unknown>> | null;
   readonly context: () => Readonly<ExtractContext<TFSM>>;
@@ -27,6 +54,8 @@ export interface MachineInstance<TFSM extends AnyFSMDefinition = AnyFSMDefinitio
   readonly finalPayload?: () => unknown;
   readonly send: (event: string, payload?: unknown) => void;
   readonly patchContext: (patch: Partial<ExtractContext<TFSM>>) => void;
+  readonly getSnapshot: () => MachineSnapshot<TFSM>;
+  readonly restoreSnapshot: (snapshot: MachineSnapshot<TFSM>) => void;
   readonly reset: () => void;
   readonly destroy: () => void;
 }
@@ -57,6 +86,7 @@ export interface MachineInstanceHooks<TFSM extends AnyFSMDefinition> {
   readonly initialContext?: Partial<ExtractContext<TFSM>>;
   readonly context?: Partial<ExtractContext<TFSM>>;
   readonly debug?: DebugLogger;
+  readonly inspect?: InspectCallback<TFSM>;
   /**
    * Optional method map or store reference used to resolve `{ call: (m) => m.methodName }`
    * during transitions.
@@ -120,6 +150,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
   type TContext = ExtractContext<TFSM>;
 
   let currentState: TState = fsm.initial as TState;
+  let stateEpoch = 0;
   let currentContext: TContext = {
     ...fsm.context,
     ...(hooks?.context ?? {}),
@@ -139,6 +170,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     payload: unknown;
     fromChildOutput: boolean;
     fromChildTerminal: boolean;
+    sourceStateOverride?: string;
   }> = [];
   let isProcessing = false;
   const activeTimers: Array<ReturnType<typeof setTimeout>> = [];
@@ -164,6 +196,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
 
   const scheduleStateTimers = (stateName: string): void => {
     clearActiveTimers();
+    const entryEpoch = stateEpoch;
     const scheduledIds = new Set<string>();
     for (const row of fsm.transitions) {
       const [from, via] = row as unknown as readonly [unknown, unknown];
@@ -175,7 +208,9 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       ) {
         scheduledIds.add(via.id);
         const timerId = setTimeout(() => {
-          sendInternal(via.id, undefined, false, false);
+          if (!isDestroyed && stateEpoch === entryEpoch && currentState === stateName) {
+            sendInternal(via.id, undefined, false, false);
+          }
         }, via.ms);
         activeTimers.push(timerId);
       }
@@ -288,6 +323,10 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       }
     };
 
+    const childSettled = new Array<boolean>(combNode.machines.length).fill(false);
+    const completedOutputs: Record<string, unknown> = {};
+    const orderedOutputs: unknown[] = new Array(combNode.machines.length);
+
     combNode.machines.forEach((childMachine: AnyFSMDefinition, idx: number) => {
       const childInst = createMachineInstance(childMachine, {
         initialContext: {
@@ -302,26 +341,71 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
           if (activeCombinator !== activeCombState) {
             return;
           }
-          if (!childInfo.isDone) {
+          if (!childInfo.isDone && childInfo.emittedOutput) {
+            const outType = childInfo.emittedOutput.type;
+            const outPayload = childInfo.emittedOutput.payload;
+            if (
+              fsm.hasTransitionFor(childMachine.id, outType) ||
+              fsm.hasTransitionFor(combNode.id, outType) ||
+              fsm.hasTransitionFor('anyState', outType)
+            ) {
+              sendInternal(
+                outType,
+                outPayload,
+                true,
+                false,
+                fsm.hasTransitionFor(childMachine.id, outType)
+                  ? childMachine.id
+                  : undefined,
+              );
+            }
+          }
+          if (!childInfo.isDone || childSettled[idx]) {
             return;
           }
+          childSettled[idx] = true;
           const outcome = childInfo.finalOutcome ?? 'DONE';
           const childPayload = childInfo.hasFinalPayloadSelector
             ? childInfo.finalPayload
             : childCtx;
 
+          // Immediately tear down the finished child!
+          instances[idx]?.destroy();
+
           if (combNode.__type === 'all') {
-            if (outcome === 'ERROR') {
+            completedOutputs[childMachine.id] = childPayload;
+            orderedOutputs[idx] = childPayload;
+
+            if (fsm.hasTransitionFor(childMachine.id, outcome)) {
+              sendInternal(outcome, childPayload, true, false, childMachine.id);
+              if (activeCombinator !== activeCombState) {
+                return;
+              }
+            } else if (outcome === 'ERROR') {
               dispatchCombinatorExit('ERROR', childPayload);
               return;
             }
-            if (instances.every((inst) => inst.isDone())) {
-              const allPayloads = instances.map((inst) =>
-                inst.finalPayload ? inst.finalPayload() : inst.context(),
-              );
-              dispatchCombinatorExit('ALL_DONE', allPayloads);
+
+            if (
+              instances.length === combNode.machines.length &&
+              childSettled.every(Boolean)
+            ) {
+              const combId = combNode.id;
+              if (
+                fsm.hasTransitionFor(combId, 'ALL_DONE') ||
+                fsm.hasTransitionFor('anyState', 'ALL_DONE')
+              ) {
+                dispatchCombinatorExit('ALL_DONE', { ...completedOutputs });
+              } else {
+                dispatchCombinatorExit('DONE', orderedOutputs);
+              }
             }
           } else if (combNode.__type === 'race') {
+            if (fsm.hasTransitionFor(childMachine.id, outcome)) {
+              destroyActiveCombinator();
+              sendInternal(outcome, childPayload, true, true, childMachine.id);
+              return;
+            }
             dispatchCombinatorExit(outcome, childPayload);
           } else if (combNode.__type === 'any') {
             if (outcome === 'ERROR') {
@@ -331,6 +415,11 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
                 dispatchCombinatorExit('ERROR', failedErrors);
               }
             } else {
+              if (fsm.hasTransitionFor(childMachine.id, outcome)) {
+                destroyActiveCombinator();
+                sendInternal(outcome, childPayload, true, true, childMachine.id);
+                return;
+              }
               dispatchCombinatorExit(outcome, childPayload);
             }
           }
@@ -345,6 +434,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     payload?: unknown,
     fromChildOutput = false,
     fromChildTerminal = false,
+    sourceStateOverride?: string,
   ): void => {
     // 1. If inside a subMachine:
     //    - Cooperative Cancel / Child Event Priority: if child handles `event` in its current state, delegate first.
@@ -380,9 +470,10 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     }
 
     const prevState = currentState;
+    const effectiveFromState = sourceStateOverride ?? currentState;
     const effectiveCtx = readEffectiveContext();
     const evaluation = fsm.evaluate(
-      currentState,
+      effectiveFromState,
       event,
       payload,
       effectiveCtx,
@@ -421,6 +512,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       clearActiveTimers();
       hooks?.onExit?.[prevState]?.(readEffectiveContext());
       currentState = evaluation.nextState;
+      stateEpoch++;
     }
 
     currentContext = evaluation.nextContext;
@@ -444,6 +536,9 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     }
 
     const effectiveCtxAfterMutations = readEffectiveContext();
+    const resolvedInputMapped = evaluation.inputSelector
+      ? evaluation.inputSelector(effectiveCtxAfterMutations, payload)
+      : evaluation.inputMapped;
     const resolvedEmittedOutput = evaluation.emittedOutput
       ? {
           type: evaluation.emittedOutput.type,
@@ -466,6 +561,15 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     }
 
     if (evaluation.stayed) {
+      hooks?.inspect?.({
+        machineId: fsm.id,
+        from: prevState,
+        via: event,
+        to: currentState,
+        payload,
+        nextContext: effectiveCtxAfterMutations,
+        timestamp: Date.now(),
+      });
       hooks?.onStateChange?.(currentState, effectiveCtxAfterMutations, {
         stayed: true,
         isPending: isPending(),
@@ -490,20 +594,42 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     if (evaluation.enteredSubMachine) {
       enterSubMachineIfNeeded(
         evaluation.enteredSubMachine,
-        evaluation.inputMapped,
+        resolvedInputMapped,
       );
     }
 
     if (evaluation.enteredCombinator) {
       enterCombinatorIfNeeded(
         evaluation.enteredCombinator,
-        evaluation.inputMapped,
+        resolvedInputMapped,
       );
     }
 
     hooks?.onEnter?.[currentState]?.(readEffectiveContext());
     scheduleStateTimers(currentState);
-    hooks?.onStateChange?.(currentState, readEffectiveContext(), {
+    if (
+      !isDone() &&
+      (fsm.hasTransitionFor(currentState, '__always__') ||
+        fsm.hasTransitionFor('*', '__always__'))
+    ) {
+      eventQueue.unshift({
+        event: '__always__',
+        payload: undefined,
+        fromChildOutput: false,
+        fromChildTerminal: false,
+      });
+    }
+    const finalEffectiveCtx = readEffectiveContext();
+    hooks?.inspect?.({
+      machineId: fsm.id,
+      from: prevState,
+      via: event,
+      to: currentState,
+      payload,
+      nextContext: finalEffectiveCtx,
+      timestamp: Date.now(),
+    });
+    hooks?.onStateChange?.(currentState, finalEffectiveCtx, {
       stayed: false,
       isPending: isPending(),
       isDone: isDone(),
@@ -524,23 +650,41 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     payload?: unknown,
     fromChildOutput = false,
     fromChildTerminal = false,
+    sourceStateOverride?: string,
   ): void => {
     if (isDestroyed) {
       return;
     }
-    eventQueue.push({ event, payload, fromChildOutput, fromChildTerminal });
+    eventQueue.push({
+      event,
+      payload,
+      fromChildOutput,
+      fromChildTerminal,
+      sourceStateOverride,
+    });
     if (isProcessing) {
       return;
     }
     isProcessing = true;
     try {
+      let syncMicrosteps = 0;
       while (eventQueue.length > 0) {
+        if (syncMicrosteps >= MAX_SYNC_MICROSTEPS) {
+          eventQueue.length = 0;
+          throw new MatrixFsmInfiniteLoopError(
+            fsm.id,
+            currentState,
+            MAX_SYNC_MICROSTEPS,
+          );
+        }
+        syncMicrosteps++;
         const next = eventQueue.shift()!;
         processOneEvent(
           next.event,
           next.payload,
           next.fromChildOutput,
           next.fromChildTerminal,
+          next.sourceStateOverride,
         );
       }
     } finally {
@@ -572,26 +716,105 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     destroyActiveCombinator();
   };
 
+  const getSnapshot = (): MachineSnapshot<TFSM> => {
+    const children: Record<string, MachineSnapshot<any>> = {};
+    if (activeSubMachine && activeSubRef) {
+      children[activeSubRef.id] = activeSubMachine.getSnapshot();
+    }
+    if (activeCombinator) {
+      activeCombinator.instances.forEach(
+        (child: MachineInstance<any>, idx: number) => {
+          const childFSM = activeCombinator!.node.machines[idx];
+          if (child && childFSM) {
+            children[childFSM.id] = child.getSnapshot();
+          }
+        },
+      );
+    }
+    return {
+      state: currentState,
+      context: { ...readEffectiveContext() },
+      stateEpoch,
+      ...(Object.keys(children).length > 0 ? { children } : {}),
+    };
+  };
+
+  const restoreSnapshot = (snapshot: MachineSnapshot<TFSM>): void => {
+    clearActiveTimers();
+    eventQueue.length = 0;
+    if (activeSubMachine) {
+      activeSubMachine.destroy();
+      activeSubMachine = null;
+      activeSubRef = null;
+    }
+    destroyActiveCombinator();
+    doneOutcome = null;
+    donePayload = undefined;
+    currentState = snapshot.state;
+    currentContext = {
+      ...fsm.context,
+      ...(snapshot.context as TContext),
+    };
+    stateEpoch = Math.max(stateEpoch + 1, snapshot.stateEpoch);
+    const subRef = fsm.subMachines.get(currentState);
+    if (subRef) {
+      enterSubMachineIfNeeded(subRef, currentContext);
+      const childSnap = snapshot.children?.[subRef.id];
+      const spawnedSub = activeSubMachine as MachineInstance<any> | null;
+      if (childSnap && spawnedSub) {
+        spawnedSub.restoreSnapshot(childSnap);
+      }
+    }
+    const combNode = fsm.combinatorNodes?.get(currentState);
+    if (combNode) {
+      enterCombinatorIfNeeded(combNode, currentContext);
+    }
+    scheduleStateTimers(currentState);
+    if (
+      fsm.hasTransitionFor(currentState, '__always__') ||
+      fsm.hasTransitionFor('*', '__always__')
+    ) {
+      sendInternal('__always__', undefined, false, false);
+    }
+  };
+
   const reset = (): void => {
     destroy();
     isDestroyed = false;
     doneOutcome = null;
     donePayload = undefined;
     currentState = fsm.initial as TState;
+    stateEpoch++;
     currentContext = {
       ...fsm.context,
       ...(hooks?.context ?? {}),
       ...(hooks?.initialContext ?? {}),
     };
     scheduleStateTimers(currentState);
+    if (
+      fsm.hasTransitionFor(currentState, '__always__') ||
+      fsm.hasTransitionFor('*', '__always__')
+    ) {
+      sendInternal('__always__', undefined, false, false);
+    }
   };
 
   scheduleStateTimers(currentState);
+  if (
+    fsm.hasTransitionFor(currentState, '__always__') ||
+    fsm.hasTransitionFor('*', '__always__')
+  ) {
+    sendInternal('__always__', undefined, false, false);
+  }
 
   return {
     id: fsm.id,
     state: () => currentState,
     getState: () => currentState,
+    get epoch() {
+      return stateEpoch;
+    },
+    stateEpoch: () => stateEpoch,
     subState: () => (activeSubMachine ? activeSubMachine.state() : null),
     subContext: () =>
       activeSubMachine
@@ -604,6 +827,8 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     finalPayload: () => donePayload,
     send,
     patchContext,
+    getSnapshot,
+    restoreSnapshot,
     reset,
     destroy,
   };

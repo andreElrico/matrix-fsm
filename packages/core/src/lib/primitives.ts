@@ -6,6 +6,7 @@ import { createFSM } from './fsm.js';
 import type {
   AfterNode,
   AllNode,
+  AlwaysNode,
   AnyFSMDefinition,
   AnyNode,
   AnyStateNode,
@@ -96,6 +97,31 @@ export function after<const TMs extends number>(ms: TMs): AfterNode<TMs> {
     ms,
     id: `__after_${ms}__` as const,
   });
+}
+
+const ALWAYS_INSTANCE: AlwaysNode = Object.freeze({
+  __type: 'always' as const,
+  __kind: 'always' as const,
+  id: '__always__' as const,
+});
+
+/**
+ * Eventless (transient) conditional branching marker for Column 2 (`VIA`).
+ * Evaluated synchronously immediately upon entering the source state in Column 1.
+ */
+export function always(): AlwaysNode {
+  return ALWAYS_INSTANCE;
+}
+
+export const MAX_SYNC_MICROSTEPS = 100 as const;
+
+export class MatrixFsmInfiniteLoopError extends Error {
+  constructor(machineId: string, state: string, maxSteps = MAX_SYNC_MICROSTEPS) {
+    super(
+      `[MatrixFSM Error]: Infinite synchronous always() loop detected in machine '${machineId}' at state '${state}' (exceeded MAX_SYNC_MICROSTEPS = ${maxSteps}).`,
+    );
+    this.name = 'MatrixFsmInfiniteLoopError';
+  }
 }
 
 /**
@@ -323,6 +349,15 @@ export function isAfterNode(value: unknown): value is AfterNode<number> {
     value !== null &&
     ((value as AfterNode).__type === 'after' ||
       (value as AfterNode).__kind === 'after')
+  );
+}
+
+export function isAlwaysNode(value: unknown): value is AlwaysNode {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    ((value as AlwaysNode).__type === 'always' ||
+      (value as AlwaysNode).__kind === 'always')
   );
 }
 

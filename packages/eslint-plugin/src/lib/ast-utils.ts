@@ -51,6 +51,9 @@ export function extractNodeKey(
     if (calleeName === 'anyState' && node.arguments.length === 0) {
       return 'anyState()';
     }
+    if (calleeName === 'always' && node.arguments.length === 0) {
+      return 'always()';
+    }
     if (calleeName === 'each' && node.arguments.length >= 1) {
       const firstArg = extractNodeKey(node.arguments[0]);
       if (firstArg) {

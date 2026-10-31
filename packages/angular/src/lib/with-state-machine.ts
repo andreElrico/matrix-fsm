@@ -43,14 +43,19 @@ import {
 import {
   after,
   all,
+  always,
   any,
   anyState,
   awaiting,
   createFSM,
   each,
   finalState,
+  getShortestPaths,
   invokeCallSelector,
   isAfterNode,
+  isAlwaysNode,
+  MAX_SYNC_MICROSTEPS,
+  MatrixFsmInfiniteLoopError,
   race,
   resolveDebugLogger,
   resolveSourceId,
@@ -60,6 +65,7 @@ import {
   transitions,
   type AfterNode,
   type AllNode,
+  type AlwaysNode,
   type AnyFSMDefinition,
   type AnyNode,
   type AnyStateNode,
@@ -79,22 +85,32 @@ import {
   type ExtractStates,
   type ExtractTerminalOutputs,
   type FSMDefinition,
+  type InspectCallback,
+  type InspectEvent,
+  type MachineSnapshot,
   type RaceNode,
   type ResolveContext,
+  type ShortestPathStep,
   type SubMachineRef,
   type TransitionRow,
   type ValidateTransitionRows,
+  type VoidOutputKeys,
 } from '@matrix-fsm/core';
 
 export {
   after,
   all,
+  always,
   any,
   anyState,
   awaiting,
   createFSM,
   each,
   finalState,
+  getShortestPaths,
+  isAlwaysNode,
+  MAX_SYNC_MICROSTEPS,
+  MatrixFsmInfiniteLoopError,
   race,
   stay,
   subMachine,
@@ -102,11 +118,16 @@ export {
   transitions,
   type AfterNode,
   type AllNode,
+  type AlwaysNode,
   type AnyNode,
   type AnyStateNode,
   type CombinatorNode,
   type ExtractTerminalOutputs,
+  type InspectCallback,
+  type InspectEvent,
+  type MachineSnapshot,
   type RaceNode,
+  type ShortestPathStep,
 };
 
 function ensureJitCompilerFacade(): void {
@@ -221,7 +242,7 @@ export type StateMachineTasksConfig<TFSM extends AnyFSMDefinition> = {
 };
 
 export type SyncContextMap<TContext extends object> = {
-  readonly [K in keyof TContext]?: Signal<TContext[K]>;
+  readonly [K in keyof TContext]?: Signal<TContext[K]> | TContext[K];
 };
 
 export interface SignalEventBridge<
@@ -335,6 +356,10 @@ export type StateMachineFeatureConfig<
    */
   readonly debug?: DebugLogger;
   /**
+   * Optional transition telemetry callback invoked on every matched transition.
+   */
+  readonly inspect?: InspectCallback<TFSM>;
+  /**
    * Optional lifecycle hooks invoked when entering a state.
    */
   readonly onEnter?:
@@ -402,7 +427,9 @@ export type ActorsMapFor<TFSM extends AnyFSMDefinition> = {
 } & Readonly<Record<string, Signal<Readonly<Record<string, any>> | null>>>;
 
 export interface StateMachineStoreMembers<TFSM extends AnyFSMDefinition> {
+  readonly state: Signal<ExtractStates<TFSM>>;
   readonly fsmState: Signal<ExtractStates<TFSM>>;
+  readonly stateEpoch: Signal<number>;
   readonly fsmSubState: Signal<string | null>;
   readonly fsmSubContext: Signal<Readonly<Record<string, any>> | null>;
   readonly fsmContext: DeepSignalOf<ExtractContext<TFSM>>;
@@ -421,6 +448,8 @@ export interface StateMachineStoreMembers<TFSM extends AnyFSMDefinition> {
     payload?: unknown,
   ) => void;
   readonly patchContext: (patch: Partial<ExtractContext<TFSM>>) => void;
+  readonly getSnapshot: () => MachineSnapshot<TFSM>;
+  readonly restoreSnapshot: (snapshot: MachineSnapshot<TFSM>) => void;
   readonly reset: (initialOverride?: Partial<ExtractContext<TFSM>>) => void;
   readonly destroy: () => void;
 }
@@ -432,6 +461,7 @@ export interface StateMachineStoreMembers<TFSM extends AnyFSMDefinition> {
 export interface SubMachineRuntimeNode<
   TFSM extends AnyFSMDefinition = AnyFSMDefinition,
 > {
+  readonly state?: Signal<string>;
   readonly fsmState: Signal<string>;
   readonly fsmSubState: Signal<string | null>;
   readonly fsmSubContext: Signal<Readonly<Record<string, any>> | null>;
@@ -443,6 +473,8 @@ export interface SubMachineRuntimeNode<
   readonly hasFinalPayloadSelector?: Signal<boolean>;
   readonly send: (...args: any[]) => void;
   readonly patchContext?: (patch: Partial<ExtractContext<TFSM>>) => void;
+  readonly getSnapshot?: () => MachineSnapshot<TFSM>;
+  readonly restoreSnapshot?: (snapshot: MachineSnapshot<TFSM>) => void;
   readonly reset: (initialOverride?: Partial<ExtractContext<TFSM>>) => void;
   readonly destroy?: () => void;
   readonly __setNotifyParent?: (cb: () => void) => void;
@@ -593,6 +625,7 @@ export function provideStateMachine<TFSM extends AnyFSMDefinition>(
 
 interface ActiveTaskHandle {
   readonly stateName: string;
+  readonly entryEpoch: number;
   cancelled: boolean;
   readonly abortController: AbortController;
   teardown: (() => void) | null;
@@ -731,6 +764,10 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     readonly type: string;
     readonly payload: unknown;
   }) => void,
+  actorTasksOverrides?: Record<
+    string,
+    Record<string, TaskHandler<any> | undefined> | undefined
+  >,
 ): StateMachineStoreMembers<TFSM> & {
   readonly finalPayload: Signal<unknown>;
   readonly hasFinalPayloadSelector: Signal<boolean>;
@@ -749,12 +786,37 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
 
   const effectiveConfig = config ?? defaultFeatureConfigs.get(fsm);
 
-  const runWithDI = <R>(fn: () => R): R =>
-    hostInjector ? runInInjectionContext(hostInjector, fn) : fn();
+  const runWithDI = <R>(fn: () => R): R | undefined => {
+    try {
+      return hostInjector ? runInInjectionContext(hostInjector, fn) : fn();
+    } catch (err) {
+      if (
+        !hostInjector &&
+        err instanceof Error &&
+        (err.message.includes('NG0203') ||
+          err.message.includes('inject() must be called'))
+      ) {
+        return undefined;
+      }
+      throw err;
+    }
+  };
 
-  const syncedSignals = (runWithDI(() =>
+  const SyncContextMapResolved = runWithDI(() =>
     resolveFactoryOrValue(effectiveConfig?.syncContext),
-  ) ?? {}) as Record<string, Signal<unknown> | undefined>;
+  );
+  const syncedSignals: Record<string, Signal<unknown> | undefined> = {};
+  const initialSyncedPatch: Record<string, unknown> = {};
+  if (SyncContextMapResolved && typeof SyncContextMapResolved === 'object') {
+    for (const [k, val] of Object.entries(SyncContextMapResolved)) {
+      if (isSignal(val)) {
+        syncedSignals[k] = val;
+        initialSyncedPatch[k] = untracked(() => val());
+      } else {
+        initialSyncedPatch[k] = val;
+      }
+    }
+  }
 
   const configuredInitialState = (runWithDI(() =>
     resolveFactoryOrValue(effectiveConfig?.state),
@@ -785,6 +847,8 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
   );
 
   const fsmStateSig = signal<TState>(fsm.initial as TState);
+  const stateEpochSig = signal<number>(0);
+  let stateEpoch = 0;
   const fsmSubStateSig = signal<string | null>(null);
   const fsmSubContextSig = signal<Readonly<Record<string, any>> | null>(null);
   const activeSubNodeSig = signal<SubMachineRuntimeNode<any> | null>(null);
@@ -797,8 +861,23 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
   const rawContextSig = signal<TContext>({
     ...(fsm.context ?? {}),
     ...initialStoreStateSnapshot,
+    ...initialSyncedPatch,
     ...(initialOverride ?? {}),
   } as TContext);
+
+  if (hostStore && Object.keys(initialSyncedPatch).length > 0) {
+    const storeSyncPatch: Record<string, unknown> = {};
+    let hasSyncKey = false;
+    for (const [k, v] of Object.entries(initialSyncedPatch)) {
+      if (storeStateKeys.size === 0 || storeStateKeys.has(k)) {
+        storeSyncPatch[k] = v;
+        hasSyncKey = true;
+      }
+    }
+    if (hasSyncKey) {
+      patchState(effectiveStoreSource as any, storeSyncPatch);
+    }
+  }
 
   const childMachinesSig = signal<
     Record<string, ReadonlyArray<ChildMachineSnapshot>>
@@ -1131,6 +1210,28 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
       factory = defaultMachineFactories.get(subFSM) ?? null;
     }
 
+    // If `actorTasks` overrides are provided for this child machine (e.g. via `createFeatureTester`),
+    // spawn a scoped runner for `subFSM` with its feature config + overridden tasks!
+    const childActorTaskOverrides = actorTasksOverrides?.[subFSM.id];
+    if (childActorTaskOverrides) {
+      const childBaseConfig = defaultFeatureConfigs.get(subFSM);
+      return createScopedMachineRunner(
+        subFSM,
+        {
+          ...childBaseConfig,
+          tasks: childActorTaskOverrides as any,
+          taskAdapter:
+            childBaseConfig?.taskAdapter ?? effectiveConfig?.taskAdapter,
+        },
+        hostInjector,
+        inputContext,
+        undefined,
+        onChildTransition,
+        onChildEmitOutput,
+        actorTasksOverrides,
+      );
+    }
+
     // If the parent store explicitly contributed or overridden tasks for this sub-machine,
     // run a scoped child runner that integrates with the parent's contributed tasks & methods!
     const hasParentContributedSubTask = [...subFSM.awaitingStates].some(
@@ -1177,6 +1278,7 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
       hostStore,
       onChildTransition,
       onChildEmitOutput,
+      actorTasksOverrides,
     );
   };
 
@@ -1241,7 +1343,12 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     handle: ActiveTaskHandle,
     output: Partial<TContext> | void,
   ): void => {
-    if (handle.cancelled || activeTask !== handle) {
+    if (
+      handle.cancelled ||
+      handle.abortController.signal.aborted ||
+      stateEpoch !== handle.entryEpoch ||
+      activeTask !== handle
+    ) {
       return;
     }
     activeTask = null;
@@ -1256,7 +1363,12 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
   };
 
   const handleTaskFailure = (handle: ActiveTaskHandle, err: unknown): void => {
-    if (handle.cancelled || activeTask !== handle) {
+    if (
+      handle.cancelled ||
+      handle.abortController.signal.aborted ||
+      stateEpoch !== handle.entryEpoch ||
+      activeTask !== handle
+    ) {
       return;
     }
     activeTask = null;
@@ -1310,6 +1422,7 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     const abortController = new AbortController();
     const handle: ActiveTaskHandle = {
       stateName,
+      entryEpoch: stateEpoch,
       cancelled: false,
       abortController,
       teardown: null,
@@ -1581,33 +1694,69 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
       }
     };
 
+    const childSettled = new Array<boolean>(combNode.machines.length).fill(false);
+    const completedOutputs: Record<string, unknown> = {};
+    const orderedOutputs: unknown[] = new Array(combNode.machines.length);
+
     const evaluateCombinatorProgress = (idx: number) => {
       if (combState.settled || activeCombinator !== combState) {
         return;
       }
       combinatorTickSig.update((n) => n + 1);
       const child = children[idx];
-      if (!child || !child.isDone()) {
+      const childFSM = combNode.machines[idx];
+      if (!child || !child.isDone() || childSettled[idx]) {
         return;
       }
+      childSettled[idx] = true;
       const outcome = child.finalOutcome() ?? 'DONE';
       const childPayload = extractChildTerminalPayload(child);
 
+      // Immediately tear down the finished child so its timers and watchers stop!
+      child.destroy?.();
+
       if (combNode.__type === 'all') {
-        if (outcome === 'ERROR') {
+        completedOutputs[childFSM.id] = childPayload;
+        orderedOutputs[idx] = childPayload;
+
+        // Check if parent has a specific row for this child `[childFSM, outcome, ...]`
+        if (fsm.hasTransitionFor(childFSM.id, outcome)) {
+          dispatchInternal(
+            outcome,
+            childPayload,
+            true,
+            false,
+            childFSM.id,
+          );
+          if (combState.settled || activeCombinator !== combState) {
+            return;
+          }
+        } else if (outcome === 'ERROR') {
           settleCombinator('ERROR', childPayload);
           return;
         }
+
         if (
           children.length === combNode.machines.length &&
-          children.every((c) => c.isDone())
+          childSettled.every(Boolean)
         ) {
-          const allOutputs = children.map((c) =>
-            extractChildTerminalPayload(c),
-          );
-          settleCombinator('ALL_DONE', allOutputs);
+          const combId = combNode.id;
+          if (
+            fsm.hasTransitionFor(combId, 'ALL_DONE') ||
+            fsm.hasTransitionFor('anyState', 'ALL_DONE')
+          ) {
+            settleCombinator('ALL_DONE', { ...completedOutputs });
+          } else {
+            settleCombinator('DONE', orderedOutputs);
+          }
         }
       } else if (combNode.__type === 'race') {
+        if (fsm.hasTransitionFor(childFSM.id, outcome)) {
+          combState.settled = true;
+          destroyActiveCombinator();
+          dispatchInternal(outcome, childPayload, true, true, childFSM.id);
+          return;
+        }
         settleCombinator(outcome, childPayload);
       } else if (combNode.__type === 'any') {
         if (outcome === 'ERROR') {
@@ -1617,6 +1766,12 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
             settleCombinator('ERROR', failedErrors);
           }
         } else {
+          if (fsm.hasTransitionFor(childFSM.id, outcome)) {
+            combState.settled = true;
+            destroyActiveCombinator();
+            dispatchInternal(outcome, childPayload, true, true, childFSM.id);
+            return;
+          }
           settleCombinator(outcome, childPayload);
         }
       }
@@ -1655,10 +1810,19 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
             return;
           }
           if (
+            fsm.hasTransitionFor( childFSM.id, emitted.type) ||
             fsm.hasTransitionFor(combNode.id, emitted.type) ||
             fsm.hasTransitionFor('anyState', emitted.type)
           ) {
-            dispatchInternal(emitted.type, emitted.payload, true, false);
+            dispatchInternal(
+              emitted.type,
+              emitted.payload,
+              true,
+              false,
+              fsm.hasTransitionFor(childFSM.id, emitted.type)
+                ? childFSM.id
+                : undefined,
+            );
           }
         },
       );
@@ -1699,12 +1863,14 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     payload: unknown;
     fromChildOutput: boolean;
     fromChildTerminal: boolean;
+    sourceStateOverride?: string;
   }> = [];
   let isProcessing = false;
   const debugLog = resolveDebugLogger(effectiveConfig?.debug);
 
   const scheduleStateTimers = (stateName: string): void => {
     clearActiveTimers();
+    const entryEpoch = stateEpoch;
     const scheduledIds = new Set<string>();
     for (const row of fsm.transitions) {
       const [from, via] = row as unknown as readonly [unknown, unknown];
@@ -1716,7 +1882,13 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
       ) {
         scheduledIds.add(via.id);
         const timerId = setTimeout(() => {
-          dispatchInternal(via.id, undefined, false, false);
+          if (
+            !isDestroyed &&
+            stateEpoch === entryEpoch &&
+            untracked(() => fsmStateSig()) === stateName
+          ) {
+            dispatchInternal(via.id, undefined, false, false);
+          }
         }, via.ms);
         activeTimers.push(timerId);
       }
@@ -1728,8 +1900,10 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     payload?: unknown,
     fromChildOutput = false,
     fromChildTerminal = false,
+    sourceStateOverride?: string,
   ): void => {
     const currentState = untracked(() => fsmStateSig());
+    const effectiveFromState = sourceStateOverride ?? currentState;
     const currentCtx = getEffectiveContext();
 
     // 1. Handle subMachine delegation vs parent group-interrupt (Cooperative Cancel vs Hard Kill!)
@@ -1816,9 +1990,9 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
       }
     }
 
-    // 2. Evaluate parent transition (Pass 1: specific [currentState, event, ...], Pass 2: [anyState(), event, ...])
+    // 2. Evaluate parent transition (Pass 1: specific [effectiveFromState, event, ...], Pass 2: [anyState(), event, ...])
     const evaluation = fsm.evaluate(
-      currentState,
+      effectiveFromState,
       event,
       payload,
       currentCtx,
@@ -1870,6 +2044,8 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
       }
 
       onExitHooks[currentState]?.(getEffectiveContext());
+      stateEpoch++;
+      stateEpochSig.set(stateEpoch);
       fsmStateSig.set(nextState);
     }
 
@@ -1883,6 +2059,9 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     }
 
     const freshCtx = getEffectiveContext();
+    const resolvedInputMapped = evaluation.inputSelector
+      ? evaluation.inputSelector(freshCtx, payload)
+      : evaluation.inputMapped;
     const resolvedEmittedOutput = evaluation.emittedOutput
       ? {
           type: evaluation.emittedOutput.type,
@@ -1908,8 +2087,17 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     if (evaluation.stayed) {
       const activeEach = fsm.eachNodes.get(currentState);
       if (activeEach) {
-        syncEachInstances(activeEach, evaluation.inputMapped);
+        syncEachInstances(activeEach, resolvedInputMapped);
       }
+      effectiveConfig?.inspect?.({
+        machineId: fsm.id,
+        from: currentState,
+        via: event,
+        to: currentState,
+        payload,
+        nextContext: getEffectiveContext(),
+        timestamp: Date.now(),
+      });
       onNotifyParent?.();
       if (resolvedEmittedOutput) {
         onEmitOutput?.(resolvedEmittedOutput);
@@ -1932,7 +2120,7 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     if (evaluation.enteredSubMachine) {
       enterSubMachineNode(
         evaluation.enteredSubMachine,
-        evaluation.inputMapped,
+        resolvedInputMapped,
       );
     } else {
       fsmSubStateSig.set(null);
@@ -1942,12 +2130,12 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     if (evaluation.enteredCombinator) {
       enterCombinatorNode(
         evaluation.enteredCombinator,
-        evaluation.inputMapped,
+        resolvedInputMapped,
       );
     }
 
     if (evaluation.enteredEach) {
-      syncEachInstances(evaluation.enteredEach, evaluation.inputMapped);
+      syncEachInstances(evaluation.enteredEach, resolvedInputMapped);
     }
 
     onEnterHooks[nextState]?.(getEffectiveContext());
@@ -1956,6 +2144,29 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     if (evaluation.isAwaiting) {
       startAwaitingTaskIfNeeded(nextState);
     }
+
+    if (
+      evaluation.finalOutcome === null &&
+      (fsm.hasTransitionFor(nextState, '__always__') ||
+        fsm.hasTransitionFor('*', '__always__'))
+    ) {
+      eventQueue.unshift({
+        event: '__always__',
+        payload: undefined,
+        fromChildOutput: false,
+        fromChildTerminal: false,
+      });
+    }
+
+    effectiveConfig?.inspect?.({
+      machineId: fsm.id,
+      from: currentState,
+      via: event,
+      to: nextState,
+      payload,
+      nextContext: getEffectiveContext(),
+      timestamp: Date.now(),
+    });
 
     onNotifyParent?.();
 
@@ -1969,23 +2180,41 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     payload?: unknown,
     fromChildOutput = false,
     fromChildTerminal = false,
+    sourceStateOverride?: string,
   ): void => {
     if (isDestroyed) {
       return;
     }
-    eventQueue.push({ event, payload, fromChildOutput, fromChildTerminal });
+    eventQueue.push({
+      event,
+      payload,
+      fromChildOutput,
+      fromChildTerminal,
+      sourceStateOverride,
+    });
     if (isProcessing) {
       return;
     }
     isProcessing = true;
     try {
+      let syncMicrosteps = 0;
       while (eventQueue.length > 0) {
+        if (syncMicrosteps >= MAX_SYNC_MICROSTEPS) {
+          eventQueue.length = 0;
+          throw new MatrixFsmInfiniteLoopError(
+            fsm.id,
+            untracked(() => fsmStateSig()),
+            MAX_SYNC_MICROSTEPS,
+          );
+        }
+        syncMicrosteps++;
         const next = eventQueue.shift()!;
         processOneEvent(
           next.event,
           next.payload,
           next.fromChildOutput,
           next.fromChildTerminal,
+          next.sourceStateOverride,
         );
       }
     } finally {
@@ -2025,6 +2254,88 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     applyContextPatch(patch);
   };
 
+  const getSnapshot = (): MachineSnapshot<TFSM> => {
+    flushPendingSignalWatches();
+    const children: Record<string, MachineSnapshot<any>> = {};
+    if (activeSubNode && activeSubRef && typeof activeSubNode.getSnapshot === 'function') {
+      children[activeSubRef.id] = activeSubNode.getSnapshot();
+    }
+    if (activeCombinator && !activeCombinator.settled) {
+      activeCombinator.children.forEach((child, idx) => {
+        const childFSM = activeCombinator!.node.machines[idx];
+        if (child && childFSM && typeof child.getSnapshot === 'function') {
+          children[childFSM.id] = child.getSnapshot();
+        }
+      });
+    }
+    return {
+      state: untracked(() => fsmStateSig()) as ExtractStates<TFSM>,
+      context: { ...(getEffectiveContext() as Record<string, any>) } as Readonly<
+        ExtractContext<TFSM>
+      >,
+      stateEpoch,
+      ...(Object.keys(children).length > 0 ? { children } : {}),
+    };
+  };
+
+  const restoreSnapshot = (snapshot: MachineSnapshot<TFSM>): void => {
+    isDestroyed = false;
+    clearActiveTimers();
+    cancelActiveTask();
+    destroyActiveSubNode();
+    destroyActiveCombinator();
+    destroyAllEachPools();
+    eventQueue.length = 0;
+    doneOutcomeSig.set(null);
+    finalPayloadSig.set(undefined);
+    hasFinalPayloadSelectorSig.set(false);
+    applyContextPatch(snapshot.context as Partial<TContext>);
+    stateEpoch = Math.max(stateEpoch + 1, snapshot.stateEpoch);
+    stateEpochSig.set(stateEpoch);
+    const restoredState = snapshot.state as TState;
+    fsmStateSig.set(restoredState);
+    const subRef = fsm.subMachines.get(restoredState);
+    if (subRef) {
+      enterSubMachineNode(
+        subRef,
+        snapshot.context as Record<string, unknown>,
+      );
+      const childSnap = snapshot.children?.[subRef.id];
+      if (
+        childSnap &&
+        activeSubNode &&
+        typeof activeSubNode.restoreSnapshot === 'function'
+      ) {
+        activeSubNode.restoreSnapshot(childSnap);
+        syncSubNodeSignals();
+      }
+    } else {
+      fsmSubStateSig.set(null);
+      fsmSubContextSig.set(null);
+    }
+    const combNode = fsm.combinatorNodes?.get(restoredState);
+    if (combNode) {
+      enterCombinatorNode(
+        combNode,
+        snapshot.context as Record<string, unknown>,
+      );
+    }
+    const eachNode = fsm.eachNodes.get(restoredState);
+    if (eachNode) {
+      syncEachInstances(eachNode);
+    }
+    scheduleStateTimers(restoredState);
+    if (fsm.awaitingStates.has(restoredState)) {
+      startAwaitingTaskIfNeeded(restoredState);
+    }
+    if (
+      fsm.hasTransitionFor(restoredState, '__always__') ||
+      fsm.hasTransitionFor('*', '__always__')
+    ) {
+      dispatchInternal('__always__', undefined, false, false);
+    }
+  };
+
   const reset = (initialOverrideArg?: Partial<TContext>): void => {
     isDestroyed = false;
     clearActiveTimers();
@@ -2035,9 +2346,17 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     doneOutcomeSig.set(null);
     finalPayloadSig.set(undefined);
     hasFinalPayloadSelectorSig.set(false);
+    const nextSyncedPatch: Record<string, unknown> = {};
+    for (const [k, sig] of Object.entries(syncedSignals)) {
+      if (isSignal(sig)) {
+        nextSyncedPatch[k] = untracked(() => sig());
+      }
+    }
     const nextInit = {
       ...(fsm.context ?? {}),
       ...initialStoreStateSnapshot,
+      ...initialSyncedPatch,
+      ...nextSyncedPatch,
       ...(initialOverrideArg ?? {}),
     } as TContext;
     rawContextSig.set(nextInit);
@@ -2046,6 +2365,8 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     } else if (storeStateKeys.size > 0) {
       const storeResetPatch: Record<string, unknown> = {
         ...initialStoreStateSnapshot,
+        ...initialSyncedPatch,
+        ...nextSyncedPatch,
       };
       if (initialOverrideArg && typeof initialOverrideArg === 'object') {
         for (const [k, v] of Object.entries(initialOverrideArg)) {
@@ -2056,11 +2377,19 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
       }
       patchState(effectiveStoreSource as any, storeResetPatch);
     }
+    stateEpoch++;
+    stateEpochSig.set(stateEpoch);
     fsmStateSig.set(fsm.initial as TState);
     childMachinesSig.set({});
     scheduleStateTimers(fsm.initial);
     if (fsm.awaitingStates.has(fsm.initial)) {
       startAwaitingTaskIfNeeded(fsm.initial);
+    }
+    if (
+      fsm.hasTransitionFor(fsm.initial, '__always__') ||
+      fsm.hasTransitionFor('*', '__always__')
+    ) {
+      dispatchInternal('__always__', undefined, false, false);
     }
   };
 
@@ -2069,6 +2398,102 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
   // If initial state itself is an awaiting node, initialize it
   if (fsm.awaitingStates.has(fsm.initial)) {
     startAwaitingTaskIfNeeded(fsm.initial);
+  }
+
+  if (
+    fsm.hasTransitionFor(fsm.initial, '__always__') ||
+    fsm.hasTransitionFor('*', '__always__')
+  ) {
+    dispatchInternal('__always__', undefined, false, false);
+  }
+
+  // Register reactive watchers for `syncContext` signals so `store.<key>()` stays in sync!
+  for (const [key, sig] of Object.entries(syncedSignals)) {
+    if (!isSignal(sig)) {
+      continue;
+    }
+    let isFirstSyncRun = true;
+    let prevSyncVal: unknown = undefined;
+    const syncWatcher = createWatch(
+      () => {
+        const val = sig();
+        if (isFirstSyncRun) {
+          isFirstSyncRun = false;
+          prevSyncVal = val;
+          return;
+        }
+        if (Object.is(val, prevSyncVal)) {
+          return;
+        }
+        prevSyncVal = val;
+        untracked(() => {
+          applyContextPatch({ [key]: val } as Partial<TContext>);
+        });
+      },
+      (watch) => {
+        pendingWatchRuns.add(watch);
+        queueMicrotask(() => {
+          flushPendingSignalWatches();
+        });
+      },
+      true,
+    );
+    activeWatchers.push(syncWatcher);
+    syncWatcher.run();
+  }
+
+  // Also support reactive selector functions in `syncContext` (e.g. `syncContext: (ext = inject(ExternalStore)) => ({ syncedProp: ext.prop() })`)
+  const syncContextOption = effectiveConfig?.syncContext;
+  if (
+    typeof syncContextOption === 'function' &&
+    Object.keys(initialSyncedPatch).some((k) => !(k in syncedSignals))
+  ) {
+    let isFirstSelectorRun = true;
+    let prevSelectorValues: Record<string, unknown> = { ...initialSyncedPatch };
+    const selectorWatcher = createWatch(
+      () => {
+        const nextObj = runWithDI(() =>
+          (syncContextOption as () => Record<string, unknown>)(),
+        );
+        if (!nextObj || typeof nextObj !== 'object') {
+          return;
+        }
+        const currentValues: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(nextObj)) {
+          if (!isSignal(v)) {
+            currentValues[k] = v;
+          }
+        }
+        if (isFirstSelectorRun) {
+          isFirstSelectorRun = false;
+          prevSelectorValues = currentValues;
+          return;
+        }
+        const diffPatch: Record<string, unknown> = {};
+        let hasChanged = false;
+        for (const [k, v] of Object.entries(currentValues)) {
+          if (!Object.is(v, prevSelectorValues[k])) {
+            diffPatch[k] = v;
+            hasChanged = true;
+          }
+        }
+        prevSelectorValues = currentValues;
+        if (hasChanged) {
+          untracked(() => {
+            applyContextPatch(diffPatch as Partial<TContext>);
+          });
+        }
+      },
+      (watch) => {
+        pendingWatchRuns.add(watch);
+        queueMicrotask(() => {
+          flushPendingSignalWatches();
+        });
+      },
+      true,
+    );
+    activeWatchers.push(selectorWatcher);
+    selectorWatcher.run();
   }
 
   // Register declarative `on: [whenSignal(...)]` cross-store signal bridges
@@ -2137,7 +2562,9 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
   const fsmContextFlushed = wrapSignalWithWatchFlush(fsmContext);
 
   return {
+    state: fsmStateReadonly,
     fsmState: fsmStateReadonly,
+    stateEpoch: stateEpochSig.asReadonly(),
     fsmSubState: wrapSignalWithWatchFlush(fsmSubStateSig.asReadonly()),
     fsmSubContext: wrapSignalWithWatchFlush(fsmSubContextSig.asReadonly()),
     fsmContext: fsmContextFlushed,
@@ -2154,6 +2581,8 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     }) as SendFn<TFSM>,
     sendToChild,
     patchContext,
+    getSnapshot,
+    restoreSnapshot,
     reset,
     destroy,
     __flushPendingWatches: flushPendingSignalWatches,
@@ -2358,6 +2787,19 @@ export type ExtractShallowAwaitingFromTransitions<
       : never
   : never;
 
+type HasDeclaredVoidOutput<TOutputs> =
+  [0] extends [1 & TOutputs]
+    ? false
+    : TOutputs extends object
+      ? string extends keyof TOutputs
+        ? false
+        : keyof TOutputs extends never
+          ? false
+          : [VoidOutputKeys<TOutputs>] extends [never]
+            ? false
+            : true
+      : false;
+
 export type MachineFeatureConfig<
   TId extends string,
   TInitial extends TDeclaredStates,
@@ -2372,7 +2814,8 @@ export type MachineFeatureConfig<
     Extract<keyof TEvents, string>,
     TDeclaredStates,
     any,
-    TOutputs
+    TOutputs,
+    HasDeclaredVoidOutput<TOutputs> extends false ? TInputs & TState : any
   >[],
 > = {
   readonly id: TId;
@@ -2383,7 +2826,8 @@ export type MachineFeatureConfig<
       NoInfer<TInputs & TState>,
       Extract<keyof TEvents, string>,
       NoInfer<TMethods>,
-      TOutputs
+      TOutputs,
+      TEvents
     >;
   readonly state?: TState;
   readonly syncContext?:
@@ -2403,6 +2847,7 @@ export type MachineFeatureConfig<
     | TMethods;
   readonly taskAdapter?: CustomTaskAdapter;
   readonly debug?: DebugLogger;
+  readonly inspect?: InspectCallback<any>;
   readonly onEnter?:
     | (() => Partial<
         Record<
@@ -2494,6 +2939,10 @@ export interface MachineFeatureDefinition<
   > {
   readonly __isMachineFeature: true;
   readonly state?: TContext;
+  readonly syncContext?:
+    | (() => SyncContextMap<TContext>)
+    | SyncContextMap<TContext>
+    | (() => Partial<TContext>);
   readonly methods?: ((store: any) => TMethods) | TMethods;
   readonly tasks?: any;
   readonly on?: any;
@@ -2515,7 +2964,10 @@ export function createMachineFeature<
     Extract<keyof FeatureEvents<TContract>, string>,
     FeatureStates<TContract>,
     any,
-    FeatureOutputs<TContract>
+    FeatureOutputs<TContract>,
+    HasDeclaredVoidOutput<FeatureOutputs<TContract>> extends false
+      ? FeatureInputs<TContract> & TState
+      : any
   >[],
   TState extends object = EmptyObject,
   TMethods extends Record<string, any> = Record<string, any>,
@@ -2553,6 +3005,7 @@ export function createMachineFeature<
       ...baseFsm,
       __isMachineFeature: true as const,
       state: config.state,
+      syncContext: config.syncContext,
       methods: config.methods,
       tasks: config.tasks,
       on: config.on,
@@ -2566,6 +3019,7 @@ export function createMachineFeature<
       tasks: config.tasks,
       taskAdapter: config.taskAdapter,
       debug: config.debug,
+      inspect: config.inspect,
       onEnter: config.onEnter,
       onExit: config.onExit,
     };
@@ -2597,13 +3051,20 @@ export function createMachineFeature<
 export interface FeatureTesterOptions<TFSM extends AnyFSMDefinition> {
   readonly inputs?: Partial<ExtractInput<TFSM>> & Record<string, any>;
   readonly stateOverride?: Partial<ExtractContext<TFSM>> & Record<string, any>;
+  readonly syncedContext?: Partial<ExtractContext<TFSM>> & Record<string, any>;
+  readonly injector?: Injector;
   readonly debug?: DebugLogger;
+  readonly inspect?: InspectCallback<TFSM>;
   readonly tasks?: {
     readonly [K in ExtractOwnAwaitingNodes<TFSM>]?: TaskHandler<
       ExtractContext<TFSM>,
       ExtractContext<TFSM>
     >;
   } & Record<string, TaskHandler<ExtractContext<TFSM>, ExtractContext<TFSM>>>;
+  readonly actorTasks?: Record<
+    string,
+    Record<string, TaskHandler<any, any>> | undefined
+  >;
 }
 
 export interface FeatureTester<TFSM extends AnyFSMDefinition> {
@@ -2620,6 +3081,8 @@ export interface FeatureTester<TFSM extends AnyFSMDefinition> {
   }>;
   readonly flushTasks: () => Promise<void>;
   readonly patchContext: (patch: Partial<ExtractContext<TFSM>>) => void;
+  readonly getSnapshot: () => MachineSnapshot<TFSM>;
+  readonly restoreSnapshot: (snapshot: MachineSnapshot<TFSM>) => void;
   readonly reset: (initialOverride?: Partial<ExtractContext<TFSM>>) => void;
   readonly destroy: () => void;
 }
@@ -2640,24 +3103,47 @@ export function createFeatureTester<TFSM extends AnyFSMDefinition>(
       ? baseConfig.tasks
       : {})) as Record<string, TaskHandler<any> | undefined>;
 
+  const wrapTaskHandler = (handler: TaskHandler<any>): TaskHandler<any> => {
+    return (ctx, signal) => {
+      const res = handler(ctx, signal);
+      if (res && typeof (res as Promise<unknown>).then === 'function') {
+        const tracked = (res as Promise<unknown>).finally(() => {
+          inFlightPromises.delete(tracked);
+        });
+        inFlightPromises.add(tracked);
+      }
+      return res;
+    };
+  };
+
   const wrappedTasks: Record<string, TaskHandler<any>> = {};
   for (const [taskName, handler] of Object.entries(rawMockTasks)) {
     if (typeof handler === 'function') {
-      wrappedTasks[taskName] = (ctx, signal) => {
-        const res = handler(ctx, signal);
-        if (res && typeof (res as Promise<unknown>).then === 'function') {
-          const tracked = (res as Promise<unknown>).finally(() => {
-            inFlightPromises.delete(tracked);
-          });
-          inFlightPromises.add(tracked);
+      wrappedTasks[taskName] = wrapTaskHandler(handler);
+    }
+  }
+
+  const wrappedActorTasks: Record<
+    string,
+    Record<string, TaskHandler<any> | undefined>
+  > = {};
+  if (options?.actorTasks) {
+    for (const [actorId, actorTaskMap] of Object.entries(options.actorTasks)) {
+      if (actorTaskMap && typeof actorTaskMap === 'object') {
+        const wrappedMap: Record<string, TaskHandler<any>> = {};
+        for (const [taskName, handler] of Object.entries(actorTaskMap)) {
+          if (typeof handler === 'function') {
+            wrappedMap[taskName] = wrapTaskHandler(handler);
+          }
         }
-        return res;
-      };
+        wrappedActorTasks[actorId] = wrappedMap;
+      }
     }
   }
 
   const initialCombined: Record<string, unknown> = {
     ...(options?.inputs ?? {}),
+    ...(options?.syncedContext ?? {}),
     ...(options?.stateOverride ?? {}),
   };
 
@@ -2670,13 +3156,14 @@ export function createFeatureTester<TFSM extends AnyFSMDefinition>(
   const testerConfig: StateMachineFeatureConfig<any, any> = {
     ...baseConfig,
     debug: options?.debug ?? baseConfig?.debug,
+    inspect: options?.inspect ?? baseConfig?.inspect,
     tasks: wrappedTasks as any,
   };
 
   const runner = createScopedMachineRunner(
     feature,
     testerConfig,
-    null,
+    options?.injector ?? null,
     initialCombined,
     undefined,
     () => {
@@ -2696,6 +3183,7 @@ export function createFeatureTester<TFSM extends AnyFSMDefinition>(
     (output) => {
       emittedOutputsList.push(output);
     },
+    wrappedActorTasks,
   );
 
   const flushTasks = async (): Promise<void> => {
@@ -2720,6 +3208,8 @@ export function createFeatureTester<TFSM extends AnyFSMDefinition>(
     emittedOutputs: () => [...emittedOutputsList],
     flushTasks,
     patchContext: runner.patchContext,
+    getSnapshot: runner.getSnapshot,
+    restoreSnapshot: runner.restoreSnapshot,
     reset: (override) => {
       emittedOutputsList.length = 0;
       recordedTerminal = false;

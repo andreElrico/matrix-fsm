@@ -4,6 +4,7 @@
 
 import {
   isAfterNode,
+  isAlwaysNode,
   isAnyStateNode,
   isAwaitingNode,
   isCombinatorNode,
@@ -60,6 +61,9 @@ export function resolveSourceId(source: unknown): string {
   if (isAnyStateNode(source)) {
     return '*';
   }
+  if (isAwaitingNode(source)) {
+    return source.state;
+  }
   if (isSubMachineRef(source) || isFSMDefinition(source)) {
     return source.id;
   }
@@ -70,10 +74,17 @@ export function resolveSourceId(source: unknown): string {
 }
 
 export function resolveViaId(via: unknown): string {
-  if (isAfterNode(via)) {
+  if (isAfterNode(via) || isAlwaysNode(via)) {
     return via.id;
   }
   return String(via);
+}
+
+export function resolveViaMatches(via: unknown, event: string): boolean {
+  if (Array.isArray(via)) {
+    return via.some((v) => resolveViaId(v) === event);
+  }
+  return resolveViaId(via) === event;
 }
 
 export function resolveTargetId(
@@ -208,6 +219,9 @@ function buildFSM<
     const fromSub = toSubMachineRef(from);
     if (isAnyStateNode(from)) {
       // Wildcard source in Column 1; do not add to concrete states set
+    } else if (isAwaitingNode(from)) {
+      states.add(from.state);
+      awaitingStates.add(from.state);
     } else if (fromSub) {
       states.add(fromSub.id);
       subMachines.set(fromSub.id, fromSub);
@@ -249,7 +263,7 @@ function buildFSM<
   const hasTransitionFor = (state: string, event: string): boolean => {
     for (const row of config.transitions) {
       const [from, via] = row as unknown as readonly [unknown, unknown];
-      if (resolveSourceId(from) === state && resolveViaId(via) === event) {
+      if (resolveSourceId(from) === state && resolveViaMatches(via, event)) {
         return true;
       }
     }
@@ -278,9 +292,8 @@ function buildFSM<
       }
 
       const fromId = resolveSourceId(from);
-      const viaId = resolveViaId(via);
 
-      if ((!matchWildcard && fromId !== currentState) || viaId !== event) {
+      if ((!matchWildcard && fromId !== currentState) || !resolveViaMatches(via, event)) {
         continue;
       }
 
@@ -291,8 +304,15 @@ function buildFSM<
       // First matching row wins!
       const nextContext = { ...currentContext } as EffectiveContext;
 
-      const inputMapped = options?.input
-        ? (options.input(nextContext, payload) as Record<string, unknown>)
+      const inputSelector =
+        typeof options?.input === 'function'
+          ? (options.input as (
+              ctx: Readonly<EffectiveContext>,
+              eventPayload: any,
+            ) => Record<string, unknown>)
+          : null;
+      const inputMapped = inputSelector
+        ? inputSelector(nextContext, payload)
         : null;
 
       let outputType: string | null = null;
@@ -356,6 +376,7 @@ function buildFSM<
         nextState: effectiveNextState,
         nextContext,
         callSelector: options?.call ?? null,
+        inputSelector,
         inputMapped,
         stayed: resolved.stayed,
         isAwaiting: resolved.stayed
@@ -414,6 +435,7 @@ function buildFSM<
       nextState: currentState as StateUnion,
       nextContext: { ...currentContext } as EffectiveContext,
       callSelector: null,
+      inputSelector: null,
       inputMapped: null,
       stayed: false,
       isAwaiting: awaitingStates.has(currentState),
@@ -475,7 +497,8 @@ export function createFSM<
         ContractContext<TContract>,
         Extract<keyof ContractEvents<TContract>, string>,
         ContractMethods<TContract>,
-        ContractOutput<TContract>
+        ContractOutput<TContract>,
+        ContractEvents<TContract>
       >,
     ContractStates<TContract>,
     ContractMethods<TContract>

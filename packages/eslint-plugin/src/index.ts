@@ -3,6 +3,8 @@ import { awaitingNamingConvention } from './lib/rules/awaiting-naming-convention
 import { completeExtractedGroups } from './lib/rules/complete-extracted-groups.js';
 import { groupContiguousTransitions } from './lib/rules/group-contiguous-transitions.js';
 import { noConflictingFinalOutput } from './lib/rules/no-conflicting-final-output.js';
+import { noDuplicateCombinatorActors } from './lib/rules/no-duplicate-combinator-actors.js';
+import { noShadowedTransitions } from './lib/rules/no-shadowed-transitions.js';
 import { noUnreachableStates } from './lib/rules/no-unreachable-states.js';
 import { noUnreachableTransitions } from './lib/rules/no-unreachable-transitions.js';
 import { pureMachineDefinition } from './lib/rules/pure-machine-definition.js';
@@ -15,6 +17,8 @@ export const rules = {
   'group-contiguous-transitions': groupContiguousTransitions,
   'require-fallback-transition': requireFallbackTransition,
   'no-unreachable-transitions': noUnreachableTransitions,
+  'no-shadowed-transitions': noShadowedTransitions,
+  'no-duplicate-combinator-actors': noDuplicateCombinatorActors,
   'require-awaiting-handlers': requireAwaitingHandlers,
   'awaiting-naming-convention': awaitingNamingConvention,
   'complete-extracted-groups': completeExtractedGroups,
@@ -42,6 +46,8 @@ export const configs = {
       '@matrix-fsm/group-contiguous-transitions': 'error',
       '@matrix-fsm/require-fallback-transition': 'error',
       '@matrix-fsm/no-unreachable-transitions': 'error',
+      '@matrix-fsm/no-shadowed-transitions': 'error',
+      '@matrix-fsm/no-duplicate-combinator-actors': 'error',
       '@matrix-fsm/require-awaiting-handlers': 'error',
       '@matrix-fsm/awaiting-naming-convention': 'error',
       '@matrix-fsm/complete-extracted-groups': 'error',
@@ -61,6 +67,8 @@ export {
   completeExtractedGroups,
   groupContiguousTransitions,
   noConflictingFinalOutput,
+  noDuplicateCombinatorActors,
+  noShadowedTransitions,
   noUnreachableStates,
   noUnreachableTransitions,
   pureMachineDefinition,

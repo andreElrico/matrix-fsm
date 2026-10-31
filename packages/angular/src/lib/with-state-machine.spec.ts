@@ -1,4 +1,4 @@
-import { signal } from '@angular/core';
+import { inject, InjectionToken, signal } from '@angular/core';
 import {
   patchState,
   signalStore,
@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   after,
   all,
+  always,
   any,
   anyState,
   awaiting,
@@ -18,6 +19,8 @@ import {
   createMachineFeature,
   each,
   finalState,
+  getShortestPaths,
+  MatrixFsmInfiniteLoopError,
   provideStateMachine,
   race,
   stay,
@@ -66,11 +69,11 @@ type AuthEvents = {
   NetworkTimeoutError: { message: string };
 };
 
-interface AuthMethods {
+type AuthMethods = {
   _setEmail(payload: { email: string }): void;
   _setInvalidEmail(): void;
   _setError(err: Error): void;
-}
+};
 
 const initialAuthState: AuthContext = {
   credentials: { email: '', password: '' },
@@ -412,9 +415,9 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       brewed: boolean;
       error: string | null;
     }
-    interface SubMethods {
+    type SubMethods = {
       _setBrewError(err: Error): void;
-    }
+    };
     const subBarista = createFSM<{
       events: { START_BREWING: void };
       states: 'ticketQueued' | 'brewingCoffee' | 'maintenance';
@@ -435,10 +438,10 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       paid: boolean;
       cupReady: boolean;
     }
-    interface ShopMethods {
+    type ShopMethods = {
       _markPaid(): void;
       _onCupReady(output: SubCtx): void;
-    }
+    };
     const shopFSM = createFSM<{
       events: { ORDER: void; PAY: void; CANCEL: void };
       states: 'browsing' | 'checkingLoyalty' | 'awaitingPayment' | 'ready';
@@ -493,15 +496,15 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
           _markPaid: () => undefined,
           _onCupReady: () => undefined,
         })),
-        // @ts-expect-error - Own awaiting state 'checkingLoyalty' is missing in tasks
         withStateMachine(shopFSM, {
+          // @ts-expect-error - Own awaiting state 'checkingLoyalty' is missing in tasks
           tasks: () => ({}),
         }),
       );
 
+      // @ts-expect-error - Own method '_onCupReady' is missing in store methods
       signalStore(
         withState<ShopCtx>({ drinkOrder: 'Flat White', paid: false, cupReady: false }),
-        // @ts-expect-error - Own method '_onCupReady' is missing in store methods
         withMethods(() => ({
           _markPaid: () => undefined,
         })),
@@ -512,13 +515,13 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         }),
       );
 
+      // @ts-expect-error - '_setBrewError' is omitted from both withMethods and config.methods
       signalStore(
         withState<SubCtx>({
           selectedDrink: null,
           brewed: false,
           error: null,
         }),
-        // @ts-expect-error - '_setBrewError' is omitted from both withMethods and config.methods
         withStateMachine(subBarista, {
           tasks: () => ({
             brewingCoffee: async () => ({ brewed: true }),
@@ -527,7 +530,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       );
 
       const syncOnlyWithMethodFSM = createFSM<{
-        events: { RESET_ERR: void };
+        events: { RESET_ERR: Error };
         states: 'idle';
         methods: SubMethods;
       }>()({
@@ -538,9 +541,9 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         ],
       });
 
+      // @ts-expect-error - '_setBrewError' is missing when tasks are empty and config is omitted
       signalStore(
         withState({ error: null as string | null }),
-        // @ts-expect-error - '_setBrewError' is missing when tasks are empty and config is omitted
         withStateMachine(syncOnlyWithMethodFSM),
       );
     }
@@ -835,13 +838,13 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       } | null;
     }
 
-    interface ShopMethods {
+    type ShopMethods = {
       _onCoffeeReady(output: {
         readonly drinkName: string;
         readonly temperatureCelsius: number;
       }): void;
       _onBrewProgress(output: { readonly percent: number }): void;
-    }
+    };
 
     // Compile-time checks for `createMachineFeature`:
     if (false as boolean) {
@@ -866,11 +869,11 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       }>()({
         id: 'missingOutputCompileTest',
         initial: 'browsing',
-        // @ts-expect-error - Missing required transition rows for sub-machine outputs
         transitions: [
           [
             'browsing',
             'PAY',
+            // @ts-expect-error - Missing required transition rows for sub-machine outputs
             baristaFeature,
             { input: (ctx) => ({ selectedDrink: ctx.selectedDrink! }) },
           ],
@@ -1905,6 +1908,802 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       vi.advanceTimersByTime(4000);
       expect(subTimerFired).toBe(false);
       expect(parentStore.fsmState()).toBe('idle');
+    });
+  });
+
+  describe('Cycle 18: 8-Phase Microstep Pipeline, Live Context Sync (getState) & Zero-Tick Child Safety', () => {
+    it('executes call (patchState) BEFORE input selector when entering a sub-actor in the same transition row', () => {
+      const baristaSub = createMachineFeature<{
+        inputs: { readonly selectedDrink: string };
+        events: { FINISH: void };
+        outputs: { COFFEE_READY: { readonly servedDrink: string } };
+        states: 'brewing';
+      }>()({
+        id: 'barista',
+        initial: 'brewing',
+        transitions: [
+          [
+            'brewing',
+            'FINISH',
+            finalState(),
+            {
+              output: [
+                'COFFEE_READY',
+                (ctx) => ({ servedDrink: ctx.selectedDrink }),
+              ],
+            },
+          ],
+        ],
+      });
+
+      const shopFeature = createMachineFeature<{
+        events: { QUICK_ORDER: { readonly drink: string } };
+        states: 'idle' | 'ready';
+      }>()({
+        id: 'shopQuickOrder',
+        initial: 'idle',
+        transitions: [
+          [
+            'idle',
+            'QUICK_ORDER',
+            baristaSub,
+            {
+              call: (m) => m._selectDrink,
+              input: (ctx) => ({ selectedDrink: ctx.selectedDrink! }),
+            },
+          ],
+          [baristaSub, 'COFFEE_READY', 'ready', { call: (m) => m._onReady }],
+        ],
+        state: {
+          selectedDrink: null as string | null,
+          servedDrink: null as string | null,
+        },
+        methods: (store) => ({
+          _selectDrink: ({ drink }: { readonly drink: string }) =>
+            patchState(store, { selectedDrink: drink }),
+          _onReady: ({ servedDrink }: { readonly servedDrink: string }) =>
+            patchState(store, { servedDrink }),
+        }),
+      });
+
+      const ShopStore = signalStore(withStateMachine(shopFeature));
+      const store = new ShopStore();
+
+      store.send('QUICK_ORDER', { drink: 'Espresso' });
+      expect(store.fsmState()).toBe('barista');
+      expect(store.selectedDrink()).toBe('Espresso');
+      // Must see 'Espresso', NOT null!
+      expect(store.actors.barista()?.selectedDrink).toBe('Espresso');
+
+      store.send('FINISH' as any);
+      expect(store.fsmState()).toBe('ready');
+      expect(store.servedDrink()).toBe('Espresso');
+    });
+
+    it('handles zero-tick synchronous sub-actor completion during onStateEnter without dropping the terminal output event', () => {
+      const zeroTickChild = createMachineFeature<{
+        inputs: { readonly selectedDrink: string };
+        outputs: { COFFEE_READY: { readonly drink: string } };
+        states: 'brewingCoffee';
+      }>()({
+        id: 'baristaZeroTick',
+        initial: 'brewingCoffee',
+        transitions: [
+          [
+            'brewingCoffee',
+            'DONE',
+            finalState(),
+            {
+              output: ['COFFEE_READY', (ctx) => ({ drink: ctx.selectedDrink })],
+            },
+          ],
+        ],
+        tasks: () => ({
+          // Synchronous 0ms task completion!
+          brewingCoffee: () => undefined,
+        }),
+      });
+
+      const parentShop = createMachineFeature<{
+        events: { QUICK_ORDER: { readonly drink: string } };
+        states: 'idle' | 'ready';
+      }>()({
+        id: 'parentZeroTick',
+        initial: 'idle',
+        transitions: [
+          [
+            'idle',
+            'QUICK_ORDER',
+            zeroTickChild,
+            {
+              call: (m) => m._selectDrink,
+              input: (ctx) => ({ selectedDrink: ctx.selectedDrink! }),
+            },
+          ],
+          [zeroTickChild, 'COFFEE_READY', 'ready', { call: (m) => m._onReady }],
+        ],
+        state: {
+          selectedDrink: null as string | null,
+          completedDrink: null as string | null,
+        },
+        methods: (store) => ({
+          _selectDrink: ({ drink }: { readonly drink: string }) =>
+            patchState(store, { selectedDrink: drink }),
+          _onReady: ({ drink }: { readonly drink: string }) =>
+            patchState(store, { completedDrink: drink }),
+        }),
+      });
+
+      const Store = signalStore(withStateMachine(parentShop));
+      const store = new Store();
+
+      store.send('QUICK_ORDER', { drink: 'Cortado' });
+      // Zero-tick child completed synchronously on enter -> parent must transition to 'ready' with 'Cortado'!
+      expect(store.fsmState()).toBe('ready');
+      expect(store.completedDrink()).toBe('Cortado');
+    });
+  });
+
+  describe('Cycle 19: Self-Transition Re-Entry vs. stay() with Epoch Protection', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('aborts first awaiting("searching") task on self-transition re-entry, ignores stale async rejection/resolution via epoch guard, and starts second search cleanly', async () => {
+      const searchCalls: Array<{
+        query: string;
+        signal: AbortSignal;
+        resolve: (val: { results: string[] }) => void;
+        reject: (err: unknown) => void;
+      }> = [];
+
+      const searchFeature = createMachineFeature<{
+        events: { TYPE_QUERY: { query: string }; PING: void };
+        states: 'idle' | 'searching' | 'resultsReady' | 'searchFailed';
+      }>()({
+        id: 'liveSearch',
+        initial: 'idle',
+        transitions: [
+          ['idle',      'TYPE_QUERY', awaiting('searching'), { call: (m) => m._setQuery }],
+          ['searching', 'TYPE_QUERY', awaiting('searching'), { call: (m) => m._setQuery }],
+          ['searching', 'PING',       stay(),                { call: (m) => m._incPings }],
+          ['searching', 'DONE',       'resultsReady'],
+          ['searching', 'ERROR',      'searchFailed'],
+        ],
+        state: {
+          query: '',
+          results: [] as string[],
+          pings: 0,
+        },
+        methods: (store) => ({
+          _setQuery: ({ query }: { query: string }) =>
+            patchState(store, { query }),
+          _incPings: () =>
+            patchState(store, { pings: store.pings() + 1 }),
+        }),
+        tasks: () => ({
+          searching: (ctx, signal) =>
+            new Promise((resolve, reject) => {
+              searchCalls.push({
+                query: ctx.query,
+                signal,
+                resolve,
+                reject,
+              });
+            }),
+        }),
+      });
+
+      const SearchStore = signalStore(withStateMachine(searchFeature));
+      const store = new SearchStore();
+
+      // 1. Start first search ('espr')
+      store.send('TYPE_QUERY', { query: 'espr' });
+      expect(store.fsmState()).toBe('searching');
+      expect(searchCalls).toHaveLength(1);
+      expect(searchCalls[0].query).toBe('espr');
+      expect(searchCalls[0].signal.aborted).toBe(false);
+
+      // PING -> stay() does NOT abort the running search task!
+      store.send('PING');
+      expect(store.pings()).toBe(1);
+      expect(searchCalls[0].signal.aborted).toBe(false);
+      expect(searchCalls).toHaveLength(1);
+
+      // 2. User types again ('espresso') -> self-transition re-entry into awaiting('searching')!
+      store.send('TYPE_QUERY', { query: 'espresso' });
+      expect(store.fsmState()).toBe('searching');
+      // First search task's AbortSignal is immediately aborted:
+      expect(searchCalls[0].signal.aborted).toBe(true);
+      // Second search task started immediately with updated query from _setQuery:
+      expect(searchCalls).toHaveLength(2);
+      expect(searchCalls[1].query).toBe('espresso');
+      expect(searchCalls[1].signal.aborted).toBe(false);
+
+      // 3. First (aborted) task rejects asynchronously on the next microtask -> MUST be ignored!
+      searchCalls[0].reject(new Error('Aborted stale search 1'));
+      await Promise.resolve();
+      expect(store.fsmState()).toBe('searching');
+
+      // 4. Second search resolves -> transitions to 'resultsReady' with second search's output!
+      searchCalls[1].resolve({ results: ['Espresso Double'] });
+      await Promise.resolve();
+      expect(store.fsmState()).toBe('resultsReady');
+      expect(store.results()).toEqual(['Espresso Double']);
+    });
+
+    it('resets after(ms) timer on explicit self-transition ["active", "ACTIVITY", "active"] while ["active", "PING", stay()] leaves timer and awaiting() task untouched', () => {
+      const sessionFeature = createMachineFeature<{
+        events: { ACTIVITY: void; PING: void };
+        states: 'active' | 'idle';
+      }>()({
+        id: 'sessionTimeout',
+        initial: 'active',
+        transitions: [
+          ['active', 'ACTIVITY',  'active'],
+          ['active', 'PING',      stay()],
+          ['active', after(3000), 'idle'],
+        ],
+      });
+
+      const SessionStore = signalStore(withStateMachine(sessionFeature));
+      const store = new SessionStore();
+      expect(store.fsmState()).toBe('active');
+      const initialEpoch = (store as any).stateEpoch?.() ?? 0;
+
+      // Advance 2000ms and send PING (stay()) -> timer NOT reset
+      vi.advanceTimersByTime(2000);
+      store.send('PING');
+      expect(store.fsmState()).toBe('active');
+
+      // Advance 500ms (total 2500ms) and send ACTIVITY (explicit self-transition) -> timer IS reset & epoch increments!
+      vi.advanceTimersByTime(500);
+      store.send('ACTIVITY');
+      expect(store.fsmState()).toBe('active');
+      expect((store as any).stateEpoch()).toBeGreaterThan(initialEpoch);
+
+      // Advance 1000ms (3500ms since start, 1000ms since ACTIVITY) -> still 'active'!
+      vi.advanceTimersByTime(1000);
+      expect(store.fsmState()).toBe('active');
+
+      // Advance 2000ms (3000ms since ACTIVITY) -> transitions to 'idle'!
+      vi.advanceTimersByTime(2000);
+      expect(store.fsmState()).toBe('idle');
+    });
+  });
+
+  describe('Cycle 23: First-Class syncContext Inside createMachineFeature with Synchronous t = 0 Hydration', () => {
+    it('hydrates store state signals synchronously at t = 0 from syncContext defined inside createMachineFeature and syncs subsequent external signal updates', () => {
+      const externalPropSig = signal<string>('initial-external-value');
+
+      const featureWithSync = createMachineFeature<{
+        events: { PING: void };
+        states: 'idle';
+      }>()({
+        id: 'syncContextFeature',
+        initial: 'idle',
+        transitions: [['idle', 'PING', stay()]],
+        state: {
+          syncedProp: 'stale-default',
+          localCount: 0,
+        },
+        syncContext: () => ({
+          syncedProp: externalPropSig,
+        }),
+      });
+
+      // Pure 1-liner signalStore(withStateMachine(feature)) (no 2nd argument)
+      const MyStore = signalStore(withStateMachine(featureWithSync));
+      const store = new MyStore();
+
+      // At t = 0 (immediately upon instantiation, before any async tick or change detection),
+      // both store.syncedProp() and store.fsmContext().syncedProp equal the external signal's value!
+      expect(store.syncedProp()).toBe('initial-external-value');
+      expect(store.fsmContext().syncedProp).toBe('initial-external-value');
+
+      // Subsequent changes to externalPropSig automatically sync into the store's context and state signal!
+      externalPropSig.set('updated-external-value');
+      expect(store.syncedProp()).toBe('updated-external-value');
+      expect(store.fsmContext().syncedProp).toBe('updated-external-value');
+    });
+
+    it('supports reactive selector syntax syncContext: () => ({ syncedProp: ext.prop() }) at t = 0 and on updates', async () => {
+      const extProp = signal<string>('selector-initial');
+      const featureWithSelector = createMachineFeature<{
+        events: { PING: void };
+        states: 'idle';
+      }>()({
+        id: 'syncSelectorFeature',
+        initial: 'idle',
+        transitions: [['idle', 'PING', stay()]],
+        state: {
+          syncedProp: 'stale-default',
+        },
+        syncContext: () => ({
+          syncedProp: extProp(),
+        }),
+      });
+
+      const MyStore = signalStore(withStateMachine(featureWithSelector));
+      const store = new MyStore();
+
+      expect(store.syncedProp()).toBe('selector-initial');
+      expect(store.fsmContext().syncedProp).toBe('selector-initial');
+
+      extProp.set('selector-updated');
+      await Promise.resolve();
+      expect(store.syncedProp()).toBe('selector-updated');
+      expect(store.fsmContext().syncedProp).toBe('selector-updated');
+    });
+  });
+
+  describe('Cycle 21: all(actorA, actorB) Output Aggregation, Immediate Child Teardown, Specific Error Exits & stay() Support', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('tears down early-finishing child immediately, supports intermediate stay() on child completion, and aggregates keyed outputs { barista, bakery } on ALL_DONE', () => {
+      let baristaPostFinishTimerFired = false;
+
+      const baristaFSM = createMachineFeature<{
+        events: { EXTRA_TICK: void };
+        outputs: {
+          COFFEE_READY: { readonly drink: string };
+          OUT_OF_BEANS: { readonly reason: string };
+        };
+        states: 'brewing';
+      }>()({
+        id: 'barista',
+        initial: 'brewing',
+        transitions: [
+          [
+            'brewing',
+            after(2000),
+            finalState(),
+            { output: ['COFFEE_READY', () => ({ drink: 'Espresso' })] },
+          ],
+          ['brewing', after(3000), 'brewing', { call: (m) => m._onExtraTick }],
+        ],
+        methods: () => ({
+          _onExtraTick: () => {
+            baristaPostFinishTimerFired = true;
+          },
+        }),
+      });
+
+      const bakeryFSM = createMachineFeature<{
+        events: { EXTRA_TICK: void };
+        outputs: { PASTRY_READY: { readonly pastry: string } };
+        states: 'baking';
+      }>()({
+        id: 'bakery',
+        initial: 'baking',
+        transitions: [
+          [
+            'baking',
+            after(4000),
+            finalState(),
+            { output: ['PASTRY_READY', () => ({ pastry: 'Croissant' })] },
+          ],
+        ],
+      });
+
+      const progressLogs: string[] = [];
+      let finalSavedOrder: {
+        barista: { readonly drink: string };
+        bakery: { readonly pastry: string };
+      } | null = null;
+
+      const shopParallelFeature = createMachineFeature<{
+        events: { ORDER_COMBO: void };
+        states: 'idle' | 'orderReady' | 'orderFailed';
+      }>()({
+        id: 'shopParallel',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'ORDER_COMBO', all(baristaFSM, bakeryFSM)],
+          [
+            baristaFSM,
+            'COFFEE_READY',
+            stay(),
+            { call: (m) => m._onCoffeeProgress },
+          ],
+          [baristaFSM, 'OUT_OF_BEANS', 'orderFailed'],
+          [
+            all(baristaFSM, bakeryFSM),
+            'ALL_DONE',
+            'orderReady',
+            { call: (m) => m._saveAll },
+          ],
+          [all(baristaFSM, bakeryFSM), 'ERROR', 'orderFailed'],
+        ],
+        methods: () => ({
+          _onCoffeeProgress: (payload: { readonly drink: string }) => {
+            progressLogs.push(`coffee:${payload.drink}`);
+          },
+          _saveAll: (payload: {
+            barista: { readonly drink: string };
+            bakery: { readonly pastry: string };
+          }) => {
+            finalSavedOrder = payload;
+          },
+        }),
+      });
+
+      const ShopParallelStore = signalStore(
+        withStateMachine(shopParallelFeature),
+      );
+      const store = new ShopParallelStore();
+
+      store.send('ORDER_COMBO');
+      expect(store.fsmState()).toBe('all:barista,bakery');
+
+      // At 2000ms: baristaFSM finishes with COFFEE_READY -> torn down immediately, progress logged via stay(), bakeryFSM still running!
+      vi.advanceTimersByTime(2000);
+      expect(progressLogs).toEqual(['coffee:Espresso']);
+      expect(store.fsmState()).toBe('all:barista,bakery');
+
+      // At 3000ms: baristaFSM's 3000ms timer must NOT fire because baristaFSM was torn down at 2000ms!
+      vi.advanceTimersByTime(1000);
+      expect(baristaPostFinishTimerFired).toBe(false);
+      expect(store.fsmState()).toBe('all:barista,bakery');
+
+      // At 4000ms: bakeryFSM finishes with PASTRY_READY -> ALL_DONE fires with { barista: { drink: 'Espresso' }, bakery: { pastry: 'Croissant' } }!
+      vi.advanceTimersByTime(1000);
+      expect(store.fsmState()).toBe('orderReady');
+      expect(finalSavedOrder).toEqual({
+        barista: { drink: 'Espresso' },
+        bakery: { pastry: 'Croissant' },
+      });
+    });
+
+    it('immediately transitions parent and aborts sibling children when a child in all() emits a specific error exit (e.g. [baristaFSM, "OUT_OF_BEANS", "orderFailed"])', () => {
+      let bakeryFinished = false;
+
+      const baristaFailFSM = createMachineFeature<{
+        events: { FAIL: void };
+        outputs: { OUT_OF_BEANS: { readonly reason: string } };
+        states: 'brewing';
+      }>()({
+        id: 'barista',
+        initial: 'brewing',
+        transitions: [
+          [
+            'brewing',
+            after(1000),
+            finalState(),
+            {
+              call: (m) => m._setReason,
+              output: ['OUT_OF_BEANS', (ctx) => ({ reason: ctx.reason })],
+            },
+          ],
+        ],
+        state: {
+          reason: 'empty',
+        },
+        methods: () => ({
+          _setReason: () => undefined,
+        }),
+      });
+
+      const bakerySlowFSM = createMachineFeature<{
+        events: { DONE: void };
+        outputs: { PASTRY_READY: { readonly pastry: string } };
+        states: 'baking';
+      }>()({
+        id: 'bakery',
+        initial: 'baking',
+        transitions: [
+          [
+            'baking',
+            after(4000),
+            finalState(),
+            {
+              call: (m) => m._onDone,
+              output: ['PASTRY_READY', () => ({ pastry: 'Croissant' })],
+            },
+          ],
+        ],
+        methods: () => ({
+          _onDone: () => {
+            bakeryFinished = true;
+          },
+        }),
+      });
+
+      const shopFailFeature = createMachineFeature<{
+        events: { ORDER_COMBO: void };
+        states: 'idle' | 'orderReady' | 'orderFailed';
+      }>()({
+        id: 'shopFail',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'ORDER_COMBO', all(baristaFailFSM, bakerySlowFSM)],
+          [baristaFailFSM, 'OUT_OF_BEANS', 'orderFailed'],
+          [all(baristaFailFSM, bakerySlowFSM), 'ALL_DONE', 'orderReady'],
+        ],
+      });
+
+      const ShopFailStore = signalStore(withStateMachine(shopFailFeature));
+      const store = new ShopFailStore();
+
+      store.send('ORDER_COMBO');
+      expect(store.fsmState()).toBe('all:barista,bakery');
+
+      // At 1000ms: baristaFailFSM terminates with OUT_OF_BEANS -> parent immediately transitions to 'orderFailed' and aborts bakerySlowFSM!
+      vi.advanceTimersByTime(1000);
+      expect(store.fsmState()).toBe('orderFailed');
+
+      // Advance to 5000ms -> bakerySlowFSM was aborted and never finishes!
+      vi.advanceTimersByTime(4000);
+      expect(bakeryFinished).toBe(false);
+    });
+  });
+
+  describe('Cycle 22: Recursive Sub-Actor Task Mocking (actorTasks) & DI-Free Testing in createFeatureTester', () => {
+    it('executes a full nested parent -> sub-actor flow in pure Vitest without TestBed or NG0203 using actorTasks and syncedContext', async () => {
+      const PROD_BARISTA_API = new InjectionToken<{
+        brew: (drink: string) => Promise<{ brewedDrink: string }>;
+      }>('PROD_BARISTA_API');
+      const PROD_LOYALTY_API = new InjectionToken<{
+        check: (points: number) => Promise<{ loyaltyPoints: number }>;
+      }>('PROD_LOYALTY_API');
+      const PROD_EXTERNAL_STORE = new InjectionToken<{
+        policy: ReturnType<typeof signal<'strict' | 'relaxed'>>;
+        disconnectSig: ReturnType<typeof signal<boolean>>;
+      }>('PROD_EXTERNAL_STORE');
+
+      const baristaChildFSM = createMachineFeature<{
+        inputs: { readonly selectedDrink: string };
+        events: { CANCEL: void };
+        outputs: { COFFEE_READY: { readonly servedDrink: string } };
+        states: 'brewingCoffee';
+      }>()({
+        id: 'barista',
+        initial: 'brewingCoffee',
+        transitions: [
+          [
+            awaiting('brewingCoffee'),
+            'DONE',
+            finalState(),
+            {
+              output: [
+                'COFFEE_READY',
+                (ctx) => ({ servedDrink: ctx.brewedDrink ?? ctx.selectedDrink }),
+              ],
+            },
+          ],
+        ],
+        state: {
+          brewedDrink: null as string | null,
+        },
+        // Production factory uses Angular inject() — would throw NG0203 outside DI!
+        tasks: (api = inject(PROD_BARISTA_API)) => ({
+          brewingCoffee: (ctx) => api.brew(ctx.selectedDrink),
+        }),
+      });
+
+      const coffeeShopParentFSM = createMachineFeature<{
+        events: {
+          SELECT_DRINK: { readonly name: string };
+          CHECKOUT: void;
+          DISCONNECT: void;
+        };
+        states:
+          | 'idle'
+          | 'drinkSelected'
+          | 'checkingLoyalty'
+          | 'orderReady';
+      }>()({
+        id: 'coffeeShopNested',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'SELECT_DRINK', 'drinkSelected', { call: (m) => m._select }],
+          ['drinkSelected', 'CHECKOUT', awaiting('checkingLoyalty')],
+          [
+            'checkingLoyalty',
+            'DONE',
+            baristaChildFSM,
+            { input: (ctx) => ({ selectedDrink: ctx.drinkName! }) },
+          ],
+          [
+            baristaChildFSM,
+            'COFFEE_READY',
+            'orderReady',
+            { call: (m) => m._onReady },
+          ],
+          [anyState(), 'DISCONNECT', 'idle'],
+        ],
+        state: {
+          drinkName: null as string | null,
+          loyaltyPoints: 0,
+          servedDrink: null as string | null,
+          policy: 'relaxed' as 'strict' | 'relaxed',
+        },
+        // Production factories use Angular inject() — would throw NG0203 outside DI!
+        syncContext: (ext = inject(PROD_EXTERNAL_STORE)) => ({
+          policy: ext.policy,
+        }),
+        on: (ext = inject(PROD_EXTERNAL_STORE)) => [
+          whenSignal(ext.disconnectSig, (d) => (d ? 'DISCONNECT' : null)),
+        ],
+        methods: (store) => ({
+          _select: ({ name }: { readonly name: string }) =>
+            patchState(store, { drinkName: name }),
+          _onReady: ({ servedDrink }: { readonly servedDrink: string }) =>
+            patchState(store, { servedDrink }),
+        }),
+        tasks: (loyalty = inject(PROD_LOYALTY_API)) => ({
+          checkingLoyalty: (ctx) => loyalty.check(ctx.loyaltyPoints),
+        }),
+      });
+
+      // Pure Vitest execution — ZERO TestBed!
+      const tester = createFeatureTester(coffeeShopParentFSM, {
+        syncedContext: { policy: 'strict' },
+        tasks: {
+          checkingLoyalty: async () => ({ loyaltyPoints: 50 }),
+        },
+        actorTasks: {
+          barista: {
+            brewingCoffee: async (ctx) => ({
+              brewedDrink: `Mocked-${ctx.selectedDrink}`,
+            }),
+          },
+        },
+      });
+
+      expect(tester.state()).toBe('idle');
+      expect(tester.context().policy).toBe('strict');
+
+      tester.send('SELECT_DRINK', { name: 'Flat White' });
+      expect(tester.state()).toBe('drinkSelected');
+
+      tester.send('CHECKOUT');
+      expect(tester.state()).toBe('checkingLoyalty');
+
+      await tester.flushTasks();
+
+      expect(tester.state()).toBe('orderReady');
+      expect(tester.context().loyaltyPoints).toBe(50);
+      expect(tester.context().servedDrink).toBe('Mocked-Flat White');
+    });
+  });
+
+  describe('Cycles 26, 27, 28 & 30: always() Branching, Snapshot Persistence (getSnapshot / restoreSnapshot) & inspect Telemetry in SignalStore', () => {
+    it('supports always() eventless branching and throws MatrixFsmInfiniteLoopError on cyclic always() in SignalStore', () => {
+      const feature = createMachineFeature<{
+        events: {
+          SET_ITEMS: { readonly count: number };
+          CHECK: void;
+          LOOP: void;
+        };
+        states: 'idle' | 'checking' | 'hasItems' | 'empty' | 'loopA' | 'loopB';
+      }>()({
+        id: 'angularAlways',
+        initial: 'idle',
+        transitions: [
+          ['idle',     'SET_ITEMS', stay(),     { call: (m) => m._setCount }],
+          ['idle',     'CHECK',     'checking'],
+          ['checking', always(),    'hasItems', { guard: (ctx) => ctx.itemCount > 0 }],
+          ['checking', always(),    'empty'],
+          ['empty',    'LOOP',      'loopA'],
+          ['loopA',    always(),    'loopB'],
+          ['loopB',    always(),    'loopA'],
+        ],
+        state: {
+          itemCount: 0,
+        },
+        methods: (store) => ({
+          _setCount: ({ count }: { readonly count: number }) =>
+            patchState(store, { itemCount: count }),
+        }),
+      });
+
+      const Store = signalStore(withStateMachine(feature));
+      const store = new Store();
+
+      store.send('CHECK');
+      expect(store.state()).toBe('empty');
+
+      expect(() => store.send('LOOP')).toThrowError(MatrixFsmInfiniteLoopError);
+
+      store.reset();
+      store.send('SET_ITEMS', { count: 3 });
+      store.send('CHECK');
+      expect(store.state()).toBe('hasItems');
+    });
+
+    it('captures getSnapshot() and hydrates a fresh SignalStore via restoreSnapshot(snap) while resuming awaiting() tasks and emitting inspect telemetry', async () => {
+      const inspectedEvents: Array<{
+        readonly machineId: string;
+        readonly from: string;
+        readonly via: string;
+        readonly to: string;
+        readonly payload: unknown;
+        readonly nextContext: unknown;
+      }> = [];
+
+      const coffeeFeature = createMachineFeature<{
+        events: {
+          SELECT_DRINK: { readonly drink: string };
+          PLACE_ORDER: void;
+        };
+        states: 'browsing' | 'checkingLoyalty' | 'paid' | 'ready';
+      }>()({
+        id: 'snapshotCoffee',
+        initial: 'browsing',
+        transitions: [
+          ['browsing',        'SELECT_DRINK', stay(),                      { call: (m) => m._select }],
+          ['browsing',        'PLACE_ORDER',  awaiting('checkingLoyalty')],
+          ['checkingLoyalty', 'DONE',         'paid'],
+          ['paid',            after(200),     'ready',                     { call: (m) => m._markReady }],
+        ],
+        state: {
+          selectedDrink: null as string | null,
+          stamps: 9,
+          isFree: false,
+          readyBanner: null as string | null,
+        },
+        methods: (store) => ({
+          _select: ({ drink }: { readonly drink: string }) =>
+            patchState(store, { selectedDrink: drink }),
+          _markReady: () =>
+            patchState(store, {
+              readyBanner: `${store.selectedDrink()} is ready!`,
+            }),
+        }),
+        tasks: () => ({
+          checkingLoyalty: async (ctx) => ({
+            stamps: ctx.stamps + 1,
+            isFree: ctx.stamps + 1 >= 10,
+          }),
+        }),
+      });
+
+      expect(getShortestPaths(coffeeFeature)['ready']).toHaveLength(3);
+
+      const Store = signalStore(
+        withStateMachine(coffeeFeature, {
+          inspect: (ev) => inspectedEvents.push(ev),
+        }),
+      );
+      const store1 = new Store();
+
+      store1.send('SELECT_DRINK', { drink: 'Cortado' });
+      store1.send('PLACE_ORDER');
+
+      // Capture snapshot right in the middle of 'checkingLoyalty'
+      const midSnap = store1.getSnapshot();
+      expect(midSnap.state).toBe('checkingLoyalty');
+      expect(midSnap.context.selectedDrink).toBe('Cortado');
+
+      // Hydrate a brand new store2 from midSnap!
+      const store2 = new Store();
+      expect(store2.state()).toBe('browsing');
+      expect(store2.selectedDrink()).toBeNull();
+
+      store2.restoreSnapshot(midSnap);
+      expect(store2.state()).toBe('checkingLoyalty');
+      expect(store2.selectedDrink()).toBe('Cortado');
+
+      // Wait for the resumed awaiting('checkingLoyalty') task on store2 to resolve!
+      await new Promise((r) => setTimeout(r, 20));
+      expect(store2.state()).toBe('paid');
+      expect(store2.stamps()).toBe(10);
+      expect(store2.isFree()).toBe(true);
+
+      expect(inspectedEvents.length).toBeGreaterThanOrEqual(3);
+      expect(inspectedEvents[0]).toMatchObject({
+        machineId: 'snapshotCoffee',
+        from: 'browsing',
+        via: 'SELECT_DRINK',
+        to: 'browsing',
+        payload: { drink: 'Cortado' },
+      });
     });
   });
 });
