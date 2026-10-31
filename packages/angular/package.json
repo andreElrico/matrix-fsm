@@ -35,6 +35,7 @@
   },
   "peerDependencies": {
     "@angular/core": "~22.1.0",
+    "@matrix-fsm/core": "workspace:*",
     "@ngrx/signals": "^22.0.0",
     "effect": "^4.0.0",
     "rxjs": "^7.4.0"

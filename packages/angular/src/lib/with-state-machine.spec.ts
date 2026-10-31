@@ -6,8 +6,9 @@ import {
   withState,
 } from '@ngrx/signals';
 import { Data, Effect } from 'effect';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  after,
   all,
   any,
   anyState,
@@ -1716,6 +1717,194 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       // Flip tokenExpired -> true: triggers SESSION_EXPIRED via [anyState(), 'SESSION_EXPIRED', 'loggedOut']!
       tokenExpired.set(true);
       expect(store.fsmState()).toBe('loggedOut');
+    });
+
+    it('supports passing a root createMachineFeature directly to signalStore(withStateMachine(feature)) without config, withState, or withMethods', async () => {
+      const externalPromoSig = signal<boolean>(false);
+
+      const myRootFeature = createMachineFeature<{
+        events: {
+          SELECT_ITEM: { item: string };
+          CHECKOUT: void;
+          PROMO_ACTIVATED: void;
+        };
+        states: 'browsing' | 'processingCheckout' | 'completed';
+      }>()({
+        id: 'myRootFeature',
+        initial: 'browsing',
+        // prettier-ignore
+        transitions: [
+          ['browsing',           'SELECT_ITEM',     stay(),                         { call: (m) => m._selectItem }],
+          ['browsing',           'PROMO_ACTIVATED', stay(),                         { call: (m) => m._enablePromo }],
+          ['browsing',           'CHECKOUT',        awaiting('processingCheckout')],
+          ['processingCheckout', 'DONE',            'completed'],
+          ['processingCheckout', 'ERROR',           'browsing'],
+        ],
+        state: {
+          selectedItem: null as string | null,
+          promoActive: false,
+          orderId: null as string | null,
+        },
+        on: () => [
+          whenSignal(externalPromoSig, (active) =>
+            active ? 'PROMO_ACTIVATED' : null,
+          ),
+        ],
+        methods: (store) => ({
+          _selectItem: ({ item }: { item: string }) =>
+            patchState(store, { selectedItem: item }),
+          _enablePromo: () => patchState(store, { promoActive: true }),
+        }),
+        tasks: () => ({
+          processingCheckout: async (ctx) => ({
+            orderId: `ORD-${ctx.selectedItem}`,
+          }),
+        }),
+      });
+
+      const RootFeatureStore = signalStore(withStateMachine(myRootFeature));
+      const store = new RootFeatureStore();
+
+      expect(store.fsmState()).toBe('browsing');
+      expect(store.selectedItem()).toBeNull();
+      expect(store.promoActive()).toBe(false);
+      expect(store.orderId()).toBeNull();
+
+      // 1. Feature `on` signal listener works automatically
+      externalPromoSig.set(true);
+      expect(store.promoActive()).toBe(true);
+
+      // 2. Feature `methods` work automatically and update store state signals
+      store.send('SELECT_ITEM', { item: 'Espresso' });
+      expect(store.selectedItem()).toBe('Espresso');
+
+      // 3. Feature `tasks` work automatically
+      store.send('CHECKOUT');
+      await new Promise((r) => setTimeout(r, 15));
+      expect(store.fsmState()).toBe('completed');
+      expect(store.orderId()).toBe('ORD-Espresso');
+    });
+
+    it('whenSignal(source, selector): does NOT fire on initial store creation (t = 0) and supports dynamic [EventName, Payload] tuple selectors', () => {
+      // Initial value at t = 0 is already truthy ('app://initial'), must NOT fire at t = 0!
+      const urlSignal = signal<string | null>('app://initial');
+      const receivedLinks: string[] = [];
+
+      const routerLinkFSM = createFSM<{
+        events: {
+          DEEP_LINK: { url: string };
+        };
+        states: 'home' | 'deepLinked';
+        methods: {
+          _onDeepLink(payload: { url: string }): void;
+        };
+      }>()({
+        id: 'routerLinkBridge',
+        initial: 'home',
+        transitions: [
+          ['home',       'DEEP_LINK', 'deepLinked', { call: (m) => m._onDeepLink }],
+          ['deepLinked', 'DEEP_LINK', stay(),       { call: (m) => m._onDeepLink }],
+        ],
+      });
+
+      const RouterLinkStore = signalStore(
+        withStateMachine(routerLinkFSM, {
+          methods: () => ({
+            _onDeepLink: ({ url }: { url: string }) => receivedLinks.push(url),
+          }),
+          on: () => [
+            whenSignal(urlSignal, (url) =>
+              url ? (['DEEP_LINK', { url }] as const) : null,
+            ),
+          ],
+        }),
+      );
+
+      const store = new RouterLinkStore();
+
+      // 1. At t = 0 (initial store creation), no event was fired despite urlSignal starting at 'app://initial'
+      expect(store.fsmState()).toBe('home');
+      expect(receivedLinks).toEqual([]);
+
+      // 2. When urlSignal changes to 'app://promo', machine receives 'DEEP_LINK' with payload { url: 'app://promo' }
+      urlSignal.set('app://promo');
+      expect(store.fsmState()).toBe('deepLinked');
+      expect(receivedLinks).toEqual(['app://promo']);
+    });
+  });
+
+  describe('Cycle 15: after(ms) on initial State & Sub-Actor Timer Cleanup on Hard-Kill', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('schedules after(ms) on initial state without prior send() and clears sub-actor timers on parent Hard-Kill (CANCEL)', () => {
+      // 1. Machine whose initial state 'splash' has ['splash', after(1000), 'home'] without prior send()
+      const splashFeature = createMachineFeature<{
+        states: 'splash' | 'home';
+      }>()({
+        id: 'splashFeature',
+        initial: 'splash',
+        transitions: [
+          ['splash', after(1000), 'home'],
+        ],
+      });
+
+      const SplashStore = signalStore(withStateMachine(splashFeature));
+      const splashStore = new SplashStore();
+      expect(splashStore.fsmState()).toBe('splash');
+
+      vi.advanceTimersByTime(1000);
+      expect(splashStore.fsmState()).toBe('home');
+
+      // 2. Sub-actor with internal after(5000) transition interrupted at t = 1000ms by parent CANCEL (Hard Kill)
+      let subTimerFired = false;
+
+      const timedSubFeature = createMachineFeature<{
+        outputs: { DONE: void };
+        states: 'waitingInSub';
+      }>()({
+        id: 'timedSubFeature',
+        initial: 'waitingInSub',
+        transitions: [
+          ['waitingInSub', after(5000), finalState('DONE'), { call: (m) => m._onSubTimeout }],
+        ],
+        methods: () => ({
+          _onSubTimeout: () => {
+            subTimerFired = true;
+          },
+        }),
+      });
+
+      const parentFeature = createMachineFeature<{
+        events: { START: void; CANCEL: void };
+        states: 'idle' | 'completed';
+      }>()({
+        id: 'parentWithTimedSub',
+        initial: 'idle',
+        transitions: [
+          ['idle',            'START',  timedSubFeature],
+          [timedSubFeature,   'CANCEL', 'idle'],
+          [timedSubFeature,   'DONE',   'completed'],
+        ],
+      });
+
+      const ParentStore = signalStore(withStateMachine(parentFeature));
+      const parentStore = new ParentStore();
+
+      parentStore.send('START');
+      expect(parentStore.fsmState()).toBe('timedSubFeature');
+      expect(parentStore.fsmSubState()).toBe('waitingInSub');
+
+      // Interrupt at t = 1000ms via parent CANCEL (Hard Kill)
+      vi.advanceTimersByTime(1000);
+      parentStore.send('CANCEL');
+      expect(parentStore.fsmState()).toBe('idle');
+      expect(parentStore.fsmSubState()).toBeNull();
+
+      // Advance to t = 5000ms -> sub-actor timer is cleared and never fires!
+      vi.advanceTimersByTime(4000);
+      expect(subTimerFired).toBe(false);
+      expect(parentStore.fsmState()).toBe('idle');
     });
   });
 });

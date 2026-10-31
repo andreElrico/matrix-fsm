@@ -1,15 +1,23 @@
 /**
- * Layer 3 (Feature): Pure Coffee Shop Root FSM (coffee-shop.machine.ts)
- * 0% Angular DI, Zero JSON Dummy Objects, Named FSMContract, Strict Matrix Alignment
+ * Layer 3 (Feature): Cohesive Coffee Shop Root Feature (coffee-shop.machine.ts)
+ * Uses `createMachineFeature` (Sandwich Pattern):
+ * 1. Public Contract (Events, States)
+ * 2. Pure Transition Matrix (0% DI inside transitions)
+ * 3. Encapsulated State, Methods & Async Tasks
  */
 
-import { awaiting, createFSM, stay } from '@matrix-fsm/core';
+import { inject } from '@angular/core';
+import { patchState } from '@ngrx/signals';
+import { awaiting, createMachineFeature, stay } from '@matrix-fsm/angular';
 import { baristaFSM } from './barista.feature';
-import type {
-  CoffeeShopContext,
-  CoffeeShopEvents,
-  CoffeeShopMethods,
-  CoffeeShopStates,
+import { CoffeeShopApiService } from './coffee-shop-api.service';
+import {
+  calculateNextStamps,
+  initialCoffeeShopContext,
+  type CoffeeShopContext,
+  type CoffeeShopEvents,
+  type CoffeeShopMethods,
+  type CoffeeShopStates,
 } from './coffee-shop.domain';
 
 // Pure guards (0% DI, strictly reads ctx):
@@ -18,11 +26,9 @@ const isFreeDrink = (ctx: CoffeeShopContext) => ctx.isFreeDrink === true;
 
 export { baristaFSM };
 
-export const coffeeShopFSM = createFSM<{
+export const coffeeShopFSM = createMachineFeature<{
   events: CoffeeShopEvents;
   states: CoffeeShopStates;
-  context: CoffeeShopContext;
-  methods: CoffeeShopMethods;
 }>()({
   id: 'coffeeShop',
   initial: 'customerBrowsing',
@@ -65,4 +71,59 @@ export const coffeeShopFSM = createFSM<{
     ['coffeeReady',         'TAKE_COFFEE',              'drinkingCoffee'],
     ['drinkingCoffee',      'FINISH_COFFEE',            'customerBrowsing',           { call: (m) => m._finishCoffee }],
   ],
+  state: initialCoffeeShopContext,
+  methods: (store): CoffeeShopMethods => ({
+    _selectDrink: ({ drink }) =>
+      patchState(store, {
+        selectedDrink: drink,
+        finalPrice: drink.price,
+        error: null,
+      }),
+    _setStamps: ({ stamps }) =>
+      patchState(store, {
+        customerCard: {
+          ...store.customerCard(),
+          currentStamps: stamps,
+        },
+      }),
+    _setMissingDrinkError: () =>
+      patchState(store, {
+        error: 'Please select a coffee first!',
+      }),
+    _markPaid: () =>
+      patchState(store, {
+        isPaid: true,
+      }),
+    _onCoffeeReady: ({ result }) =>
+      patchState(store, {
+        preparedCup: result,
+      }),
+    _finishCoffee: () =>
+      patchState(store, {
+        ...initialCoffeeShopContext,
+        customerCard: {
+          ...store.customerCard(),
+          currentStamps: calculateNextStamps(
+            store.customerCard().currentStamps,
+            store.isFreeDrink(),
+          ),
+        },
+      }),
+  }),
+  tasks: (api = inject(CoffeeShopApiService)) => ({
+    checkingLoyalty: async (ctx, signal) => {
+      const res = await api.checkLoyalty(
+        ctx.customerCard.cardId,
+        ctx.customerCard.customerName,
+        ctx.customerCard.currentStamps,
+        signal,
+      );
+      return {
+        isFreeDrink: res.isFreeDrink,
+        customerCard: res.card,
+        finalPrice: res.isFreeDrink ? 0 : (ctx.selectedDrink?.price ?? 0),
+        error: null,
+      };
+    },
+  }),
 });

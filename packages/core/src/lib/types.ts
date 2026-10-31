@@ -151,24 +151,28 @@ export type UnwrapSubMachineTuple<T extends readonly any[]> = {
 
 export interface CombinatorNode<
   TKind extends CombinatorKind = CombinatorKind,
-  TMachines extends readonly AnyFSMDefinition[] = readonly AnyFSMDefinition[],
+  TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[] =
+    readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
 > {
   readonly __type: TKind;
   readonly __kind: TKind;
   readonly id: `${TKind}:${JoinMachineIds<TMachines>}`;
-  readonly machines: TMachines;
+  readonly machines: UnwrapSubMachineTuple<TMachines>;
 }
 
 export type AllNode<
-  TMachines extends readonly AnyFSMDefinition[] = readonly AnyFSMDefinition[],
+  TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[] =
+    readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
 > = CombinatorNode<'all', TMachines>;
 
 export type RaceNode<
-  TMachines extends readonly AnyFSMDefinition[] = readonly AnyFSMDefinition[],
+  TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[] =
+    readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
 > = CombinatorNode<'race', TMachines>;
 
 export type AnyNode<
-  TMachines extends readonly AnyFSMDefinition[] = readonly AnyFSMDefinition[],
+  TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[] =
+    readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
 > = CombinatorNode<'any', TMachines>;
 
 /**
@@ -745,17 +749,31 @@ export type ValidateSubMachineTarget<
       : ValidateSubMachineOutputs<To, TTransitions>
     : ValidateSubMachineOutputs<To, TTransitions>;
 
+type IsCombinatorNode<T> =
+  [0] extends [1 & T]
+    ? false
+    : T extends CombinatorNode<any, any>
+      ? true
+      : false;
+
+type IsSubMachineOrCombinatorNode<T> =
+  [0] extends [1 & T]
+    ? false
+    : IsCombinatorNode<T> extends true
+      ? true
+      : IsSubMachineNode<T>;
+
 type HasRequiredSubMachineInput<To> =
-  IsSubMachineNode<To> extends true
-    ? IsDefaultOrUntypedObject<ExtractInput<To>> extends false
+  IsSubMachineOrCombinatorNode<To> extends true
+    ? IsDefaultOrUntypedObject<ExtractInputs<To>> extends false
       ? true
       : false
     : false;
 
 type AllowedSubInput<To> =
-  IsSubMachineNode<To> extends true
-    ? IsDefaultOrUntypedObject<ExtractInput<To>> extends false
-      ? ExtractInput<To>
+  IsSubMachineOrCombinatorNode<To> extends true
+    ? IsDefaultOrUntypedObject<ExtractInputs<To>> extends false
+      ? ExtractInputs<To>
       : any
     : any;
 
@@ -894,7 +912,21 @@ export type ValidateTransitionRows<
                   TOutputs
                 >,
               ]
-            : IsNamedFinalNode<To> extends true
+            : IsCombinatorNode<To> extends true
+              ? readonly [
+                  from: From,
+                  via: Via,
+                  to: To,
+                  ...ValidateRowOptions<
+                    Rest,
+                    TContext,
+                    any,
+                    TMethods,
+                    To,
+                    TOutputs
+                  >,
+                ]
+              : IsNamedFinalNode<To> extends true
               ? readonly [
                   from: From,
                   via: Via,
@@ -991,10 +1023,12 @@ type ExtractDirectSubMachinesFromTransitions<
         : never
     : never;
 
-type ExtractDirectSubMachines<TFSM> =
+export type ExtractDirectSubMachines<TFSM> =
   TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any, any, any>
     ? ExtractDirectSubMachinesFromTransitions<TTransitions>
-    : never;
+    : TFSM extends CombinatorNode<any, infer TActors>
+      ? ExtractSubMachineFromNode<TActors[number]>
+      : never;
 
 export type ExtractAllSubMachines<TFSM> =
   | ExtractDirectSubMachines<TFSM>
@@ -1063,12 +1097,25 @@ export type ExtractAllMethods<TFSM> = MergeExtractedObjects<
   EmptyObject
 >;
 
+type ExtractNonEmptyInput<TFSM> =
+  [0] extends [1 & TFSM]
+    ? never
+    : TFSM extends FSMDefinition<any, any, any, any, any, any, infer TInput, any>
+      ? IsDefaultOrUntypedObject<TInput> extends true
+        ? never
+        : TInput
+      : TFSM extends SubMachineRef<infer Inner, any>
+        ? ExtractNonEmptyInput<Inner>
+        : TFSM extends CombinatorNode<any, infer TActors>
+          ? ExtractNonEmptyInput<TActors[number]>
+          : never;
+
 export type ExtractInput<TFSM> =
-  TFSM extends FSMDefinition<any, any, any, any, any, any, infer TInput, any>
-    ? TInput
-    : TFSM extends SubMachineRef<infer Inner, any>
-      ? ExtractInput<Inner>
-      : EmptyObject;
+  [ExtractNonEmptyInput<TFSM>] extends [never]
+    ? EmptyObject
+    : UnionToIntersection<ExtractNonEmptyInput<TFSM>>;
+
+export type ExtractInputs<TFSM> = ExtractInput<TFSM>;
 
 export type ExtractOutput<TFSM> =
   TFSM extends FSMDefinition<any, any, any, any, any, any, any, infer TOutput>

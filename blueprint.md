@@ -92,11 +92,16 @@ export interface FSMContract {
 3. **`transitions<TContractOrFSM>([...])` (Zero-Cost Macro Wrapper, `> 3` Rows Rule)**
    - Identity function (`x => x`) used to extract large transition groups (`>= 4` rows) into a variable while preserving full TypeScript context/method inference and ESLint AST detection.
 
-4. **Unified `createFSM` Sub-Machines & `finalState('OUTCOME')`**
-   - Any machine created with `createFSM` can be referenced directly in Column 1 (`FROM`) or Column 3 (`TO`) of a parent matrix. Terminal outcomes use `finalState('OUTCOME')`.
+4. **Unified `createFSM` / `createMachineFeature` Sub-Machines & Tuple Outputs**
+   - Any machine created with `createFSM` or `createMachineFeature` (Sandwich Pattern) can be mounted as a root store feature (`signalStore(withStateMachine(feature))`) or referenced directly in Column 1 (`FROM`) or Column 3 (`TO`) of a parent matrix.
+   - Outputs use unified tuple syntax `{ output: ['NAME', (ctx, ev) => payload] }` with `finalState()` (terminal) or `stay()` / target states (streaming), or void shorthand `finalState('CANCELLED')`.
 
-5. **`each('contextArrayKey', childFSM)` (Parallel Master/Slave Orchestration)**
-   - Spawns an isolated `childFSM` instance for each ID in `ctx[contextArrayKey]` and dispatches `'ALL_DONE'` when all instances finish.
+5. **Global Events (`anyState()`), Declarative Timers (`after(ms)`), Actor Combinators (`all`, `race`, `any`, `each`) & Signal Bridge (`whenSignal`)**
+   - `anyState()` in Column 1 (`FROM` only) handles global events in a two-pass evaluation (specific state rows first, `anyState()` fallback second).
+   - `after(ms)` in Column 2 (`VIA`) schedules automatic state timers (including on `initial`) and cancels them via `clearTimeout` on state exit or sub-actor tear-down.
+   - `all(m1, m2)`, `race(m1, m2)`, `any(m1, m2)`, and `each('contextArrayKey', childFSM)` orchestrate parallel child actors with recursive TypeScript state/event/input extraction and automatic cancellation on parent interrupt.
+   - `whenSignal(signal, mappingOrSelector)` reactively bridges external Angular Signals into the FIFO event queue upon signal value changes (supporting both `{ [value]: 'EVENT' }` maps and `(val) => val ? ['EVENT', payload] : null` tuple selectors).
+   - `createFeatureTester(feature, { inputs, tasks })` enables fast `< 5ms` unit testing of `createMachineFeature` actors in Vitest without Angular `TestBed`.
 
 ---
 
@@ -232,4 +237,7 @@ export class AuthFeatureStore extends signalStore(
 | 5 | `require-awaiting-handlers`    | `error`            | Every state wrapped in `awaiting('x')` in Column 3 must have at least one `'DONE'` and one `'ERROR'` row in Column 1.           |
 | 6 | `awaiting-naming-convention`   | `error`            | State names inside `awaiting('...')` must end with `-ing` (e.g., `'authenticating'`, `'brewingCoffee'`).                        |
 | 7 | `complete-extracted-groups`    | `error`            | `transitions([...])` variables must not split a `[FROM, VIA]` group and require `> 3` rows (`minRows: 4`).                      |
-| 8 | `pure-machine-definition`      | `error`            | Forbids `@angular/*`, service, or store imports and `inject()` in `*.machine.ts`, and enforces single `(m) => m._method` calls. |
+| 8 | `pure-machine-definition`      | `error`            | Forbids `@angular/*`, service, or store imports and `inject()` in pure `*.machine.ts` (and inside `transitions` of features), and enforces single `(m) => m._method` calls. |
+| 9 | `no-conflicting-final-output`  | `error`            | Forbids combining a named `finalState('OUTCOME')` with `options.output` on the same row.                                        |
+| 10| `require-exit-for-targets`     | `error`            | Requires every transient/active target (`awaiting`, sub-machine, `all`, `race`, `any`, `each`) in Column 3 (`TO`) to have a valid exit row in Column 1 (`FROM`). |
+| 11| `no-unreachable-states`        | `error`            | Requires every state or sub-actor in Column 1 (`FROM`, excluding `anyState()`) to be either `initial` or entered in Column 3 (`TO`, including inside combinators). |

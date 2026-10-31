@@ -213,6 +213,24 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
       expect(messages[0].messageId).toBe('missingAwaitingHandlers');
       expect(messages[0].message).toContain("['authenticating', 'ERROR', ...]");
     });
+
+    it('passes when awaiting("loadingData") handles DONE explicitly and ERROR globally via anyState()', () => {
+      const { messages } = verifyRule(
+        'require-awaiting-handlers',
+        `
+        createFSM()({
+          id: 'loader',
+          initial: 'idle',
+          transitions: [
+            ['idle',        'LOAD',  awaiting('loadingData')],
+            ['loadingData', 'DONE',  'ready'],
+            [anyState(),    'ERROR', 'errorView'],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(0);
+    });
   });
 
   describe('5. awaiting-naming-convention', () => {
@@ -626,6 +644,24 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
       );
       expect(messages).toHaveLength(1);
       expect(messages[0].messageId).toBe('unreachableState');
+    });
+
+    it('passes when child machine inside all(baristaFSM, bakeryFSM) in Column 3 is referenced in Column 1', () => {
+      const { messages } = verifyRule(
+        'no-unreachable-states',
+        `
+        createFSM()({
+          id: 'cafe',
+          initial: 'ordering',
+          transitions: [
+            ['ordering',            'PAY',      all(baristaFSM, bakeryFSM)],
+            [all(baristaFSM, bakeryFSM), 'DONE', 'completed'],
+            [baristaFSM,            'PROGRESS', stay()],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(0);
     });
   });
 });

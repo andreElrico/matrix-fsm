@@ -111,6 +111,11 @@ export const noUnreachableStates = createRule<[], MessageIds>({
             row.toKey !== row.fromKey
           ) {
             reachableStates.add(row.toKey);
+            for (const childKey of row.toChildKeys) {
+              if (childKey !== row.fromKey) {
+                reachableStates.add(childKey);
+              }
+            }
           }
         }
 

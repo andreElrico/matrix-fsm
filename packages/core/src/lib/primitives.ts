@@ -205,7 +205,7 @@ function createCombinator<
 >(
   kind: TKind,
   args: TMachines | readonly [TMachines],
-): CombinatorNode<TKind, UnwrapSubMachineTuple<TMachines>> {
+): CombinatorNode<TKind, TMachines> {
   const rawList = (
     args.length === 1 && Array.isArray(args[0]) ? args[0] : args
   ) as readonly (AnyFSMDefinition | SubMachineRef<any, any>)[];
@@ -218,7 +218,7 @@ function createCombinator<
   return Object.freeze({
     __type: kind,
     __kind: kind,
-    id: `${kind}:${joinedIds}` as `${TKind}:${JoinMachineIds<UnwrapSubMachineTuple<TMachines>>}`,
+    id: `${kind}:${joinedIds}` as `${TKind}:${JoinMachineIds<TMachines>}`,
     machines: Object.freeze([...machines]) as unknown as UnwrapSubMachineTuple<TMachines>,
   });
 }
@@ -232,12 +232,12 @@ export function all<
   const TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
 >(
   ...machines: TMachines
-): AllNode<UnwrapSubMachineTuple<TMachines>>;
+): AllNode<TMachines>;
 export function all<
   const TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
 >(
   machines: TMachines,
-): AllNode<UnwrapSubMachineTuple<TMachines>>;
+): AllNode<TMachines>;
 export function all(...args: any[]): AllNode<any> {
   return createCombinator('all', args as any);
 }
@@ -251,12 +251,12 @@ export function race<
   const TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
 >(
   ...machines: TMachines
-): RaceNode<UnwrapSubMachineTuple<TMachines>>;
+): RaceNode<TMachines>;
 export function race<
   const TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
 >(
   machines: TMachines,
-): RaceNode<UnwrapSubMachineTuple<TMachines>>;
+): RaceNode<TMachines>;
 export function race(...args: any[]): RaceNode<any> {
   return createCombinator('race', args as any);
 }
@@ -270,12 +270,12 @@ export function any<
   const TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
 >(
   ...machines: TMachines
-): AnyNode<UnwrapSubMachineTuple<TMachines>>;
+): AnyNode<TMachines>;
 export function any<
   const TMachines extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
 >(
   machines: TMachines,
-): AnyNode<UnwrapSubMachineTuple<TMachines>>;
+): AnyNode<TMachines>;
 export function any(...args: any[]): AnyNode<any> {
   return createCombinator('any', args as any);
 }

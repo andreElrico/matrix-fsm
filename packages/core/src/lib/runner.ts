@@ -167,8 +167,9 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     const scheduledIds = new Set<string>();
     for (const row of fsm.transitions) {
       const [from, via] = row as unknown as readonly [unknown, unknown];
+      const srcId = resolveSourceId(from);
       if (
-        resolveSourceId(from) === stateName &&
+        (srcId === stateName || srcId === '*') &&
         isAfterNode(via) &&
         !scheduledIds.has(via.id)
       ) {
@@ -235,8 +236,10 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
             ? childInfo.finalPayload
             : childCtx;
           const refToExit = activeSubRef;
+          const subToDestroy = activeSubMachine;
           activeSubMachine = null;
           activeSubRef = null;
+          subToDestroy?.destroy();
           if (!refToExit) {
             return;
           }
@@ -514,12 +517,17 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     });
   };
 
+  let isDestroyed = false;
+
   const sendInternal = (
     event: string,
     payload?: unknown,
     fromChildOutput = false,
     fromChildTerminal = false,
   ): void => {
+    if (isDestroyed) {
+      return;
+    }
     eventQueue.push({ event, payload, fromChildOutput, fromChildTerminal });
     if (isProcessing) {
       return;
@@ -552,6 +560,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
   };
 
   const destroy = (): void => {
+    isDestroyed = true;
     clearActiveTimers();
     eventQueue.length = 0;
     isProcessing = false;
@@ -565,6 +574,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
 
   const reset = (): void => {
     destroy();
+    isDestroyed = false;
     doneOutcome = null;
     donePayload = undefined;
     currentState = fsm.initial as TState;

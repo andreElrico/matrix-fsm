@@ -13,6 +13,7 @@ export interface ParsedTransitionRow {
   readonly fromKey: string | null;
   readonly viaKey: string | null;
   readonly toKey: string | null;
+  readonly toChildKeys: readonly string[];
   readonly isTransientTarget: boolean;
   readonly targetDisplayName: string;
   readonly groupKey: string | null;
@@ -84,18 +85,59 @@ export function extractNodeKey(
   return null;
 }
 
+export function extractCombinatorChildKeys(
+  node: TSESTree.Node | null | undefined,
+): string[] {
+  if (
+    !node ||
+    node.type !== AST_NODE_TYPES.CallExpression ||
+    node.callee.type !== AST_NODE_TYPES.Identifier
+  ) {
+    return [];
+  }
+  const calleeName = node.callee.name;
+  const childKeys: string[] = [];
+  if (calleeName === 'each' && node.arguments.length >= 1) {
+    const firstArg = node.arguments[0];
+    const key = extractNodeKey(firstArg);
+    if (key) {
+      childKeys.push(key);
+    }
+    childKeys.push(...extractCombinatorChildKeys(firstArg));
+  } else if (
+    (calleeName === 'all' || calleeName === 'race' || calleeName === 'any') &&
+    node.arguments.length >= 1
+  ) {
+    for (const arg of node.arguments) {
+      const key = extractNodeKey(arg);
+      if (key) {
+        childKeys.push(key);
+      }
+      childKeys.push(...extractCombinatorChildKeys(arg));
+    }
+  }
+  return childKeys;
+}
+
 export function extractTargetInfo(node: TSESTree.Node | null | undefined): {
   readonly toKey: string | null;
+  readonly toChildKeys: readonly string[];
   readonly isTransientTarget: boolean;
   readonly targetDisplayName: string;
 } {
   if (!node) {
-    return { toKey: null, isTransientTarget: false, targetDisplayName: '' };
+    return {
+      toKey: null,
+      toChildKeys: [],
+      isTransientTarget: false,
+      targetDisplayName: '',
+    };
   }
   const awaiting = extractAwaitingCall(node);
   if (awaiting) {
     return {
       toKey: awaiting.stateName,
+      toChildKeys: [],
       isTransientTarget: true,
       targetDisplayName: `awaiting('${awaiting.stateName}')`,
     };
@@ -108,6 +150,7 @@ export function extractTargetInfo(node: TSESTree.Node | null | undefined): {
     if (calleeName === 'stay') {
       return {
         toKey: 'stay()',
+        toChildKeys: [],
         isTransientTarget: false,
         targetDisplayName: 'stay()',
       };
@@ -115,6 +158,7 @@ export function extractTargetInfo(node: TSESTree.Node | null | undefined): {
     if (calleeName === 'finalState') {
       return {
         toKey: 'finalState()',
+        toChildKeys: [],
         isTransientTarget: false,
         targetDisplayName: 'finalState()',
       };
@@ -128,6 +172,7 @@ export function extractTargetInfo(node: TSESTree.Node | null | undefined): {
       const key = extractNodeKey(node);
       return {
         toKey: key,
+        toChildKeys: extractCombinatorChildKeys(node),
         isTransientTarget: key !== null,
         targetDisplayName: `${calleeName}(...)`,
       };
@@ -136,6 +181,7 @@ export function extractTargetInfo(node: TSESTree.Node | null | undefined): {
   if (node.type === AST_NODE_TYPES.Identifier) {
     return {
       toKey: `ref:${node.name}`,
+      toChildKeys: [],
       isTransientTarget: true,
       targetDisplayName: node.name,
     };
@@ -143,6 +189,7 @@ export function extractTargetInfo(node: TSESTree.Node | null | undefined): {
   const key = extractNodeKey(node);
   return {
     toKey: key,
+    toChildKeys: [],
     isTransientTarget: false,
     targetDisplayName: key ?? '',
   };
@@ -219,7 +266,7 @@ export function parseTransitionRow(
 
   const fromKey = extractNodeKey(fromEl);
   const viaKey = extractNodeKey(viaEl);
-  const { toKey, isTransientTarget, targetDisplayName } =
+  const { toKey, toChildKeys, isTransientTarget, targetDisplayName } =
     extractTargetInfo(toEl);
   const groupKey = fromKey && viaKey ? `${fromKey}::${viaKey}` : null;
   const optionsNode =
@@ -236,6 +283,7 @@ export function parseTransitionRow(
     fromKey,
     viaKey,
     toKey,
+    toChildKeys,
     isTransientTarget,
     targetDisplayName,
     groupKey,

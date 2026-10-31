@@ -99,8 +99,10 @@ export const requireAwaitingHandlers = createRule<[], MessageIds>({
             continue;
           }
           const { stateName, callNode } = row.awaitingCall;
-          const hasDone = doneStates.has(stateName);
-          const hasError = errorStates.has(stateName);
+          const hasDone =
+            doneStates.has(stateName) || doneStates.has('anyState()');
+          const hasError =
+            errorStates.has(stateName) || errorStates.has('anyState()');
 
           if (!hasDone || !hasError) {
             const missingParts: string[] = [];

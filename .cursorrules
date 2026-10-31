@@ -1,19 +1,23 @@
 # @matrix-fsm Architectural & Formatting Rules (Referencing BEST_PRACTICES.md & blueprint.md)
 
-1. **Curried `createFSM` with Named `FSMContract` & Decoupled Sub-Machines (Zero JSON Dummy Objects)**:
-   - Always use curried `createFSM<{ events?: TEvents; states?: TStates; context?: TContext; methods?: TMethods }>()({ id, initial, transitions })`. Never define dummy runtime objects like `events: {} as ...` or duplicate `context: { ... }` inside `*.machine.ts`.
-   - Sub-machines (like `baristaFSM`) must declare only their own narrow `context`, `methods`, `events`, and `states` (zero imports from parent `*.domain.ts` or `*.machine.ts`).
-   - Pass child FSMs directly in Column 1 (`FROM`), Column 3 (`TO`), or `each(key, childFSM)` and use `finalState('OUTCOME')` for terminal outcomes. Column 2 (`VIA`) automatically infers `ExtractFinalOutcomes<typeof childFSM>` without duplicating child outcomes or events in the parent's `events` type.
-2. **SignalStore Alignment (`withState` + `withMethods` + Composable Features + `call`)**:
-   - Manage state in `*.store.ts` using `@ngrx/signals` `withState<TContext>(initialState)`, composable `signalStoreFeature` slices (e.g. `withBarista()`), and synchronous state updaters in `withMethods((store) => ({ _methodName: ... }))` using `patchState(store, ...)`.
-   - Trigger store methods from transitions via `{ call: (m) => m._methodName }`. Never invoke multiple methods in a single transition or put async IO inside `withMethods` (all async work belongs in `tasks`).
-3. **Decoupled Task Execution (`@matrix-fsm/angular` vs `@matrix-fsm/angular/effect`)**:
-   - `@matrix-fsm/angular` has 0% hard dependency on `effect` and works natively with `Promise` + `AbortSignal` and RxJS `Observable`.
-   - Only import `@matrix-fsm/angular/effect` (`effectTaskAdapter` / `runEffect`) when a feature explicitly uses Effect-TS fibers.
-4. **True Matrix Column Alignment (`@matrix-fsm/align-matrix-columns`)**:
-   - Every transition row in `transitions: [...]` MUST keep its first 3 columns `[FROM, VIA, TO]` on a single horizontal line, vertically aligned across all rows like a 2D table.
-   - Always place `// prettier-ignore` and `/* FROM ... VIA ... TO ... OPTIONS */` above `transitions: [`. (`**/*.machine.ts` is also ignored in `.prettierignore`).
-5. **Transition Extraction Threshold (`> 3` Cases Rule)**:
-   - NEVER extract a `[FROM, VIA]` group into a `transitions<...>([...])` variable if it has **3 or fewer rows** (`<= 3` cases). Only extract when a group has **more than 3 rows** (`>= 4` rows, enforced by `@matrix-fsm/complete-extracted-groups`).
-6. **8 Matrix Linter Laws (`@matrix-fsm/eslint-plugin`)**:
-   - `align-matrix-columns`, `group-contiguous-transitions`, `require-fallback-transition`, `no-unreachable-transitions`, `require-awaiting-handlers`, `awaiting-naming-convention`, `complete-extracted-groups`, `pure-machine-definition`.
+1. **Curried `createFSM` & Cohesive `createMachineFeature` (Sandwich Pattern — Zero JSON Dummy Objects)**:
+   - Use curried `createFSM<{ inputs?: TInputs; events?: TEvents; outputs?: TOutputs; states?: TStates; context?: TContext; methods?: TMethods }>()({ id, initial, transitions })` for pure machines, or `createMachineFeature<{ inputs?: TInputs; events?: TEvents; outputs?: TOutputs; states?: TStates }>()({ id, initial, transitions, state, methods, tasks, on })` for cohesive Angular SignalStore features and sub-actors.
+   - A root `createMachineFeature` can be mounted directly via `signalStore(withStateMachine(myFeature))` with zero `withState` / `withMethods` / `config` boilerplate.
+   - Sub-machines (like `baristaFSM`) declare only their own narrow `inputs`, `events`, `outputs`, `states`, and private `state`/`methods`/`tasks` (zero imports from parent `*.domain.ts` or `*.machine.ts`).
+2. **Unified Tuple Outputs, Global Events (`anyState()`), Declarative Timers (`after(ms)`), Combinators (`all`, `race`, `any`) & Signal Bridge (`whenSignal`)**:
+   - Emit typed intermediate or terminal outputs via `{ output: ['NAME', (ctx, ev) => payload] }` or void shorthand `finalState('CANCELLED')` / `{ output: 'HEARTBEAT' }` (never combine named `finalState('NAME')` with `options.output`).
+   - Use `anyState()` in Column 1 (`FROM` only) for global fallback handlers (evaluated in Pass 2 after state-specific rows).
+   - Use `after(ms)` in Column 2 (`VIA`) for declarative timeouts (scheduled automatically on state entry, including `initial`, and cleared via `clearTimeout` on state exit or sub-actor tear-down).
+   - Orchestrate concurrent child actors with `all(m1, m2)`, `race(m1, m2)`, `any(m1, m2)`, or `each('items', childFSM)`.
+   - Bridge external Angular Signals into machine events via `on: () => [whenSignal(sig, { ... })]` or `whenSignal(sig, (val) => val ? ['EVENT', payload] : null)` (fires only on signal changes after `t = 0`).
+3. **SignalStore Alignment (`withState` + `withMethods` + `call`) & Fast Unit Testing (`createFeatureTester`)**:
+   - Trigger store methods from transitions via `{ call: (m) => m._methodName }`. Never use inline `patch` in Column 4, never invoke multiple methods in a single transition, and never put async IO inside `methods` (all async work belongs in `tasks`).
+   - Test `createMachineFeature` definitions in pure Vitest without Angular `TestBed` using `createFeatureTester(feature, { inputs, tasks })`.
+4. **Decoupled Task Execution (`@matrix-fsm/angular` vs `@matrix-fsm/angular/effect`)**:
+   - `@matrix-fsm/angular` has 0% hard dependency on `effect` (`effect` and `rxjs` are optional peerDependencies) and works natively with `Promise` + `AbortSignal` and RxJS `Observable`.
+   - Only import `@matrix-fsm/angular/effect` (`effectTaskAdapter`) when a feature explicitly uses Effect-TS fibers.
+5. **True Matrix Column Alignment (`@matrix-fsm/align-matrix-columns`) & Extraction Threshold (`> 3` Cases Rule)**:
+   - Every transition row in `transitions: [...]` MUST keep its first 3 columns `[FROM, VIA, TO]` on a single horizontal line, vertically aligned across all rows like a 2D table. Always place `// prettier-ignore` above `transitions: [`.
+   - NEVER extract a `[FROM, VIA]` group into `transitions<...>([...])` if it has **3 or fewer rows** (`<= 3` cases). Only extract when a group has **more than 3 rows** (`>= 4` rows).
+6. **AST & Graph Conservation Linter Laws (`@matrix-fsm/eslint-plugin`)**:
+   - `align-matrix-columns`, `group-contiguous-transitions`, `require-fallback-transition`, `no-unreachable-transitions`, `require-awaiting-handlers`, `awaiting-naming-convention`, `complete-extracted-groups`, `pure-machine-definition`, `no-conflicting-final-output`, `require-exit-for-targets`, `no-unreachable-states`.

@@ -227,12 +227,15 @@ export type SyncContextMap<TContext extends object> = {
 export interface SignalEventBridge<
   TValue = any,
   TEvent extends string = string,
+  TPayload = any,
 > {
   readonly __type: 'whenSignal';
   readonly signal: Signal<TValue>;
   readonly mapping:
     | Partial<Record<Extract<TValue, PropertyKey>, TEvent>>
-    | ((value: TValue) => TEvent | null | undefined);
+    | ((
+        value: TValue,
+      ) => TEvent | readonly [TEvent, TPayload] | null | undefined);
 }
 
 /**
@@ -246,16 +249,22 @@ export function whenSignal<
   sig: Signal<TValue>,
   mapping: TMapping,
 ): SignalEventBridge<TValue, Extract<TMapping[keyof TMapping], string>>;
-export function whenSignal<TValue, const TEvent extends string = string>(
+export function whenSignal<
+  TValue,
+  const TEvent extends string = string,
+  TPayload = unknown,
+>(
   sig: Signal<TValue>,
-  mapping: (value: TValue) => TEvent | null | undefined,
-): SignalEventBridge<TValue, TEvent>;
+  mapping: (
+    value: TValue,
+  ) => TEvent | readonly [TEvent, TPayload] | null | undefined,
+): SignalEventBridge<TValue, TEvent, TPayload>;
 export function whenSignal(
   sig: Signal<any>,
   mapping:
     | Record<PropertyKey, string | undefined>
-    | ((value: any) => string | null | undefined),
-): SignalEventBridge<any, string> {
+    | ((value: any) => string | readonly [string, any] | null | undefined),
+): SignalEventBridge<any, string, any> {
   return Object.freeze({
     __type: 'whenSignal' as const,
     signal: sig,
@@ -725,6 +734,7 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
 ): StateMachineStoreMembers<TFSM> & {
   readonly finalPayload: Signal<unknown>;
   readonly hasFinalPayloadSelector: Signal<boolean>;
+  readonly __flushPendingWatches: () => void;
   readonly __setNotifyParent: (cb: () => void) => void;
   readonly __setEmitOutputHandler: (
     cb: (output: { readonly type: string; readonly payload: unknown }) => void,
@@ -1049,7 +1059,13 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     eachRegistries.clear();
   };
 
+  let isDestroyed = false;
+
   const destroy = (): void => {
+    isDestroyed = true;
+    eventQueue.length = 0;
+    onNotifyParent = undefined;
+    onEmitOutput = undefined;
     destroySignalWatchers();
     clearActiveTimers();
     cancelActiveTask();
@@ -1692,8 +1708,9 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     const scheduledIds = new Set<string>();
     for (const row of fsm.transitions) {
       const [from, via] = row as unknown as readonly [unknown, unknown];
+      const srcId = resolveSourceId(from);
       if (
-        resolveSourceId(from) === stateName &&
+        (srcId === stateName || srcId === '*') &&
         isAfterNode(via) &&
         !scheduledIds.has(via.id)
       ) {
@@ -1953,6 +1970,9 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     fromChildOutput = false,
     fromChildTerminal = false,
   ): void => {
+    if (isDestroyed) {
+      return;
+    }
     eventQueue.push({ event, payload, fromChildOutput, fromChildTerminal });
     if (isProcessing) {
       return;
@@ -2006,6 +2026,7 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
   };
 
   const reset = (initialOverrideArg?: Partial<TContext>): void => {
+    isDestroyed = false;
     clearActiveTimers();
     cancelActiveTask();
     destroyActiveSubNode();
@@ -2073,15 +2094,20 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
           return;
         }
         prevValue = val;
-        const mappedEvent =
+        const mapped =
           typeof bridge.mapping === 'function'
             ? bridge.mapping(val)
             : (bridge.mapping as Record<PropertyKey, string | undefined>)[
                 val as PropertyKey
               ];
-        if (mappedEvent) {
+        if (Array.isArray(mapped) && typeof mapped[0] === 'string') {
+          const [eventName, eventPayload] = mapped;
           untracked(() => {
-            dispatchInternal(mappedEvent, val, false, false);
+            dispatchInternal(eventName, eventPayload, false, false);
+          });
+        } else if (typeof mapped === 'string' && mapped) {
+          untracked(() => {
+            dispatchInternal(mapped, val, false, false);
           });
         }
       },
@@ -2097,30 +2123,40 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     watcher.run();
   }
 
-  const fsmStateReadonly = new Proxy(fsmStateSig.asReadonly(), {
-    apply(target, thisArg, argArray) {
-      flushPendingSignalWatches();
-      return Reflect.apply(target, thisArg, argArray);
-    },
-  });
+  const wrapSignalWithWatchFlush = <T extends (...args: any[]) => any>(
+    sigFn: T,
+  ): T =>
+    new Proxy(sigFn, {
+      apply(target, thisArg, argArray) {
+        flushPendingSignalWatches();
+        return Reflect.apply(target, thisArg, argArray);
+      },
+    });
+
+  const fsmStateReadonly = wrapSignalWithWatchFlush(fsmStateSig.asReadonly());
+  const fsmContextFlushed = wrapSignalWithWatchFlush(fsmContext);
 
   return {
     fsmState: fsmStateReadonly,
-    fsmSubState: fsmSubStateSig.asReadonly(),
-    fsmSubContext: fsmSubContextSig.asReadonly(),
-    fsmContext,
+    fsmSubState: wrapSignalWithWatchFlush(fsmSubStateSig.asReadonly()),
+    fsmSubContext: wrapSignalWithWatchFlush(fsmSubContextSig.asReadonly()),
+    fsmContext: fsmContextFlushed,
     actors,
-    isPending,
-    isDone,
-    finalOutcome: doneOutcomeSig.asReadonly(),
-    finalPayload: finalPayloadSig.asReadonly(),
+    isPending: wrapSignalWithWatchFlush(isPending),
+    isDone: wrapSignalWithWatchFlush(isDone),
+    finalOutcome: wrapSignalWithWatchFlush(doneOutcomeSig.asReadonly()),
+    finalPayload: wrapSignalWithWatchFlush(finalPayloadSig.asReadonly()),
     hasFinalPayloadSelector: hasFinalPayloadSelectorSig.asReadonly(),
-    childMachines: childMachinesSig.asReadonly(),
-    send,
+    childMachines: wrapSignalWithWatchFlush(childMachinesSig.asReadonly()),
+    send: ((...args: [event: string, payload?: unknown]) => {
+      flushPendingSignalWatches();
+      return (send as (...a: any[]) => void)(...args);
+    }) as SendFn<TFSM>,
     sendToChild,
     patchContext,
     reset,
     destroy,
+    __flushPendingWatches: flushPendingSignalWatches,
     __setNotifyParent: (cb: () => void) => {
       onNotifyParent = cb;
     },
@@ -2142,37 +2178,51 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
  */
 export function withStateMachine<
   TFSM extends AnyFSMDefinition,
-  TConfig extends StateMachineFeatureConfig<TFSM, any> = StateMachineFeatureConfig<
+  TConfig extends Partial<StateMachineFeatureConfig<TFSM, any>> = StateMachineFeatureConfig<
     TFSM,
     EmptyObject
   >,
 >(
   fsm: TFSM,
-  ...configArgs: [OwnAwaitingNodes<TFSM>] extends [never]
-    ? [config?: TConfig & StateMachineFeatureConfig<TFSM, any>]
-    : [config: TConfig & StateMachineFeatureConfig<TFSM, any>]
+  ...configArgs: TFSM extends { readonly __isMachineFeature: true }
+    ? [config?: Partial<StateMachineFeatureConfig<TFSM, any>>]
+    : [OwnAwaitingNodes<TFSM>] extends [never]
+      ? [config?: TConfig & StateMachineFeatureConfig<TFSM, any>]
+      : [config: TConfig & StateMachineFeatureConfig<TFSM, any>]
 ): SignalStoreFeature<
   {
     state: EmptyFeatureResult['state'];
     props: EmptyFeatureResult['props'];
-    methods: RequiredStoreMethods<
-      TFSM,
-      TConfig extends { readonly methods: (store: any) => infer M }
-        ? M
-        : TConfig extends { readonly methods: infer M extends object }
-          ? M
-          : EmptyObject
-    >;
+    methods: TFSM extends { readonly __isMachineFeature: true }
+      ? EmptyFeatureResult['methods']
+      : RequiredStoreMethods<
+          TFSM,
+          TConfig extends { readonly methods: (store: any) => infer M }
+            ? M
+            : TConfig extends { readonly methods: infer M extends object }
+              ? M
+              : EmptyObject
+        >;
   },
   {
-    state: TConfig extends { readonly state: any }
+    state: TFSM extends { readonly __isMachineFeature: true }
       ? ExtractContext<TFSM>
-      : EmptyFeatureResult['state'];
+      : TConfig extends { readonly state: any }
+        ? ExtractContext<TFSM>
+        : EmptyFeatureResult['state'];
     props: StateMachineStoreMembers<TFSM>;
-    methods: EmptyFeatureResult['methods'];
+    methods: TFSM extends { readonly __isMachineFeature: true }
+      ? ExtractMethods<TFSM>
+      : EmptyFeatureResult['methods'];
   }
 > {
-  const [config] = configArgs;
+  const [explicitConfig] = configArgs;
+  const baseFeatureConfig = defaultFeatureConfigs.get(fsm);
+  const config = (
+    baseFeatureConfig
+      ? { ...baseFeatureConfig, ...(explicitConfig ?? {}) }
+      : explicitConfig
+  ) as StateMachineFeatureConfig<TFSM, any> | undefined;
 
   // Automatically bind a default spawn factory for `fsm` whenever `withStateMachine(fsm, config)`
   // is declared, so parent machines that transition into `fsm` can spawn an encapsulated
@@ -2197,6 +2247,8 @@ export function withStateMachine<
     features.push(
       withState(() => resolveFactoryOrValue(config.state) as object),
     );
+  } else if ((fsm as { readonly __isMachineFeature?: boolean }).__isMachineFeature) {
+    features.push(withState(() => ({ ...(fsm.context ?? {}) })));
   }
 
   if (typeof config?.methods === 'function') {
@@ -2204,6 +2256,9 @@ export function withStateMachine<
     features.push(
       withMethods((store) => methodsFactory(store) as Record<string, any>),
     );
+  } else if (config?.methods && typeof config.methods === 'object') {
+    const methodsMap = config.methods;
+    features.push(withMethods(() => ({ ...methodsMap })));
   }
 
   features.push(
@@ -2236,6 +2291,29 @@ export function withStateMachine<
         return runner;
       },
     ),
+    ((innerStore: any) => {
+      const flushFn = innerStore?.props?.__flushPendingWatches;
+      if (typeof flushFn === 'function' && innerStore?.stateSignals) {
+        const wrappedStateSignals: Record<PropertyKey, any> = {};
+        for (const key of Reflect.ownKeys(innerStore.stateSignals)) {
+          const origSig = innerStore.stateSignals[key];
+          wrappedStateSignals[key] =
+            typeof origSig === 'function'
+              ? new Proxy(origSig, {
+                  apply(target, thisArg, argArray) {
+                    flushFn();
+                    return Reflect.apply(target, thisArg, argArray);
+                  },
+                })
+              : origSig;
+        }
+        return {
+          ...innerStore,
+          stateSignals: wrappedStateSignals,
+        };
+      }
+      return innerStore;
+    }) as any,
   );
 
   return (signalStoreFeature as (...f: any[]) => any)(...features);
@@ -2389,6 +2467,38 @@ export type MachineFeatureConfig<
           >);
     });
 
+export interface MachineFeatureDefinition<
+  TId extends string = string,
+  TInitial extends string = string,
+  TContext extends object = EmptyObject,
+  TEvents extends Record<string, any> = EmptyObject,
+  TTransitions extends readonly TransitionRow<any, any, any, any, any>[] = readonly TransitionRow<
+    any,
+    any,
+    any,
+    any,
+    any
+  >[],
+  TMethods extends Record<string, any> = EmptyObject,
+  TInputs extends object = EmptyObject,
+  TOutputs extends Record<string, any> = EmptyObject,
+> extends FSMDefinition<
+    TId,
+    TInitial,
+    TContext,
+    TEvents,
+    TTransitions,
+    TMethods,
+    TInputs,
+    TOutputs
+  > {
+  readonly __isMachineFeature: true;
+  readonly state?: TContext;
+  readonly methods?: ((store: any) => TMethods) | TMethods;
+  readonly tasks?: any;
+  readonly on?: any;
+}
+
 /**
  * Cohesive Sub-Machine Actor Creator ("Sandwich-Pattern"):
  * Combines Public Contract (`inputs`, `events`, `outputs`, `states`) at the top,
@@ -2421,7 +2531,7 @@ export function createMachineFeature<
     TMethods,
     TTransitions
   >,
-) => FSMDefinition<
+) => MachineFeatureDefinition<
   TId,
   TInitial,
   ResolveContext<FeatureInputs<TContract> & TState, TTransitions>,
@@ -2432,11 +2542,20 @@ export function createMachineFeature<
   FeatureOutputs<TContract>
 > {
   return (config: any) => {
-    const fsm = createFSM<any>()({
+    const baseFsm = createFSM<any>()({
       id: config.id,
       initial: config.initial,
       context: config.state,
       transitions: config.transitions,
+    });
+
+    const fsm = Object.freeze({
+      ...baseFsm,
+      __isMachineFeature: true as const,
+      state: config.state,
+      methods: config.methods,
+      tasks: config.tasks,
+      on: config.on,
     });
 
     const featureRuntimeConfig: StateMachineFeatureConfig<any, any> = {

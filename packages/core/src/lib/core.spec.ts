@@ -19,6 +19,7 @@ import {
   type ExtractContext,
   type ExtractEvents,
   type ExtractFinalOutcomes,
+  type ExtractInputs,
   type ExtractMethods,
   type ExtractStates,
   type ExtractTerminalOutputs,
@@ -665,6 +666,77 @@ describe('@matrix-fsm/core', () => {
       vi.advanceTimersByTime(1);
       expect(instance.getState()).toBe('idle'); // Exakt nach 3000ms im 2. Besuch geschlossen!
     });
+
+    it('schedules after(ms) on the initial state without any prior send() call and cleans up sub-actor timers on parent Hard Kill (CANCEL)', () => {
+      // 1. after(1000) on initial state 'splash' -> 'home' without any prior send() call
+      const splashFSM = createFSM<{
+        states: 'splash' | 'home';
+      }>()({
+        id: 'splashScreen',
+        initial: 'splash',
+        transitions: [
+          ['splash', after(1000), 'home'],
+        ],
+      });
+
+      const splashInstance = createMachineInstance(splashFSM);
+      expect(splashInstance.state()).toBe('splash');
+
+      vi.advanceTimersByTime(999);
+      expect(splashInstance.state()).toBe('splash');
+
+      vi.advanceTimersByTime(1);
+      expect(splashInstance.state()).toBe('home');
+
+      // 2. Sub-actor with internal after(5000) transition interrupted at t = 1000ms by parent CANCEL (Hard Kill)
+      let subTimerFired = false;
+      const timedSubActor = createFSM<{
+        states: 'waitingInSub' | 'timedOut';
+        methods: { _onSubTimeout(): void };
+      }>()({
+        id: 'timedSubActor',
+        initial: 'waitingInSub',
+        transitions: [
+          ['waitingInSub', after(5000), finalState('DONE'), { call: (m) => m._onSubTimeout }],
+        ],
+      });
+
+      const parentWithSubTimer = createFSM<{
+        events: { START: void; CANCEL: void };
+        states: 'idle' | 'completed';
+      }>()({
+        id: 'parentWithSubTimer',
+        initial: 'idle',
+        transitions: [
+          ['idle',        'START',  timedSubActor],
+          [timedSubActor, 'CANCEL', 'idle'],
+          [timedSubActor, 'DONE',   'completed'],
+        ],
+      });
+
+      const parentInst = createMachineInstance(parentWithSubTimer, {
+        methods: {
+          _onSubTimeout: () => {
+            subTimerFired = true;
+          },
+        },
+      });
+
+      parentInst.send('START');
+      expect(parentInst.state()).toBe('timedSubActor');
+      expect(parentInst.subState()).toBe('waitingInSub');
+
+      // Advance to t = 1000ms and interrupt via parent CANCEL (Hard Kill)
+      vi.advanceTimersByTime(1000);
+      parentInst.send('CANCEL');
+      expect(parentInst.state()).toBe('idle');
+      expect(parentInst.subState()).toBeNull();
+
+      // Advance past t = 5000ms -> sub-actor timer was cleared and never fires!
+      vi.advanceTimersByTime(5000);
+      expect(subTimerFired).toBe(false);
+      expect(parentInst.state()).toBe('idle');
+    });
   });
 
   describe('Cycle 8: Mathematical Graph Conservation & Sub-Actor Finalization Safety', () => {
@@ -770,7 +842,7 @@ describe('@matrix-fsm/core', () => {
         transitions: [
           ['idle',   'START', childSub],
           [childSub, 'DONE',  stay()],
-        ],
+        ] as any,
       });
 
       const instance = createMachineInstance(brokenParent, { context: {} });
@@ -847,6 +919,74 @@ describe('@matrix-fsm/core', () => {
       const diagram = toMermaid(appFSM);
       expect(diagram).toContain('state "(*)" as anyState');
       expect(diagram).toContain('anyState --> loggedOut : LOGOUT');
+    });
+  });
+
+  describe('Cycle 14: Recursive Type Extraction for Combinators (all, race, any)', () => {
+    it('extracts child states and events from all(subA, subB) and enforces required inputs for combinator children', () => {
+      const subA = createFSM<{
+        inputs: { id: string };
+        events: { EVENT_A: void };
+        states: 'stateA1' | 'stateA2';
+      }>()({
+        id: 'subA',
+        initial: 'stateA1',
+        transitions: [
+          ['stateA1', 'EVENT_A', 'stateA2'],
+          ['stateA2', 'EVENT_A', finalState('DONE')],
+        ],
+      });
+
+      const subB = createFSM<{
+        events: { EVENT_B: void };
+        states: 'stateB1' | 'stateB2';
+      }>()({
+        id: 'subB',
+        initial: 'stateB1',
+        transitions: [
+          ['stateB1', 'EVENT_B', 'stateB2'],
+          ['stateB2', 'EVENT_B', finalState('DONE')],
+        ],
+      });
+
+      const parentFSM = createFSM<{
+        events: { START: void };
+        context: { itemId: string };
+        states: 'idle' | 'completed';
+      }>()({
+        id: 'parentCombinator',
+        initial: 'idle',
+        transitions: [
+          ['idle',          'START', all(subA, subB), { input: (ctx) => ({ id: ctx.itemId }) }],
+          [all(subA, subB), 'DONE',  'completed'],
+        ],
+      });
+
+      type ParentStates = ExtractStates<typeof parentFSM>;
+      type ParentEvents = ExtractEvents<typeof parentFSM>;
+      const comb = all(subA, subB);
+      expectTypeOf<typeof comb.machines>().toEqualTypeOf<readonly [typeof subA, typeof subB]>();
+      expectTypeOf<ExtractInputs<typeof comb>>().toEqualTypeOf<{ id: string }>();
+
+      expectTypeOf<'stateA1' | 'stateA2' | 'stateB1' | 'stateB2'>().toExtend<ParentStates>();
+      expectTypeOf<'EVENT_A' | 'EVENT_B' | 'START'>().toExtend<ParentEvents>();
+      expect(race(subA, subB).__type).toBe('race');
+      expect(any(subA, subB).__type).toBe('any');
+
+      // Compile-time check: omitting required `{ input: ... }` when subA inside all(subA, subB) requires inputs: { id: string }
+      createFSM<{
+        events: { START: void };
+        context: { itemId: string };
+        states: 'idle' | 'completed';
+      }>()({
+        id: 'parentCombinatorMissingInput',
+        initial: 'idle',
+        transitions: [
+          // @ts-expect-error - subA inside all(subA, subB) requires inputs: { id: string }
+          ['idle',          'START', all(subA, subB)],
+          [all(subA, subB), 'DONE',  'completed'],
+        ],
+      });
     });
   });
 });
