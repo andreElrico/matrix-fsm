@@ -11,6 +11,8 @@ import { pureMachineDefinition } from './lib/rules/pure-machine-definition.js';
 import { requireAwaitingHandlers } from './lib/rules/require-awaiting-handlers.js';
 import { requireExitForTargets } from './lib/rules/require-exit-for-targets.js';
 import { requireFallbackTransition } from './lib/rules/require-fallback-transition.js';
+import { validAnyStateTarget } from './lib/rules/valid-any-state-target.js';
+import { validTimerTransitions } from './lib/rules/valid-timer-transitions.js';
 
 export const rules = {
   'align-matrix-columns': alignMatrixColumns,
@@ -26,6 +28,8 @@ export const rules = {
   'no-conflicting-final-output': noConflictingFinalOutput,
   'require-exit-for-targets': requireExitForTargets,
   'no-unreachable-states': noUnreachableStates,
+  'valid-any-state-target': validAnyStateTarget,
+  'valid-timer-transitions': validTimerTransitions,
 };
 
 export const plugin: {
@@ -66,6 +70,8 @@ export const configs = {
       '@matrix-fsm/no-conflicting-final-output': 'error',
       '@matrix-fsm/require-exit-for-targets': 'error',
       '@matrix-fsm/no-unreachable-states': 'error',
+      '@matrix-fsm/valid-any-state-target': 'error',
+      '@matrix-fsm/valid-timer-transitions': 'error',
     },
   },
 };
@@ -88,4 +94,6 @@ export {
   requireAwaitingHandlers,
   requireExitForTargets,
   requireFallbackTransition,
+  validAnyStateTarget,
+  validTimerTransitions,
 };

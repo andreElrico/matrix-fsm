@@ -16,12 +16,15 @@ import type {
   CombinatorNode,
   EachNode,
   EmptyObject,
+  EveryNode,
   ExtractedTransitionRow,
   FinalNode,
   FSMConfig,
   FSMDefinition,
   JoinMachineIds,
+  OutcomeNode,
   RaceNode,
+  ReadonlyContext,
   ResolveTransitionsContext,
   ResolveTransitionsMethods,
   StayNode,
@@ -40,6 +43,28 @@ export function awaiting<const TState extends string>(
   return Object.freeze({
     __type: 'awaiting' as const,
     state,
+  });
+}
+
+/**
+ * Wraps a named domain outcome event (and optional payload) returned from an `awaiting()` method
+ * so the state machine transitions directly via `event` instead of generic `'DONE'`.
+ */
+export function outcome<const TEvent extends string>(
+  event: TEvent,
+): OutcomeNode<TEvent, void>;
+export function outcome<const TEvent extends string, TPayload>(
+  event: TEvent,
+  payload: TPayload,
+): OutcomeNode<TEvent, TPayload>;
+export function outcome<const TEvent extends string, TPayload = void>(
+  event: TEvent,
+  payload?: TPayload,
+): OutcomeNode<TEvent, TPayload> {
+  return Object.freeze({
+    __type: 'outcome' as const,
+    event,
+    payload: payload as TPayload,
   });
 }
 
@@ -85,17 +110,45 @@ export function finalState(outcome?: string): FinalNode<string> {
   });
 }
 
+let dynamicTimerCounter = 0;
+
 /**
- * Declarative timer marker for Column 2 (`VIA`).
- * Automatically fires after `ms` milliseconds while in the source state
+ * Declarative one-shot timer marker for Column 2 (`VIA`).
+ * Automatically fires after `ms` milliseconds while in the source state (must transition out of the state; `stay()` is forbidden)
  * and cancels via `clearTimeout` immediately when the state is exited.
  */
-export function after<const TMs extends number>(ms: TMs): AfterNode<TMs> {
+export function after<const TMs extends number, TContext = any>(
+  ms: TMs | ((ctx: ReadonlyContext<TContext>) => number),
+): AfterNode<TMs, TContext> {
+  const id =
+    typeof ms === 'number'
+      ? (`__after_${ms}__` as const)
+      : (`__after_fn_${++dynamicTimerCounter}__` as const);
   return Object.freeze({
     __type: 'after' as const,
     __kind: 'after' as const,
     ms,
-    id: `__after_${ms}__` as const,
+    id,
+  });
+}
+
+/**
+ * Declarative recurring interval marker for Column 2 (`VIA`).
+ * Must be paired with `stay()` in Column 3 (`TO`).
+ * Continuously fires every `ms` milliseconds while in the source state, adapts immediately when a `stay()` transition mutates the interval duration, and cancels on state exit.
+ */
+export function every<TContext = any>(
+  ms: number | ((ctx: ReadonlyContext<TContext>) => number),
+): EveryNode<TContext> {
+  const id =
+    typeof ms === 'number'
+      ? (`__every_${ms}__` as const)
+      : (`__every_fn_${++dynamicTimerCounter}__` as const);
+  return Object.freeze({
+    __type: 'every' as const,
+    __kind: 'every' as const,
+    ms,
+    id,
   });
 }
 
@@ -318,6 +371,17 @@ export function isAwaitingNode(value: unknown): value is AwaitingNode<string> {
   );
 }
 
+export function isOutcomeNode(
+  value: unknown,
+): value is OutcomeNode<string, unknown> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as OutcomeNode).__type === 'outcome' &&
+    typeof (value as OutcomeNode).event === 'string'
+  );
+}
+
 export function isStayNode(value: unknown): value is StayNode {
   return (
     typeof value === 'object' &&
@@ -343,12 +407,21 @@ export function isFinalNode(value: unknown): value is FinalNode<string> {
   );
 }
 
-export function isAfterNode(value: unknown): value is AfterNode<number> {
+export function isAfterNode(value: unknown): value is AfterNode<number, any> {
   return (
     typeof value === 'object' &&
     value !== null &&
     ((value as AfterNode).__type === 'after' ||
       (value as AfterNode).__kind === 'after')
+  );
+}
+
+export function isEveryNode(value: unknown): value is EveryNode<any> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    ((value as EveryNode).__type === 'every' ||
+      (value as EveryNode).__kind === 'every')
   );
 }
 

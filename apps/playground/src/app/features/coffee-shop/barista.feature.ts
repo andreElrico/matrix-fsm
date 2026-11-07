@@ -1,7 +1,7 @@
 /**
  * Cohesive Sub-Machine Actor: Barista Station (barista.feature.ts)
  * Combines Public Contract (Inputs, Events, Outputs, States), Transition Matrix,
- * and isolated Actor Runtime (state, methods, tasks) in a single cohesive file.
+ * and isolated Actor Runtime (state, methods) in a single cohesive file.
  */
 
 import { inject } from '@angular/core';
@@ -35,7 +35,7 @@ export type BaristaOutputs = {
 };
 
 // ============================================================================
-// 2. COHESIVE MACHINE FEATURE (Matrix + Internal State + Tasks)
+// 2. COHESIVE MACHINE FEATURE (Matrix + Internal State + Methods)
 // ============================================================================
 export const baristaFSM = createMachineFeature<{
   inputs: BaristaInputs;
@@ -52,10 +52,10 @@ export const baristaFSM = createMachineFeature<{
   // prettier-ignore
   transitions: [
     /* FROM            VIA               TO                         OPTIONS */
-    ['ticketQueued',   'START_BREWING',  awaiting('brewingCoffee')],
-    ['brewingCoffee',  'DONE',           finalState(),              { output: ['COFFEE_READY', (ctx) => ({ drinkName: ctx.selectedDrink.name, result: ctx.baristaResult ?? { baristaNote: '', temperatureCelsius: 67 } })] }],
+    ['ticketQueued',   'START_BREWING',  awaiting('brewingCoffee'), { call: (m) => m._brewCoffee }],
+    ['brewingCoffee',  'DONE',           finalState(),              { call: (m) => m._saveBrewResult, output: ['COFFEE_READY', (ctx, result) => ({ drinkName: ctx.selectedDrink.name, result: result ?? ctx.baristaResult ?? { baristaNote: '', temperatureCelsius: 67 } })] }],
     ['brewingCoffee',  'ERROR',          'maintenance',             { call: (m) => m._setBrewError }],
-    ['maintenance',    'RETRY_BREW',     awaiting('brewingCoffee')],
+    ['maintenance',    'RETRY_BREW',     awaiting('brewingCoffee'), { call: (m) => m._brewCoffee }],
   ],
 
   // --------------------------------------------------------------------------
@@ -67,23 +67,23 @@ export const baristaFSM = createMachineFeature<{
   },
 
   // --------------------------------------------------------------------------
-  // C) IMPLEMENTATION (Methods & Async Tasks)
+  // C) IMPLEMENTATION (Sync & Async Methods)
   // --------------------------------------------------------------------------
-  methods: (store) => ({
-    _setBrewError: (err: Error) => patchState(store, { brewError: err.message }),
-  }),
-
-  tasks: (api = inject(CoffeeShopApiService)) => ({
-    brewingCoffee: async (ctx, signal) => {
-      const baristaResult = await api.brewCoffee(
-        ctx.selectedDrink,
-        signal,
-        ctx.simulateBrewError,
-      );
-      return {
-        baristaResult,
-        brewError: null,
-      };
+  methods: (store, api = inject(CoffeeShopApiService)) => ({
+    _brewCoffee: async (
+      _payload: void,
+      signal: AbortSignal,
+      ctx: Readonly<
+        BaristaInputs & {
+          baristaResult: BrewResult | null;
+          brewError: string | null;
+        }
+      >,
+    ) => {
+      return api.brewCoffee(ctx.selectedDrink, signal, ctx.simulateBrewError);
     },
+    _saveBrewResult: (baristaResult: BrewResult) =>
+      patchState(store, { baristaResult, brewError: null }),
+    _setBrewError: (err: Error) => patchState(store, { brewError: err.message }),
   }),
 });

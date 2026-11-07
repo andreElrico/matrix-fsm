@@ -8,6 +8,7 @@ import { AST_NODE_TYPES, ESLintUtils, type TSESTree } from '@typescript-eslint/u
 import {
   getExtractedTransitionsArray,
   getMachineTransitionsArray,
+  hasCallOption,
   parseTransitionRow,
   type ParsedTransitionRow,
 } from '../ast-utils.js';
@@ -16,7 +17,7 @@ const createRule = ESLintUtils.RuleCreator(
   (name) => `https://matrix-fsm.dev/rules/${name}`,
 );
 
-export type MessageIds = 'missingAwaitingHandlers';
+export type MessageIds = 'missingAwaitingHandlers' | 'missingAwaitingCall';
 
 export const requireAwaitingHandlers = createRule<[], MessageIds>({
   name: 'require-awaiting-handlers',
@@ -24,12 +25,14 @@ export const requireAwaitingHandlers = createRule<[], MessageIds>({
     type: 'problem',
     docs: {
       description:
-        "Require every awaiting('x') state to have both a ['x', 'DONE', ...] and an ['x', 'ERROR', ...] transition row.",
+        "Require every awaiting('x') state to have a { call } option on entry and both an outcome ('DONE' or named outcome) and an 'ERROR' transition row.",
     },
     schema: [],
     messages: {
       missingAwaitingHandlers:
         "Awaiting state '{{state}}' is missing mandatory {{missing}} transition row(s) in Column 1.",
+      missingAwaitingCall:
+        "Transition into awaiting('{{state}}') requires a '{ call: (m) => m._method }' option in Column 4.",
     },
   },
   defaultOptions: [],
@@ -82,6 +85,41 @@ export const requireAwaitingHandlers = createRule<[], MessageIds>({
           }
         }
 
+        const awaitingStateNames = new Set<string>();
+        for (const row of allRows) {
+          if (row.awaitingCall) {
+            awaitingStateNames.add(row.awaitingCall.stateName);
+          }
+        }
+
+        const externalEvents = new Set<string>(['CANCEL', 'ERROR']);
+        for (const row of allRows) {
+          const viaKeys =
+            row.viaNode.type === AST_NODE_TYPES.ArrayExpression
+              ? row.viaNode.elements
+                  .map((el) =>
+                    el &&
+                    el.type === AST_NODE_TYPES.Literal &&
+                    typeof el.value === 'string'
+                      ? el.value
+                      : null,
+                  )
+                  .filter((k): k is string => k !== null)
+              : row.viaKey
+                ? [row.viaKey]
+                : [];
+          const isFromNonAwaiting = row.fromKeys.some(
+            (fKey) => fKey !== 'anyState()' && !awaitingStateNames.has(fKey),
+          );
+          if (isFromNonAwaiting) {
+            for (const v of viaKeys) {
+              if (v !== 'DONE' && v !== 'ALL_DONE') {
+                externalEvents.add(v);
+              }
+            }
+          }
+        }
+
         const doneStates = new Set<string>();
         const errorStates = new Set<string>();
 
@@ -101,7 +139,18 @@ export const requireAwaitingHandlers = createRule<[], MessageIds>({
                 ? [row.viaKey]
                 : [];
           for (const fKey of row.fromKeys) {
-            if (viaKeys.includes('DONE') || viaKeys.includes('ALL_DONE')) {
+            if (
+              viaKeys.includes('DONE') ||
+              viaKeys.includes('ALL_DONE') ||
+              (awaitingStateNames.has(fKey) &&
+                viaKeys.some(
+                  (v) =>
+                    !externalEvents.has(v) &&
+                    !v.startsWith('after(') &&
+                    !v.startsWith('every(') &&
+                    v !== 'always()',
+                ))
+            ) {
               doneStates.add(fKey);
             }
             if (viaKeys.includes('ERROR')) {
@@ -130,6 +179,15 @@ export const requireAwaitingHandlers = createRule<[], MessageIds>({
             continue;
           }
           const { stateName, callNode } = row.awaitingCall;
+          if (!hasCallOption(row.optionsNode)) {
+            context.report({
+              node: callNode,
+              messageId: 'missingAwaitingCall',
+              data: {
+                state: stateName,
+              },
+            });
+          }
           const hasDone =
             doneStates.has(stateName) || doneStates.has('anyState()');
           const hasError =

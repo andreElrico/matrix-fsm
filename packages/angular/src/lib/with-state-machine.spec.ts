@@ -18,18 +18,18 @@ import {
   createFSM,
   createMachineFeature,
   each,
+  every,
   finalState,
   getShortestPaths,
   MatrixFsmInfiniteLoopError,
   provideStateMachine,
   race,
   stay,
-  whenSignal,
-  withMachineTasks,
   withStateMachine,
   type Subscribable,
 } from '../index.js';
-import { effectTaskAdapter } from '../effect/index.js';
+import * as AngularPkg from '../index.js';
+import * as EffectPkg from '../effect/index.js';
 
 class NetworkTimeoutError extends Data.TaggedError('NetworkTimeoutError')<{
   readonly message: string;
@@ -72,6 +72,12 @@ type AuthEvents = {
 type AuthMethods = {
   _setEmail(payload: { email: string }): void;
   _setInvalidEmail(): void;
+  _authenticate(
+    payload: void,
+    signal: AbortSignal,
+    ctx: Readonly<AuthContext>,
+  ): unknown;
+  _saveUser(res: { user: User }): void;
   _setError(err: Error): void;
 };
 
@@ -88,8 +94,8 @@ const initialAuthState: AuthContext = {
 };
 
 const hasValidInput = (ctx: AuthContext) => ctx.credentials.email.includes('@');
-const shouldShowPromo = (ctx: AuthContext) =>
-  ctx.user !== null && ctx.policy.showUpsellAds;
+const shouldShowPromo = (ctx: AuthContext, res?: { user: User }) =>
+  (res?.user ?? ctx.user) !== null && ctx.policy.showUpsellAds;
 
 const authFSM = createFSM<{
   events: AuthEvents;
@@ -101,11 +107,11 @@ const authFSM = createFSM<{
   initial: 'loginView',
   transitions: [
     ['loginView',         'SET_EMAIL',            stay(),                      { call: (m) => m._setEmail }],
-    ['loginView',         'LOGIN',                awaiting('authenticating'),  { guard: hasValidInput }],
+    ['loginView',         'LOGIN',                awaiting('authenticating'),  { guard: hasValidInput, call: (m) => m._authenticate }],
     ['loginView',         'LOGIN',                stay(),                      { call: (m) => m._setInvalidEmail }],
     ['authenticating',    'CANCEL',               'loginView'],
-    ['authenticating',    'DONE',                 'proUpsellPromo',            { guard: shouldShowPromo }],
-    ['authenticating',    'DONE',                 'loggedIn'],
+    ['authenticating',    'DONE',                 'proUpsellPromo',            { guard: shouldShowPromo, call: (m) => m._saveUser }],
+    ['authenticating',    'DONE',                 'loggedIn',                  { call: (m) => m._saveUser }],
     ['authenticating',    'NetworkTimeoutError',  'offlineRetryView'],
     ['authenticating',    'ERROR',                'loginView',                 { call: (m) => m._setError }],
     ['proUpsellPromo',    'DISMISS_PROMO',        'loggedIn'],
@@ -113,7 +119,7 @@ const authFSM = createFSM<{
 });
 
 describe('@matrix-fsm/angular - withStateMachine', () => {
-  it('aligns with SignalStore withState & withMethods (call), syncContext, and patches state BEFORE DONE guards', async () => {
+  it('aligns with SignalStore withState & withMethods (call), syncContext, and passes DONE payload to guards and methods', async () => {
     const policySignal = signal<UserEntitlements>({
       showUpsellAds: true,
       canBypassApproval: false,
@@ -134,6 +140,17 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
             patchState(store, {
               error: 'Invalid email',
             }),
+          _authenticate: async (_payload, _signal, ctx) => ({
+            user: {
+              id: 'u1',
+              email: ctx.credentials.email,
+            },
+          }),
+          _saveUser: ({ user }) =>
+            patchState(store, {
+              user,
+              error: null,
+            }),
           _setError: (err) =>
             patchState(store, {
               error: err.message,
@@ -143,15 +160,6 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       withStateMachine(authFSM, {
         syncContext: () => ({
           policy: policySignal,
-        }),
-        tasks: () => ({
-          authenticating: async (ctx) => ({
-            user: {
-              id: 'u1',
-              email: ctx.credentials.email,
-            },
-            error: null,
-          }),
         }),
       }),
     );
@@ -174,8 +182,6 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
 
     await new Promise((r) => setTimeout(r, 15));
 
-    // Notice shouldShowPromo checks `ctx.user !== null && ctx.policy.showUpsellAds`!
-    // Task output `{ user }` is patched into SignalStore state BEFORE 'DONE' guards evaluate!
     expect(store.fsmState()).toBe('proUpsellPromo');
     expect(store.user()).toEqual({
       id: 'u1',
@@ -204,15 +210,14 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     expect(store.fsmState()).toBe('loggedIn');
   });
 
-  it('supports RxJS Observable / Subscribable tasks natively and unsubscribes on state exit', async () => {
+  it('supports RxJS Observable / Subscribable methods natively on awaiting() and unsubscribes on state exit', async () => {
     let unsubscribed = false;
 
-    const createSlowObservable = (): Subscribable<Partial<AuthContext>> => ({
+    const createSlowObservable = (): Subscribable<{ user: User }> => ({
       subscribe(observer) {
         const timer = setTimeout(() => {
           observer?.next?.({
             user: { id: 'rx-1', email: 'rxjs@matrix.dev' },
-            error: null,
           });
           observer?.complete?.();
         }, 40);
@@ -235,14 +240,12 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
           _setEmail: ({ email }) =>
             patchState(store, { credentials: { ...store.credentials(), email } }),
           _setInvalidEmail: () => patchState(store, { error: 'Invalid email' }),
+          _authenticate: () => createSlowObservable(),
+          _saveUser: ({ user }) => patchState(store, { user, error: null }),
           _setError: (err) => patchState(store, { error: err.message }),
         }),
       ),
-      withStateMachine(authFSM, {
-        tasks: () => ({
-          authenticating: () => createSlowObservable(),
-        }),
-      }),
+      withStateMachine(authFSM),
     );
 
     const store = new RxStore();
@@ -258,31 +261,44 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
   it('routes Effect TaggedError via _tag to matching matrix row or falls back to ERROR via @matrix-fsm/angular/effect', async () => {
     let failMode: 'tagged' | 'generic' = 'tagged';
 
-    const AuthStore = signalStore(
-      withState<AuthContext>(initialAuthState),
-      withMethods(
-        (store): AuthMethods => ({
-          _setEmail: ({ email }) =>
-            patchState(store, {
-              credentials: { ...store.credentials(), email },
-              error: null,
-            }),
-          _setInvalidEmail: () => patchState(store, { error: 'Invalid email' }),
-          _setError: (err) => patchState(store, { error: err.message }),
-        }),
-      ),
-      withStateMachine(authFSM, {
-        taskAdapter: effectTaskAdapter,
-        tasks: () => ({
-          authenticating: () =>
-            failMode === 'tagged'
-              ? Effect.fail(
-                  new NetworkTimeoutError({ message: 'Gateway timeout' }),
-                )
-              : Effect.fail(new Error('Invalid credentials')),
-        }),
+    const authEffectFeature = EffectPkg.createEffectMachineFeature<{
+      events: AuthEvents;
+      states: AuthStates;
+    }>()({
+      id: 'auth',
+      initial: 'loginView',
+      transitions: [
+        ['loginView',         'SET_EMAIL',            stay(),                      { call: (m) => m._setEmail }],
+        ['loginView',         'LOGIN',                awaiting('authenticating'),  { guard: hasValidInput, call: (m) => m._authenticate }],
+        ['loginView',         'LOGIN',                stay(),                      { call: (m) => m._setInvalidEmail }],
+        ['authenticating',    'CANCEL',               'loginView'],
+        ['authenticating',    'DONE',                 'proUpsellPromo',            { guard: shouldShowPromo, call: (m) => m._saveUser }],
+        ['authenticating',    'DONE',                 'loggedIn',                  { call: (m) => m._saveUser }],
+        ['authenticating',    'NetworkTimeoutError',  'offlineRetryView'],
+        ['authenticating',    'ERROR',                'loginView',                 { call: (m) => m._setError }],
+        ['proUpsellPromo',    'DISMISS_PROMO',        'loggedIn'],
+      ],
+      state: initialAuthState,
+      methods: (store) => ({
+        _setEmail: ({ email }: { email: string }) =>
+          patchState(store, {
+            credentials: { ...store.credentials(), email },
+            error: null,
+          }),
+        _setInvalidEmail: () => patchState(store, { error: 'Invalid email' }),
+        _authenticate: () =>
+          failMode === 'tagged'
+            ? Effect.fail(
+                new NetworkTimeoutError({ message: 'Gateway timeout' }),
+              )
+            : Effect.fail(new Error('Invalid credentials')),
+        _saveUser: ({ user }: { user: User }) =>
+          patchState(store, { user, error: null }),
+        _setError: (err: Error) => patchState(store, { error: err.message }),
       }),
-    );
+    });
+
+    const AuthStore = signalStore(withStateMachine(authEffectFeature));
 
     const store = new AuthStore();
     store.send('SET_EMAIL', { email: 'bob@matrix.dev' });
@@ -306,40 +322,50 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     let wasInterrupted = false;
     let abortSignalTriggered = false;
 
-    const AuthStore = signalStore(
-      withState<AuthContext>(initialAuthState),
-      withMethods(
-        (store): AuthMethods => ({
-          _setEmail: ({ email }) =>
-            patchState(store, {
-              credentials: { ...store.credentials(), email },
-              error: null,
-            }),
-          _setInvalidEmail: () => patchState(store, { error: 'Invalid email' }),
-          _setError: (err) => patchState(store, { error: err.message }),
-        }),
-      ),
-      withStateMachine(authFSM, {
-        taskAdapter: effectTaskAdapter,
-        tasks: () => ({
-          authenticating: (_ctx, abortSignal) => {
-            abortSignal.addEventListener('abort', () => {
-              abortSignalTriggered = true;
-            });
-            return Effect.sleep('500 millis').pipe(
-              Effect.map(() => ({
-                user: { id: 'late', email: 'late@matrix.dev' },
-              })),
-              Effect.onInterrupt(() =>
-                Effect.sync(() => {
-                  wasInterrupted = true;
-                }),
-              ),
-            );
-          },
-        }),
+    const authCancelEffectFeature = EffectPkg.createEffectMachineFeature<{
+      events: AuthEvents;
+      states: AuthStates;
+    }>()({
+      id: 'auth',
+      initial: 'loginView',
+      transitions: [
+        ['loginView',         'SET_EMAIL',            stay(),                      { call: (m) => m._setEmail }],
+        ['loginView',         'LOGIN',                awaiting('authenticating'),  { guard: hasValidInput, call: (m) => m._authenticate }],
+        ['loginView',         'LOGIN',                stay(),                      { call: (m) => m._setInvalidEmail }],
+        ['authenticating',    'CANCEL',               'loginView'],
+        ['authenticating',    'DONE',                 'loggedIn',                  { call: (m) => m._saveUser }],
+        ['authenticating',    'ERROR',                'loginView',                 { call: (m) => m._setError }],
+      ],
+      state: initialAuthState,
+      methods: (store) => ({
+        _setEmail: ({ email }: { email: string }) =>
+          patchState(store, {
+            credentials: { ...store.credentials(), email },
+            error: null,
+          }),
+        _setInvalidEmail: () => patchState(store, { error: 'Invalid email' }),
+        _authenticate: (_payload: void, abortSignal: AbortSignal) => {
+          abortSignal.addEventListener('abort', () => {
+            abortSignalTriggered = true;
+          });
+          return Effect.sleep('500 millis').pipe(
+            Effect.map(() => ({
+              user: { id: 'late', email: 'late@matrix.dev' },
+            })),
+            Effect.onInterrupt(() =>
+              Effect.sync(() => {
+                wasInterrupted = true;
+              }),
+            ),
+          );
+        },
+        _saveUser: ({ user }: { user: User }) =>
+          patchState(store, { user, error: null }),
+        _setError: (err: Error) => patchState(store, { error: err.message }),
       }),
-    );
+    });
+
+    const AuthStore = signalStore(withStateMachine(authCancelEffectFeature));
 
     const store = new AuthStore();
     store.send('SET_EMAIL', { email: 'cancel@matrix.dev' });
@@ -409,13 +435,19 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     expect(store.childMachines()['fileIds'].every((c) => c.isDone)).toBe(true);
   });
 
-  it('supports zero-leakage sub-machine stores (BaristaStore), explicit input/output contracts, and composable withMachineTasks', async () => {
+  it('supports zero-leakage sub-machine stores (BaristaStore) and explicit input/output contracts', async () => {
     interface SubCtx {
       selectedDrink: string | null;
       brewed: boolean;
       error: string | null;
     }
     type SubMethods = {
+      _brew(
+        payload: void,
+        signal: AbortSignal,
+        ctx: Readonly<SubCtx>,
+      ): Promise<{ brewed: boolean }>;
+      _onBrewed(res: { brewed: boolean }): void;
       _setBrewError(err: Error): void;
     };
     const subBarista = createFSM<{
@@ -427,8 +459,8 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       id: 'barista',
       initial: 'ticketQueued',
       transitions: [
-        ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee')],
-        ['brewingCoffee', 'DONE',          finalState('COFFEE_READY')],
+        ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee'), { call: (m) => m._brew }],
+        ['brewingCoffee', 'DONE',          finalState('COFFEE_READY'), { call: (m) => m._onBrewed }],
         ['brewingCoffee', 'ERROR',         'maintenance',             { call: (m) => m._setBrewError }],
       ],
     });
@@ -439,6 +471,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       cupReady: boolean;
     }
     type ShopMethods = {
+      _checkLoyalty(): void;
       _markPaid(): void;
       _onCupReady(output: SubCtx): void;
     };
@@ -451,7 +484,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       id: 'shop',
       initial: 'browsing',
       transitions: [
-        ['browsing',        'ORDER',        awaiting('checkingLoyalty')],
+        ['browsing',        'ORDER',        awaiting('checkingLoyalty'), { call: (m) => m._checkLoyalty }],
         ['checkingLoyalty', 'DONE',         'awaitingPayment'],
         ['checkingLoyalty', 'ERROR',        'browsing'],
         [
@@ -477,42 +510,26 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
           error: null,
         },
         methods: (store): SubMethods => ({
-          _setBrewError: (err) => patchState(store, { error: err.message }),
-        }),
-        tasks: () => ({
-          brewingCoffee: async (ctx) => ({
+          _brew: async (_payload, _sig, ctx) => ({
             brewed: ctx.selectedDrink === 'Flat White',
           }),
+          _onBrewed: ({ brewed }) => patchState(store, { brewed }),
+          _setBrewError: (err) => patchState(store, { error: err.message }),
         }),
       }),
     );
     expect(BaristaStore).toBeDefined();
 
-    // 1. Omitting parent's OWN task (`checkingLoyalty`), OWN method (`_markPaid`), or child's OWN method (`_setBrewError`) triggers a compile error:
+    // 1. Omitting parent's OWN method (`_onCupReady`) or child's OWN method (`_setBrewError`) triggers a compile error:
     if (false as boolean) {
-      signalStore(
-        withState<ShopCtx>({ drinkOrder: 'Flat White', paid: false, cupReady: false }),
-        withMethods((): ShopMethods => ({
-          _markPaid: () => undefined,
-          _onCupReady: () => undefined,
-        })),
-        withStateMachine(shopFSM, {
-          // @ts-expect-error - Own awaiting state 'checkingLoyalty' is missing in tasks
-          tasks: () => ({}),
-        }),
-      );
-
       // @ts-expect-error - Own method '_onCupReady' is missing in store methods
       signalStore(
         withState<ShopCtx>({ drinkOrder: 'Flat White', paid: false, cupReady: false }),
         withMethods(() => ({
+          _checkLoyalty: () => undefined,
           _markPaid: () => undefined,
         })),
-        withStateMachine(shopFSM, {
-          tasks: () => ({
-            checkingLoyalty: async () => ({ paid: false }),
-          }),
-        }),
+        withStateMachine(shopFSM),
       );
 
       // @ts-expect-error - '_setBrewError' is omitted from both withMethods and config.methods
@@ -522,11 +539,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
           brewed: false,
           error: null,
         }),
-        withStateMachine(subBarista, {
-          tasks: () => ({
-            brewingCoffee: async () => ({ brewed: true }),
-          }),
-        }),
+        withStateMachine(subBarista),
       );
 
       const syncOnlyWithMethodFSM = createFSM<{
@@ -541,25 +554,22 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         ],
       });
 
-      // @ts-expect-error - '_setBrewError' is missing when tasks are empty and config is omitted
+      // @ts-expect-error - '_setBrewError' is missing when config is omitted
       signalStore(
         withState({ error: null as string | null }),
         withStateMachine(syncOnlyWithMethodFSM),
       );
     }
 
-    // 2. Zero-Leakage Parent Store: ZERO Barista state, ZERO Barista methods, ZERO Barista tasks!
+    // 2. Zero-Leakage Parent Store: ZERO Barista state, ZERO Barista methods!
     const ZeroLeakageShopStore = signalStore(
       withState<ShopCtx>({ drinkOrder: 'Flat White', paid: false, cupReady: false }),
       withMethods((store): ShopMethods => ({
+        _checkLoyalty: () => undefined,
         _markPaid: () => patchState(store, { paid: true }),
         _onCupReady: (output) => patchState(store, { cupReady: output.brewed }),
       })),
-      withStateMachine(shopFSM, {
-        tasks: {
-          checkingLoyalty: () => undefined,
-        },
-      }),
+      withStateMachine(shopFSM),
     );
 
     const shop = new ZeroLeakageShopStore();
@@ -575,39 +585,6 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
     await new Promise((r) => setTimeout(r, 15));
     expect(shop.fsmState()).toBe('ready');
     expect(shop.cupReady()).toBe(true);
-
-    // 3. Also supports composable `withMachineTasks(subBarista)` on a combined store:
-    const ComposedStore = signalStore(
-      withState<ShopCtx & SubCtx>({
-        drinkOrder: 'Espresso',
-        paid: false,
-        cupReady: false,
-        selectedDrink: null,
-        brewed: false,
-        error: null,
-      }),
-      withMethods((store): ShopMethods & SubMethods => ({
-        _markPaid: () => patchState(store, { paid: true }),
-        _onCupReady: (output) => patchState(store, { cupReady: output.brewed }),
-        _setBrewError: () => undefined,
-      })),
-      withMachineTasks(subBarista, {
-        brewingCoffee: () => ({ brewed: true }),
-      }),
-      withStateMachine(shopFSM, {
-        tasks: {
-          checkingLoyalty: () => undefined,
-        },
-      }),
-    );
-    const composed = new ComposedStore();
-    composed.send('ORDER');
-    expect(composed.fsmState()).toBe('awaitingPayment');
-    composed.send('PAY');
-    expect(composed.fsmState()).toBe('barista');
-    composed.send('START_BREWING');
-    expect(composed.brewed()).toBe(true);
-    expect(composed.fsmState()).toBe('ready');
   });
 
   it('executes async awaiting() tasks and nested sub-machines inside 1:N each() pools and aborts all on parent interrupt', async () => {
@@ -617,11 +594,14 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       events: { BREW: void };
       states: 'queued' | 'brewingItem';
       context: { id: string; drink: string; done: boolean };
+      methods: {
+        _brewItem: (_payload: void, signal: AbortSignal) => Promise<void>;
+      };
     }>()({
       id: 'orderItem',
       initial: 'queued',
       transitions: [
-        ['queued',      'BREW',  awaiting('brewingItem')],
+        ['queued',      'BREW',  awaiting('brewingItem'), { call: (m) => m._brewItem }],
         ['brewingItem', 'DONE',  finalState('ORDER_READY')],
         ['brewingItem', 'ERROR', 'queued'],
       ],
@@ -629,16 +609,19 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
 
     provideStateMachine(orderItemFSM, {
       state: { id: '', drink: '', done: false },
-      tasks: {
-        brewingItem: (_ctx, signal) =>
-          new Promise((resolve) => {
-            const timer = setTimeout(() => resolve({ done: true }), 25);
+      methods: (store) => ({
+        _brewItem: (_payload, signal) =>
+          new Promise<void>((resolve) => {
+            const timer = setTimeout(() => {
+              patchState(store, { done: true });
+              resolve();
+            }, 25);
             signal.addEventListener('abort', () => {
               clearTimeout(timer);
               abortedCount++;
             });
           }),
-      },
+      }),
     });
 
     const shopPoolFSM = createFSM<{
@@ -698,11 +681,14 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       events: { START_BREWING: void };
       states: 'ticketQueued' | 'brewingCoffee';
       context: { brewed: boolean };
+      methods: {
+        _brewCoffee: (_payload: void, abortSignal: AbortSignal) => Promise<void>;
+      };
     }>()({
       id: 'baristaInterruptTest',
       initial: 'ticketQueued',
       transitions: [
-        ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee')],
+        ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee'), { call: (m) => m._brewCoffee }],
         ['brewingCoffee', 'DONE',          finalState('COFFEE_READY')],
         ['brewingCoffee', 'ERROR',         'ticketQueued'],
       ],
@@ -710,16 +696,19 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
 
     provideStateMachine(childBaristaFSM, {
       state: { brewed: false },
-      tasks: {
-        brewingCoffee: (_ctx, abortSignal) =>
-          new Promise((resolve) => {
-            const timer = setTimeout(() => resolve({ brewed: true }), 100);
+      methods: (store) => ({
+        _brewCoffee: (_payload, abortSignal) =>
+          new Promise<void>((resolve) => {
+            const timer = setTimeout(() => {
+              patchState(store, { brewed: true });
+              resolve();
+            }, 100);
             abortSignal.addEventListener('abort', () => {
               clearTimeout(timer);
               subAborted = true;
             });
           }),
-      },
+      }),
     });
 
     const parentShopFSM = createFSM<{
@@ -791,12 +780,12 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       initial: 'ticketQueued',
       // prettier-ignore
       transitions: [
-        ['ticketQueued',   'START_BREWING',      awaiting('brewingCoffee')],
+        ['ticketQueued',   'START_BREWING',      awaiting('brewingCoffee'), { call: (m) => m._brewCoffee }],
         ['brewingCoffee',  'TICK_PROGRESS',      stay(),                    { call: (m) => m._setProgress, output: ['BREW_PROGRESS', (ctx) => ({ percent: ctx.progressPercent })] }],
         ['brewingCoffee',  'EMERGENCY_OVERHEAT', stay(),                    { output: 'OVERHEAT_ALERT' }],
-        ['brewingCoffee',  'DONE',               finalState(),              { output: ['COFFEE_READY', (ctx) => ({ drinkName: ctx.selectedDrink.name, temperatureCelsius: ctx.temperatureCelsius! })] }],
+        ['brewingCoffee',  'DONE',               finalState(),              { call: (m) => m._saveBrewResult, output: ['COFFEE_READY', (ctx, res) => ({ drinkName: ctx.selectedDrink.name, temperatureCelsius: res.temperatureCelsius })] }],
         ['brewingCoffee',  'ERROR',              'maintenance',             { call: (m) => m._setBrewError }],
-        ['maintenance',    'RETRY_BREW',         awaiting('brewingCoffee')],
+        ['maintenance',    'RETRY_BREW',         awaiting('brewingCoffee'), { call: (m) => m._brewCoffee }],
       ],
       state: {
         temperatureCelsius: null as number | null,
@@ -808,16 +797,29 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
           patchState(store, { progressPercent: ev.percent }),
         _setBrewError: (err: Error) =>
           patchState(store, { brewError: err.message }),
-      }),
-      tasks: () => ({
-        brewingCoffee: (ctx, signal) =>
-          new Promise((resolve, reject) => {
+        _saveBrewResult: (res: { temperatureCelsius: number }) =>
+          patchState(store, {
+            temperatureCelsius: res.temperatureCelsius,
+            brewError: null,
+          }),
+        _brewCoffee: (
+          _payload: void,
+          signal: AbortSignal,
+          ctx: Readonly<
+            BaristaInputs & {
+              temperatureCelsius: number | null;
+              progressPercent: number;
+              brewError: string | null;
+            }
+          >,
+        ) =>
+          new Promise<{ temperatureCelsius: number }>((resolve, reject) => {
             if (ctx.simulateBrewError) {
               reject(new Error('Boiler pressure low'));
               return;
             }
             const timer = setTimeout(
-              () => resolve({ temperatureCelsius: 67, brewError: null }),
+              () => resolve({ temperatureCelsius: 67 }),
               25,
             );
             signal.addEventListener('abort', () => {
@@ -1045,8 +1047,8 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       initial: 'ticketQueued',
       // prettier-ignore
       transitions: [
-        ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee')],
-        ['brewingCoffee', 'DONE',          finalState(),              { output: ['COFFEE_READY', (ctx) => ({ drinkName: ctx.drink.name, result: ctx.baristaResult! })] }],
+        ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee'), { call: (m) => m._brewCoffee }],
+        ['brewingCoffee', 'DONE',          finalState(),              { call: (m) => m._saveResult, output: ['COFFEE_READY', (ctx, res) => ({ drinkName: ctx.drink.name, result: res })] }],
         ['brewingCoffee', 'ERROR',         'maintenance'],
       ],
       state: {
@@ -1056,23 +1058,33 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         } | null,
         error: null as string | null,
       },
-      tasks: (
+      methods: (
+        store,
         api = (() => {
           throw new Error(
             'Angular DI inject() must not be called in createFeatureTester!',
           );
         })(),
       ) => ({
-        brewingCoffee: async () => api,
+        _brewCoffee: async (
+          _payload: void,
+          _signal: AbortSignal,
+          _ctx: any,
+        ): Promise<{ readonly drinkName: string; readonly brewedAt: number }> =>
+          api,
+        _saveResult: (res: {
+          readonly drinkName: string;
+          readonly brewedAt: number;
+        }) => patchState(store, { baristaResult: res, error: null }),
       }),
     });
 
     const tester = createFeatureTester(baristaFSM, {
       inputs: { drink: { id: 'espresso', name: 'Espresso', price: 3 } },
-      tasks: {
-        brewingCoffee: async (ctx) => ({
-          baristaResult: { drinkName: ctx.drink.name, brewedAt: 12345 },
-          error: null,
+      methods: {
+        _brewCoffee: async (_payload: void, _signal: AbortSignal, ctx: any) => ({
+          drinkName: ctx.drink.name,
+          brewedAt: 12345,
         }),
       },
     });
@@ -1120,17 +1132,27 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       initial: 'ticketQueued',
       // prettier-ignore
       transitions: [
-        ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee')],
+        ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee'), { call: (m) => m._brewCoffee }],
         ['brewingCoffee', 'DONE',          finalState(),              { output: ['COFFEE_READY', (ctx) => ({ drinkId: ctx.drink.id, drinkName: ctx.drink.name })] }],
         ['brewingCoffee', 'ERROR',         'maintenance'],
       ],
       state: {
         brewed: false,
       },
-      tasks: () => ({
-        brewingCoffee: (ctx, abortSignal) =>
-          new Promise((resolve) => {
-            resolvers.set(ctx.drink.id, () => resolve({ brewed: true }));
+      methods: (store) => ({
+        _brewCoffee: (
+          _payload: void,
+          abortSignal: AbortSignal,
+          ctx: Readonly<{
+            drink: { id: string; name: string; price: number };
+            brewed: boolean;
+          }>,
+        ) =>
+          new Promise<void>((resolve) => {
+            resolvers.set(ctx.drink.id, () => {
+              patchState(store, { brewed: true });
+              resolve();
+            });
             abortSignal.addEventListener('abort', () => {
               abortedDrinks.push(ctx.drink.id);
             });
@@ -1225,24 +1247,22 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         id: 'childActor',
         initial: 'ready',
         transitions: [
-          ['ready',   'BEGIN_WORK',   awaiting('working')],
-          ['working', 'PING',         stay(),       { call: (m) => m._onChildPing }],
+          ['ready',   'BEGIN_WORK',   awaiting('working'), { call: (m) => m._work }],
+          ['working', 'PING',         stay(),              { call: (m) => m._onChildPing }],
           ['working', 'DONE',         finalState()],
           ['working', 'ERROR',        'ready'],
           ['working', 'CHILD_FINISH', finalState()],
         ],
         methods: () => ({
           _onChildPing: () => eventsLog.push('childPing'),
-        }),
-        tasks: {
-          working: (_ctx, sig) =>
+          _work: (_payload: void, sig: AbortSignal) =>
             new Promise<void>((_resolve, reject) => {
               sig.addEventListener('abort', () => {
                 childAborted = true;
                 reject(new DOMException('Aborted', 'AbortError'));
               });
             }),
-        },
+        }),
       });
 
       const parentFSM = createFSM<{
@@ -1252,8 +1272,12 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
           PING: void;
           LOGOUT: void;
         };
+        outputs: {
+          loggedOut: void;
+        };
         states: 'idle' | 'uploading' | 'done' | 'loggedOut';
         methods: {
+          _upload(_payload: void, sig: AbortSignal): Promise<void>;
           _onParentPing(): void;
           _onLogout(): void;
         };
@@ -1261,30 +1285,28 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         id: 'parentWithAnyState',
         initial: 'idle',
         transitions: [
-          ['idle',      'START_UPLOAD', awaiting('uploading')],
+          ['idle',      'START_UPLOAD', awaiting('uploading'),    { call: (m) => m._upload }],
           ['idle',      'ENTER_CHILD',  childActor],
           ['uploading', 'DONE',         'done'],
           ['uploading', 'ERROR',        'idle'],
           [childActor,  'DONE',         'done'],
-          [anyState(),  'PING',         stay(),      { call: (m) => m._onParentPing }],
-          [anyState(),  'LOGOUT',       'loggedOut', { call: (m) => m._onLogout }],
+          [anyState(),  'PING',         stay(),                   { call: (m) => m._onParentPing }],
+          [anyState(),  'LOGOUT',       finalState('loggedOut'),  { call: (m) => m._onLogout }],
         ],
       });
 
       const Store = signalStore(
         withStateMachine(parentFSM, {
           methods: () => ({
-            _onParentPing: () => eventsLog.push('parentPing'),
-            _onLogout: () => eventsLog.push('logout'),
-          }),
-          tasks: () => ({
-            uploading: (_ctx, sig) =>
+            _upload: (_payload: void, sig: AbortSignal) =>
               new Promise<void>((_resolve, reject) => {
                 sig.addEventListener('abort', () => {
                   uploadAborted = true;
                   reject(new DOMException('Aborted', 'AbortError'));
                 });
               }),
+            _onParentPing: () => eventsLog.push('parentPing'),
+            _onLogout: () => eventsLog.push('logout'),
           }),
         }),
       );
@@ -1335,34 +1357,36 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
 
       const m1 = createMachineFeature<{
         outputs: { DONE: { flightId: string }; ERROR: { reason: string } };
-        states: 'bookingFlight';
+        states: 'init' | 'bookingFlight';
       }>()({
         id: 'flightActor',
-        initial: 'bookingFlight',
+        initial: 'init',
         transitions: [
-          ['bookingFlight', 'DONE',  finalState(), { output: ['DONE', () => ({ flightId: 'FL-100' })] }],
-          ['bookingFlight', 'ERROR', finalState(), { output: ['ERROR', () => ({ reason: 'no-flights' })] }],
+          ['init',          always(), awaiting('bookingFlight'), { call: (m) => m._bookFlight }],
+          ['bookingFlight', 'DONE',   finalState(),              { output: ['DONE', () => ({ flightId: 'FL-100' })] }],
+          ['bookingFlight', 'ERROR',  finalState(),              { output: ['ERROR', () => ({ reason: 'no-flights' })] }],
         ],
-        tasks: {
-          bookingFlight: () =>
+        methods: () => ({
+          _bookFlight: () =>
             new Promise<void>((resolve) => {
               resolveM1 = resolve;
             }),
-        },
+        }),
       });
 
       const m2 = createMachineFeature<{
         outputs: { DONE: { hotelId: string }; ERROR: { reason: string } };
-        states: 'bookingHotel';
+        states: 'init' | 'bookingHotel';
       }>()({
         id: 'hotelActor',
-        initial: 'bookingHotel',
+        initial: 'init',
         transitions: [
-          ['bookingHotel', 'DONE',  finalState(), { output: ['DONE', () => ({ hotelId: 'HT-200' })] }],
-          ['bookingHotel', 'ERROR', finalState(), { output: ['ERROR', () => ({ reason: 'no-rooms' })] }],
+          ['init',         always(), awaiting('bookingHotel'), { call: (m) => m._bookHotel }],
+          ['bookingHotel', 'DONE',   finalState(),             { output: ['DONE', () => ({ hotelId: 'HT-200' })] }],
+          ['bookingHotel', 'ERROR',  finalState(),             { output: ['ERROR', () => ({ reason: 'no-rooms' })] }],
         ],
-        tasks: {
-          bookingHotel: (_ctx, sig) =>
+        methods: () => ({
+          _bookHotel: (_payload: void, sig: AbortSignal) =>
             new Promise<void>((resolve, reject) => {
               resolveM2 = resolve;
               sig.addEventListener('abort', () => {
@@ -1370,7 +1394,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
                 reject(new DOMException('Aborted', 'AbortError'));
               });
             }),
-        },
+        }),
       });
 
       const recordedPayloads: unknown[] = [];
@@ -1419,17 +1443,18 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       // Fail-fast check: if m1 emits ERROR, m2 is immediately aborted and parent transitions to 'failed'
       const m1Fail = createMachineFeature<{
         outputs: { DONE: { flightId: string }; ERROR: { reason: string } };
-        states: 'bookingFlight';
+        states: 'init' | 'bookingFlight';
       }>()({
         id: 'flightActorFail',
-        initial: 'bookingFlight',
+        initial: 'init',
         transitions: [
-          ['bookingFlight', 'DONE',  finalState(), { output: ['ERROR', () => ({ reason: 'flight-rejected' })] }],
-          ['bookingFlight', 'ERROR', finalState(), { output: ['ERROR', () => ({ reason: 'flight-rejected' })] }],
+          ['init',          always(), awaiting('bookingFlight'), { call: (m) => m._bookFlight }],
+          ['bookingFlight', 'DONE',   finalState(),              { output: ['ERROR', () => ({ reason: 'flight-rejected' })] }],
+          ['bookingFlight', 'ERROR',  finalState(),              { output: ['ERROR', () => ({ reason: 'flight-rejected' })] }],
         ],
-        tasks: {
-          bookingFlight: async () => undefined,
-        },
+        methods: () => ({
+          _bookFlight: async () => undefined,
+        }),
       });
 
       const failFastFSM = createFSM<{
@@ -1458,38 +1483,40 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
 
       const fastActor = createMachineFeature<{
         outputs: { FOUND: string };
-        states: 'searching';
+        states: 'init' | 'searching';
       }>()({
         id: 'fastActor',
-        initial: 'searching',
+        initial: 'init',
         transitions: [
-          ['searching', 'DONE',  finalState(), { output: ['FOUND', () => 'cache-hit'] }],
-          ['searching', 'ERROR', finalState(), { output: ['FOUND', () => 'fallback'] }],
+          ['init',      always(), awaiting('searching'), { call: (m) => m._search }],
+          ['searching', 'DONE',   finalState(),          { output: ['FOUND', () => 'cache-hit'] }],
+          ['searching', 'ERROR',  finalState(),          { output: ['FOUND', () => 'fallback'] }],
         ],
-        tasks: {
-          searching: async () => undefined,
-        },
+        methods: () => ({
+          _search: async () => undefined,
+        }),
       });
 
       const slowActor = createMachineFeature<{
         outputs: { TIMEOUT: void };
-        states: 'waiting';
+        states: 'init' | 'waiting';
       }>()({
         id: 'slowActor',
-        initial: 'waiting',
+        initial: 'init',
         transitions: [
-          ['waiting', 'DONE',  finalState('TIMEOUT')],
-          ['waiting', 'ERROR', finalState('TIMEOUT')],
+          ['init',    always(), awaiting('waiting'), { call: (m) => m._wait }],
+          ['waiting', 'DONE',   finalState('TIMEOUT')],
+          ['waiting', 'ERROR',  finalState('TIMEOUT')],
         ],
-        tasks: {
-          waiting: (_ctx, sig) =>
+        methods: () => ({
+          _wait: (_payload: void, sig: AbortSignal) =>
             new Promise<void>((_resolve, reject) => {
               sig.addEventListener('abort', () => {
                 slowAborted = true;
                 reject(new DOMException('Aborted', 'AbortError'));
               });
             }),
-        },
+        }),
       });
 
       const winners: string[] = [];
@@ -1530,53 +1557,56 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
 
       const failingPrimary = createMachineFeature<{
         outputs: { DONE: string; ERROR: string };
-        states: 'connecting';
+        states: 'init' | 'connecting';
       }>()({
         id: 'failingPrimary',
-        initial: 'connecting',
+        initial: 'init',
         transitions: [
-          ['connecting', 'DONE',  finalState(), { output: ['ERROR', () => 'primary-down'] }],
-          ['connecting', 'ERROR', finalState(), { output: ['ERROR', () => 'primary-down'] }],
+          ['init',       always(), awaiting('connecting'), { call: (m) => m._connect }],
+          ['connecting', 'DONE',   finalState(),           { output: ['ERROR', () => 'primary-down'] }],
+          ['connecting', 'ERROR',  finalState(),           { output: ['ERROR', () => 'primary-down'] }],
         ],
-        tasks: {
-          connecting: async () => undefined,
-        },
+        methods: () => ({
+          _connect: async () => undefined,
+        }),
       });
 
       const succeedingMirror = createMachineFeature<{
         outputs: { DONE: string; ERROR: string };
-        states: 'connecting';
+        states: 'init' | 'connecting';
       }>()({
         id: 'succeedingMirror',
-        initial: 'connecting',
+        initial: 'init',
         transitions: [
-          ['connecting', 'DONE',  finalState(), { output: ['DONE', () => 'mirror-ok'] }],
-          ['connecting', 'ERROR', finalState(), { output: ['ERROR', () => 'mirror-down'] }],
+          ['init',       always(), awaiting('connecting'), { call: (m) => m._connect }],
+          ['connecting', 'DONE',   finalState(),           { output: ['DONE', () => 'mirror-ok'] }],
+          ['connecting', 'ERROR',  finalState(),           { output: ['ERROR', () => 'mirror-down'] }],
         ],
-        tasks: {
-          connecting: () => new Promise<void>((r) => setTimeout(r, 5)),
-        },
+        methods: () => ({
+          _connect: () => new Promise<void>((r) => setTimeout(r, 5)),
+        }),
       });
 
       const slowBackup = createMachineFeature<{
         outputs: { DONE: string; ERROR: string };
-        states: 'connecting';
+        states: 'init' | 'connecting';
       }>()({
         id: 'slowBackup',
-        initial: 'connecting',
+        initial: 'init',
         transitions: [
-          ['connecting', 'DONE',  finalState(), { output: ['DONE', () => 'backup-ok'] }],
-          ['connecting', 'ERROR', finalState(), { output: ['ERROR', () => 'backup-down'] }],
+          ['init',       always(), awaiting('connecting'), { call: (m) => m._connect }],
+          ['connecting', 'DONE',   finalState(),           { output: ['DONE', () => 'backup-ok'] }],
+          ['connecting', 'ERROR',  finalState(),           { output: ['ERROR', () => 'backup-down'] }],
         ],
-        tasks: {
-          connecting: (_ctx, sig) =>
+        methods: () => ({
+          _connect: (_payload: void, sig: AbortSignal) =>
             new Promise<void>((_resolve, reject) => {
               sig.addEventListener('abort', () => {
                 backupAborted = true;
                 reject(new DOMException('Aborted', 'AbortError'));
               });
             }),
-        },
+        }),
       });
 
       const results: unknown[] = [];
@@ -1614,17 +1644,18 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       // Now test all failing -> emits ERROR with tuple of errors
       const failingMirror = createMachineFeature<{
         outputs: { DONE: string; ERROR: string };
-        states: 'connecting';
+        states: 'init' | 'connecting';
       }>()({
         id: 'failingMirror',
-        initial: 'connecting',
+        initial: 'init',
         transitions: [
-          ['connecting', 'DONE',  finalState(), { output: ['ERROR', () => 'mirror-down'] }],
-          ['connecting', 'ERROR', finalState(), { output: ['ERROR', () => 'mirror-down'] }],
+          ['init',       always(), awaiting('connecting'), { call: (m) => m._connect }],
+          ['connecting', 'DONE',   finalState(),           { output: ['ERROR', () => 'mirror-down'] }],
+          ['connecting', 'ERROR',  finalState(),           { output: ['ERROR', () => 'mirror-down'] }],
         ],
-        tasks: {
-          connecting: async () => undefined,
-        },
+        methods: () => ({
+          _connect: async () => undefined,
+        }),
       });
 
       const aggregateErrors: unknown[] = [];
@@ -1658,70 +1689,6 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       expect(aggregateErrors).toEqual([['primary-down', 'mirror-down']]);
     });
 
-    it('whenSignal(source, mapping): reactively bridges external Angular Signals into FSM events', () => {
-      const networkStatus = signal<'online' | 'offline'>('online');
-      const tokenExpired = signal(false);
-
-      const sessionFSM = createFSM<{
-        events: {
-          NETWORK_LOST: 'offline';
-          NETWORK_RESTORED: 'online';
-          SESSION_EXPIRED: boolean;
-        };
-        states: 'active' | 'offlinePaused' | 'loggedOut';
-        context: { lastStatus: string | null };
-        methods: {
-          _recordOffline(status: 'offline'): void;
-        };
-      }>()({
-        id: 'sessionBridge',
-        initial: 'active',
-        context: { lastStatus: null },
-        transitions: [
-          ['active',        'NETWORK_LOST',     'offlinePaused', { call: (m) => m._recordOffline }],
-          ['offlinePaused', 'NETWORK_RESTORED', 'active'],
-          [anyState(),      'SESSION_EXPIRED',  'loggedOut'],
-        ],
-      });
-
-      const SessionStore = signalStore(
-        withState({ lastStatus: null as string | null }),
-        withStateMachine(sessionFSM, {
-          methods: (store) => ({
-            _recordOffline: (status: 'offline') =>
-              patchState(store, { lastStatus: status }),
-          }),
-          on: () => [
-            whenSignal(networkStatus, {
-              offline: 'NETWORK_LOST',
-              online: 'NETWORK_RESTORED',
-            }),
-            whenSignal(tokenExpired, (expired) =>
-              expired ? 'SESSION_EXPIRED' : null,
-            ),
-          ],
-        }),
-      );
-
-      const store = new SessionStore();
-      // Initial signal evaluation does not fire transitions
-      expect(store.fsmState()).toBe('active');
-      expect(store.lastStatus()).toBeNull();
-
-      // Flip networkStatus -> 'offline': triggers NETWORK_LOST synchronously!
-      networkStatus.set('offline');
-      expect(store.fsmState()).toBe('offlinePaused');
-      expect(store.lastStatus()).toBe('offline');
-
-      // Flip networkStatus -> 'online': triggers NETWORK_RESTORED!
-      networkStatus.set('online');
-      expect(store.fsmState()).toBe('active');
-
-      // Flip tokenExpired -> true: triggers SESSION_EXPIRED via [anyState(), 'SESSION_EXPIRED', 'loggedOut']!
-      tokenExpired.set(true);
-      expect(store.fsmState()).toBe('loggedOut');
-    });
-
     it('supports passing a root createMachineFeature directly to signalStore(withStateMachine(feature)) without config, withState, or withMethods', async () => {
       const externalPromoSig = signal<boolean>(false);
 
@@ -1739,8 +1706,8 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         transitions: [
           ['browsing',           'SELECT_ITEM',     stay(),                         { call: (m) => m._selectItem }],
           ['browsing',           'PROMO_ACTIVATED', stay(),                         { call: (m) => m._enablePromo }],
-          ['browsing',           'CHECKOUT',        awaiting('processingCheckout')],
-          ['processingCheckout', 'DONE',            'completed'],
+          ['browsing',           'CHECKOUT',        awaiting('processingCheckout'), { call: (m) => m._processCheckout }],
+          ['processingCheckout', 'DONE',            'completed',                    { call: (m) => m._setOrder }],
           ['processingCheckout', 'ERROR',           'browsing'],
         ],
         state: {
@@ -1748,20 +1715,26 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
           promoActive: false,
           orderId: null as string | null,
         },
-        on: () => [
-          whenSignal(externalPromoSig, (active) =>
-            active ? 'PROMO_ACTIVATED' : null,
-          ),
-        ],
+        syncContext: () => ({
+          promoActive: externalPromoSig,
+        }),
         methods: (store) => ({
           _selectItem: ({ item }: { item: string }) =>
             patchState(store, { selectedItem: item }),
           _enablePromo: () => patchState(store, { promoActive: true }),
-        }),
-        tasks: () => ({
-          processingCheckout: async (ctx) => ({
+          _processCheckout: async (
+            _payload: void,
+            _signal: AbortSignal,
+            ctx: Readonly<{
+              selectedItem: string | null;
+              promoActive: boolean;
+              orderId: string | null;
+            }>,
+          ) => ({
             orderId: `ORD-${ctx.selectedItem}`,
           }),
+          _setOrder: (res: { orderId: string }) =>
+            patchState(store, { orderId: res.orderId }),
         }),
       });
 
@@ -1773,7 +1746,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       expect(store.promoActive()).toBe(false);
       expect(store.orderId()).toBeNull();
 
-      // 1. Feature `on` signal listener works automatically
+      // 1. Feature `syncContext` signal mirroring works automatically
       externalPromoSig.set(true);
       expect(store.promoActive()).toBe(true);
 
@@ -1781,58 +1754,11 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       store.send('SELECT_ITEM', { item: 'Espresso' });
       expect(store.selectedItem()).toBe('Espresso');
 
-      // 3. Feature `tasks` work automatically
+      // 3. Feature async execution works automatically
       store.send('CHECKOUT');
       await new Promise((r) => setTimeout(r, 15));
       expect(store.fsmState()).toBe('completed');
       expect(store.orderId()).toBe('ORD-Espresso');
-    });
-
-    it('whenSignal(source, selector): does NOT fire on initial store creation (t = 0) and supports dynamic [EventName, Payload] tuple selectors', () => {
-      // Initial value at t = 0 is already truthy ('app://initial'), must NOT fire at t = 0!
-      const urlSignal = signal<string | null>('app://initial');
-      const receivedLinks: string[] = [];
-
-      const routerLinkFSM = createFSM<{
-        events: {
-          DEEP_LINK: { url: string };
-        };
-        states: 'home' | 'deepLinked';
-        methods: {
-          _onDeepLink(payload: { url: string }): void;
-        };
-      }>()({
-        id: 'routerLinkBridge',
-        initial: 'home',
-        transitions: [
-          ['home',       'DEEP_LINK', 'deepLinked', { call: (m) => m._onDeepLink }],
-          ['deepLinked', 'DEEP_LINK', stay(),       { call: (m) => m._onDeepLink }],
-        ],
-      });
-
-      const RouterLinkStore = signalStore(
-        withStateMachine(routerLinkFSM, {
-          methods: () => ({
-            _onDeepLink: ({ url }: { url: string }) => receivedLinks.push(url),
-          }),
-          on: () => [
-            whenSignal(urlSignal, (url) =>
-              url ? (['DEEP_LINK', { url }] as const) : null,
-            ),
-          ],
-        }),
-      );
-
-      const store = new RouterLinkStore();
-
-      // 1. At t = 0 (initial store creation), no event was fired despite urlSignal starting at 'app://initial'
-      expect(store.fsmState()).toBe('home');
-      expect(receivedLinks).toEqual([]);
-
-      // 2. When urlSignal changes to 'app://promo', machine receives 'DEEP_LINK' with payload { url: 'app://promo' }
-      urlSignal.set('app://promo');
-      expect(store.fsmState()).toBe('deepLinked');
-      expect(receivedLinks).toEqual(['app://promo']);
     });
   });
 
@@ -1984,11 +1910,12 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       const zeroTickChild = createMachineFeature<{
         inputs: { readonly selectedDrink: string };
         outputs: { COFFEE_READY: { readonly drink: string } };
-        states: 'brewingCoffee';
+        states: 'init' | 'brewingCoffee';
       }>()({
         id: 'baristaZeroTick',
-        initial: 'brewingCoffee',
+        initial: 'init',
         transitions: [
+          ['init', always(), awaiting('brewingCoffee'), { call: (m) => m._brew }],
           [
             'brewingCoffee',
             'DONE',
@@ -1998,9 +1925,9 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
             },
           ],
         ],
-        tasks: () => ({
+        methods: () => ({
           // Synchronous 0ms task completion!
-          brewingCoffee: () => undefined,
+          _brew: () => undefined,
         }),
       });
 
@@ -2063,10 +1990,10 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         id: 'liveSearch',
         initial: 'idle',
         transitions: [
-          ['idle',      'TYPE_QUERY', awaiting('searching'), { call: (m) => m._setQuery }],
-          ['searching', 'TYPE_QUERY', awaiting('searching'), { call: (m) => m._setQuery }],
+          ['idle',      'TYPE_QUERY', awaiting('searching'), { call: (m) => m._setQueryAndSearch }],
+          ['searching', 'TYPE_QUERY', awaiting('searching'), { call: (m) => m._setQueryAndSearch }],
           ['searching', 'PING',       stay(),                { call: (m) => m._incPings }],
-          ['searching', 'DONE',       'resultsReady'],
+          ['searching', 'DONE',       'resultsReady',        { call: (m) => m._setResults }],
           ['searching', 'ERROR',      'searchFailed'],
         ],
         state: {
@@ -2075,21 +2002,24 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
           pings: 0,
         },
         methods: (store) => ({
-          _setQuery: ({ query }: { query: string }) =>
-            patchState(store, { query }),
-          _incPings: () =>
-            patchState(store, { pings: store.pings() + 1 }),
-        }),
-        tasks: () => ({
-          searching: (ctx, signal) =>
-            new Promise((resolve, reject) => {
+          _setQueryAndSearch: (
+            { query }: { query: string },
+            signal: AbortSignal,
+          ) => {
+            patchState(store, { query });
+            return new Promise<{ results: string[] }>((resolve, reject) => {
               searchCalls.push({
-                query: ctx.query,
+                query,
                 signal,
                 resolve,
                 reject,
               });
-            }),
+            });
+          },
+          _setResults: ({ results }: { results: string[] }) =>
+            patchState(store, { results }),
+          _incPings: () =>
+            patchState(store, { pings: store.pings() + 1 }),
         }),
       });
 
@@ -2460,11 +2390,12 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         inputs: { readonly selectedDrink: string };
         events: { CANCEL: void };
         outputs: { COFFEE_READY: { readonly servedDrink: string } };
-        states: 'brewingCoffee';
+        states: 'init' | 'brewingCoffee';
       }>()({
         id: 'barista',
-        initial: 'brewingCoffee',
+        initial: 'init',
         transitions: [
+          ['init', always(), awaiting('brewingCoffee'), { call: (m) => m._brew }],
           [
             awaiting('brewingCoffee'),
             'DONE',
@@ -2472,7 +2403,13 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
             {
               output: [
                 'COFFEE_READY',
-                (ctx) => ({ servedDrink: ctx.brewedDrink ?? ctx.selectedDrink }),
+                (ctx, res) => ({
+                  servedDrink:
+                    (res as { brewedDrink?: string } | undefined)
+                      ?.brewedDrink ??
+                    ctx.brewedDrink ??
+                    ctx.selectedDrink,
+                }),
               ],
             },
           ],
@@ -2481,8 +2418,15 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
           brewedDrink: null as string | null,
         },
         // Production factory uses Angular inject() — would throw NG0203 outside DI!
-        tasks: (api = inject(PROD_BARISTA_API)) => ({
-          brewingCoffee: (ctx) => api.brew(ctx.selectedDrink),
+        methods: (_store, api = inject(PROD_BARISTA_API)) => ({
+          _brew: (
+            _payload: void,
+            _signal: AbortSignal,
+            ctx: Readonly<{
+              selectedDrink: string;
+              brewedDrink: string | null;
+            }>,
+          ) => api.brew(ctx.selectedDrink),
         }),
       });
 
@@ -2502,12 +2446,15 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         initial: 'idle',
         transitions: [
           ['idle', 'SELECT_DRINK', 'drinkSelected', { call: (m) => m._select }],
-          ['drinkSelected', 'CHECKOUT', awaiting('checkingLoyalty')],
+          ['drinkSelected', 'CHECKOUT', awaiting('checkingLoyalty'), { call: (m) => m._checkLoyalty }],
           [
             'checkingLoyalty',
             'DONE',
             baristaChildFSM,
-            { input: (ctx) => ({ selectedDrink: ctx.drinkName! }) },
+            {
+              call: (m) => m._saveLoyalty,
+              input: (ctx) => ({ selectedDrink: ctx.drinkName! }),
+            },
           ],
           [
             baristaChildFSM,
@@ -2515,7 +2462,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
             'orderReady',
             { call: (m) => m._onReady },
           ],
-          [anyState(), 'DISCONNECT', 'idle'],
+          [['idle', 'checkingLoyalty', baristaChildFSM, 'orderReady'], 'DISCONNECT', 'idle'],
         ],
         state: {
           drinkName: null as string | null,
@@ -2527,29 +2474,39 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         syncContext: (ext = inject(PROD_EXTERNAL_STORE)) => ({
           policy: ext.policy,
         }),
-        on: (ext = inject(PROD_EXTERNAL_STORE)) => [
-          whenSignal(ext.disconnectSig, (d) => (d ? 'DISCONNECT' : null)),
-        ],
-        methods: (store) => ({
+        methods: (store, loyalty = inject(PROD_LOYALTY_API)) => ({
           _select: ({ name }: { readonly name: string }) =>
             patchState(store, { drinkName: name }),
+          _checkLoyalty: (
+            _payload: void,
+            _signal: AbortSignal,
+            ctx: Readonly<{
+              drinkName: string | null;
+              loyaltyPoints: number;
+              servedDrink: string | null;
+              policy: 'strict' | 'relaxed';
+            }>,
+          ) => loyalty.check(ctx.loyaltyPoints),
+          _saveLoyalty: (res: { loyaltyPoints: number }) =>
+            patchState(store, { loyaltyPoints: res.loyaltyPoints }),
           _onReady: ({ servedDrink }: { readonly servedDrink: string }) =>
             patchState(store, { servedDrink }),
-        }),
-        tasks: (loyalty = inject(PROD_LOYALTY_API)) => ({
-          checkingLoyalty: (ctx) => loyalty.check(ctx.loyaltyPoints),
         }),
       });
 
       // Pure Vitest execution — ZERO TestBed!
       const tester = createFeatureTester(coffeeShopParentFSM, {
         syncedContext: { policy: 'strict' },
-        tasks: {
-          checkingLoyalty: async () => ({ loyaltyPoints: 50 }),
+        methods: {
+          _checkLoyalty: async () => ({ loyaltyPoints: 50 }),
         },
-        actorTasks: {
+        actorMethods: {
           barista: {
-            brewingCoffee: async (ctx) => ({
+            _brew: async (
+              _payload: void,
+              _signal: AbortSignal,
+              ctx: { selectedDrink: string },
+            ) => ({
               brewedDrink: `Mocked-${ctx.selectedDrink}`,
             }),
           },
@@ -2638,8 +2595,8 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         initial: 'browsing',
         transitions: [
           ['browsing',        'SELECT_DRINK', stay(),                      { call: (m) => m._select }],
-          ['browsing',        'PLACE_ORDER',  awaiting('checkingLoyalty')],
-          ['checkingLoyalty', 'DONE',         'paid'],
+          ['browsing',        'PLACE_ORDER',  awaiting('checkingLoyalty'), { call: (m) => m._checkLoyalty }],
+          ['checkingLoyalty', 'DONE',         'paid',                      { call: (m) => m._applyLoyalty }],
           ['paid',            after(200),     'ready',                     { call: (m) => m._markReady }],
         ],
         state: {
@@ -2651,16 +2608,25 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
         methods: (store) => ({
           _select: ({ drink }: { readonly drink: string }) =>
             patchState(store, { selectedDrink: drink }),
+          _checkLoyalty: async (
+            _payload: void,
+            _signal: AbortSignal,
+            ctx: Readonly<{
+              selectedDrink: string | null;
+              stamps: number;
+              isFree: boolean;
+              readyBanner: string | null;
+            }>,
+          ) => ({
+            stamps: ctx.stamps + 1,
+            isFree: ctx.stamps + 1 >= 10,
+          }),
+          _applyLoyalty: (res: { stamps: number; isFree: boolean }) =>
+            patchState(store, res),
           _markReady: () =>
             patchState(store, {
               readyBanner: `${store.selectedDrink()} is ready!`,
             }),
-        }),
-        tasks: () => ({
-          checkingLoyalty: async (ctx) => ({
-            stamps: ctx.stamps + 1,
-            isFree: ctx.stamps + 1 >= 10,
-          }),
         }),
       });
 
@@ -3065,6 +3031,424 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       expect(tester.can('PAY')).toBe(false);
       tester.patchContext({ balance: 20 });
       expect(tester.can('PAY')).toBe(true);
+    });
+  });
+
+  describe('Cycle 51: Fix store.can() Returning true on Pure No-Op stay() Fallbacks', () => {
+    it('returns false on store.can() and tester.can() when falling through to an unguarded pure no-op stay() fallback row, and true when stay() has a call or output', () => {
+      const cascadeFeature = createMachineFeature<{
+        events: {
+          SELECT_COUNTRY: string;
+          SELECT_CITY: string;
+          SELECT_PLACE: string;
+        };
+        states: 'idle' | 'loadingPlaces' | 'ready';
+      }>()({
+        id: 'cascadeDropdown',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'SELECT_COUNTRY', stay(), { call: (m) => m._setCountry }],
+          [
+            'idle',
+            'SELECT_CITY',
+            awaiting('loadingPlaces'),
+            {
+              guard: (ctx) => ctx.country !== null,
+              call: (m) => m._loadPlaces,
+            },
+          ],
+          ['idle', 'SELECT_CITY', stay()], // Pure No-Op fallback for ESLint
+          ['idle', 'SELECT_PLACE', stay(), { call: (m) => m._setPlace }],
+          ['loadingPlaces', 'DONE', 'ready'],
+          ['loadingPlaces', 'ERROR', 'idle'],
+        ],
+        state: {
+          country: null as string | null,
+          place: null as string | null,
+        },
+        methods: (store) => ({
+          _setCountry: (country: string) => patchState(store, { country }),
+          _setPlace: (place: string) => patchState(store, { place }),
+          _loadPlaces: async () => Promise.resolve(),
+        }),
+      });
+
+      const CascadeStore = signalStore(withStateMachine(cascadeFeature));
+      const store = new CascadeStore();
+
+      const canSelectCity = computed(() => store.can('SELECT_CITY', 'Munich'));
+      expect(canSelectCity()).toBe(false);
+      expect(store.can('SELECT_PLACE', 'Marienplatz')).toBe(true);
+
+      store.send('SELECT_COUNTRY', 'DE');
+      expect(canSelectCity()).toBe(true);
+    });
+  });
+
+  describe('Cycle 53: every(ms) Recurring Intervals in Angular SignalStore', () => {
+    it('executes recurring every((c) => c.ms) intervals in SignalStore, dynamically adapts interval speed on stay() mutations, and stops on state exit', () => {
+      vi.useFakeTimers();
+      try {
+        const tickerFeature = createMachineFeature<{
+          events: {
+            START: void;
+            SET_SPEED: number;
+            PAUSE: void;
+          };
+          states: 'stopped' | 'ticking';
+        }>()({
+          id: 'angularTicker',
+          initial: 'stopped',
+          transitions: [
+            ['stopped', 'START', 'ticking'],
+            ['ticking', every((c) => c.ms), stay(), { call: (m) => m._tick }],
+            ['ticking', 'SET_SPEED', stay(), { call: (m) => m._setSpeed }],
+            ['ticking', 'PAUSE', 'stopped'],
+          ],
+          state: {
+            ms: 1000,
+            ticks: 0,
+          },
+          methods: (store) => ({
+            _tick: () => patchState(store, { ticks: store.ticks() + 1 }),
+            _setSpeed: (ms: number) => patchState(store, { ms }),
+          }),
+        });
+
+        const TickerStore = signalStore(withStateMachine(tickerFeature));
+        const store = new TickerStore();
+
+        store.send('START');
+        expect(store.state()).toBe('ticking');
+
+        vi.advanceTimersByTime(3000);
+        expect(store.ticks()).toBe(3);
+
+        store.send('SET_SPEED', 200);
+        vi.advanceTimersByTime(1000);
+        expect(store.ticks()).toBe(8);
+
+        store.send('PAUSE');
+        expect(store.state()).toBe('stopped');
+        vi.advanceTimersByTime(2000);
+        expect(store.ticks()).toBe(8);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('Cycle 54: Remove whenSignal and on: Configuration Overhead', () => {
+    it('does not export whenSignal from @matrix-fsm/angular and relies on explicit store.send() and syncContext', () => {
+      expect('whenSignal' in AngularPkg).toBe(false);
+    });
+  });
+
+  describe('Cycle 55: Unify tasks and methods — awaiting("state") Invokes { call: (m) => m._method }', () => {
+    it('executes createMachineFeature without a tasks block, passing (payload, signal, ctx) to { call } on awaiting() and delivering the resolved value as the typed DONE payload', async () => {
+      expect('withMachineTasks' in AngularPkg).toBe(false);
+
+      let capturedCountry: string | null = null;
+      let capturedSignal: AbortSignal | null = null;
+
+      const citiesFeature = createMachineFeature<{
+        events: {
+          LOAD: string;
+          CANCEL: void;
+        };
+        states: 'idle' | 'loading' | 'ready' | 'error';
+      }>()({
+        id: 'citiesFeature',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'LOAD', awaiting('loading'), { call: (m) => m._fetchCities }],
+          ['loading', 'CANCEL', 'idle'],
+          ['loading', 'DONE', 'ready', { call: (m) => m._setCities }],
+          ['loading', 'ERROR', 'error', { call: (m) => m._setError }],
+        ],
+        state: {
+          cities: [] as string[],
+          error: null as string | null,
+        },
+        methods: (store) => ({
+          _fetchCities: async (countryId: string, signal: AbortSignal) => {
+            capturedCountry = countryId;
+            capturedSignal = signal;
+            return [`${countryId}-Capital`, `${countryId}-Port`];
+          },
+          _setCities: (cities: string[]) => patchState(store, { cities }),
+          _setError: (err: unknown) => patchState(store, { error: String(err) }),
+        }),
+      });
+
+      const CitiesStore = signalStore(withStateMachine(citiesFeature));
+      const store = new CitiesStore();
+
+      store.send('LOAD', 'DE');
+      expect(store.state()).toBe('loading');
+      expect(capturedCountry).toBe('DE');
+      expect(capturedSignal).toBeInstanceOf(AbortSignal);
+
+      await new Promise((r) => setTimeout(r, 0));
+      expect(store.state()).toBe('ready');
+      expect(store.cities()).toEqual(['DE-Capital', 'DE-Port']);
+    });
+  });
+
+  describe('Cycle 56: Named Domain Outcomes via outcome(eventName, payload?) in Angular SignalStore', () => {
+    it('supports outcome(eventName, payload?) returned from an awaiting() method in createMachineFeature', async () => {
+      const outcomeFn = (AngularPkg as any).outcome as <
+        const E extends string,
+        P = void,
+      >(
+        event: E,
+        payload?: P,
+      ) => any;
+      expect(typeof outcomeFn).toBe('function');
+
+      const paymentFeature = createMachineFeature<{
+        events: { PAY: number };
+        states: 'checkout' | 'verifying' | 'paid' | 'challenge3ds' | 'paymentFailed';
+      }>()({
+        id: 'angularPaymentOutcome',
+        initial: 'checkout',
+        transitions: [
+          ['checkout', 'PAY', awaiting('verifying'), { call: (m) => m._verifyPayment }],
+          ['verifying', 'APPROVED', 'paid', { call: (m) => m._onApproved }],
+          ['verifying', 'REQUIRES_3DS', 'challenge3ds', { call: (m) => m._on3ds }],
+          ['verifying', 'ERROR', 'paymentFailed'],
+        ],
+        state: {
+          challengeUrl: null as string | null,
+          receiptId: null as string | null,
+        },
+        methods: (store) => ({
+          _verifyPayment: async (amount: number) => {
+            if (amount > 100) {
+              return outcomeFn('REQUIRES_3DS', {
+                challengeUrl: 'https://bank.test/3ds',
+              });
+            }
+            return outcomeFn('APPROVED', { receiptId: 'OK-1' });
+          },
+          _onApproved: ({ receiptId }: { receiptId: string }) =>
+            patchState(store, { receiptId }),
+          _on3ds: ({ challengeUrl }: { challengeUrl: string }) =>
+            patchState(store, { challengeUrl }),
+        }),
+      });
+
+      const PaymentStore = signalStore(withStateMachine(paymentFeature));
+      const store = new PaymentStore();
+
+      store.send('PAY', 250);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(store.state()).toBe('challenge3ds');
+      expect(store.challengeUrl()).toBe('https://bank.test/3ds');
+    });
+  });
+
+  describe('Cycle 57: Native Support for Observable<T> and Angular ResourceRef<T> in createMachineFeature', () => {
+    it('resolves on the first emission of an Observable<T> (take(1) semantics) and immediately unsubscribes on state exit', () => {
+      let unsubscribeCount = 0;
+      let emitNext: ((cities: string[]) => void) | null = null;
+
+      const citiesObservableFeature = createMachineFeature<{
+        events: {
+          SELECT_COUNTRY: string;
+          CANCEL: void;
+        };
+        states: 'idle' | 'loadingCities' | 'ready' | 'error';
+      }>()({
+        id: 'citiesObservable',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'SELECT_COUNTRY', awaiting('loadingCities'), { call: (m) => m._loadCities }],
+          ['loadingCities', 'SELECT_COUNTRY', awaiting('loadingCities'), { call: (m) => m._loadCities }],
+          ['loadingCities', 'CANCEL', 'idle'],
+          ['loadingCities', 'DONE', 'ready', { call: (m) => m._setCities }],
+          ['loadingCities', 'ERROR', 'error'],
+        ],
+        state: {
+          cities: [] as string[],
+        },
+        methods: (store) => ({
+          _loadCities: (_country: string): Subscribable<string[]> => ({
+            subscribe(observer) {
+              emitNext = (val) => observer?.next?.(val);
+              return {
+                unsubscribe() {
+                  unsubscribeCount++;
+                },
+              };
+            },
+          }),
+          _setCities: (cities: string[]) => patchState(store, { cities }),
+        }),
+      });
+
+      const Store = signalStore(withStateMachine(citiesObservableFeature));
+      const store = new Store();
+
+      store.send('SELECT_COUNTRY', 'AT');
+      expect(store.state()).toBe('loadingCities');
+      expect(unsubscribeCount).toBe(0);
+
+      // Re-entering loadingCities with a new country must immediately unsubscribe the previous Observable!
+      store.send('SELECT_COUNTRY', 'CH');
+      expect(unsubscribeCount).toBe(1);
+
+      // Emitting a single value (without calling complete!) resolves via take(1) semantics and unsubscribes!
+      emitNext!(['Zurich', 'Geneva']);
+      expect(store.state()).toBe('ready');
+      expect(store.cities()).toEqual(['Zurich', 'Geneva']);
+      expect(unsubscribeCount).toBe(2);
+    });
+
+    it('natively supports Angular ResourceRef<T> in awaiting() and dispatches DONE on resolved and ERROR on error', async () => {
+      const resourceStatus = signal<'idle' | 'loading' | 'resolved' | 'error'>('idle');
+      const resourceValue = signal<string[]>(['Berlin', 'Munich']);
+      const resourceError = signal<unknown>(undefined);
+      let reloadCalls = 0;
+
+      const mockResourceRef = {
+        status: resourceStatus.asReadonly(),
+        value: resourceValue.asReadonly(),
+        error: resourceError.asReadonly(),
+        reload: () => {
+          reloadCalls++;
+          resourceStatus.set('loading');
+          return true;
+        },
+      };
+
+      const resourceFeature = createMachineFeature<{
+        events: { LOAD: void };
+        states: 'idle' | 'loading' | 'ready' | 'failed';
+      }>()({
+        id: 'resourceFeature',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'LOAD', awaiting('loading'), { call: (m) => m._loadResource }],
+          ['loading', 'DONE', 'ready', { call: (m) => m._saveCities }],
+          ['loading', 'ERROR', 'failed', { call: (m) => m._saveError }],
+        ],
+        state: {
+          cities: [] as string[],
+          errorMessage: null as string | null,
+        },
+        methods: (store) => ({
+          _loadResource: () => mockResourceRef,
+          _saveCities: (cities: string[]) => patchState(store, { cities }),
+          _saveError: (err: unknown) => patchState(store, { errorMessage: String(err) }),
+        }),
+      });
+
+      const Store = signalStore(withStateMachine(resourceFeature));
+      const store = new Store();
+
+      store.send('LOAD');
+      expect(store.state()).toBe('loading');
+      expect(reloadCalls).toBe(1);
+
+      resourceStatus.set('resolved');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(store.state()).toBe('ready');
+      expect(store.cities()).toEqual(['Berlin', 'Munich']);
+
+      // Test error status
+      store.reset();
+      store.send('LOAD');
+      expect(store.state()).toBe('loading');
+      resourceError.set(new Error('HTTP 503'));
+      resourceStatus.set('error');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(store.state()).toBe('failed');
+      expect(store.errorMessage()).toContain('HTTP 503');
+    });
+  });
+
+  describe('Cycle 58: Clean Separation of createMachineFeature and createEffectMachineFeature', () => {
+    it('executes Effect.Effect<A, E> in createEffectMachineFeature via Effect.runFork and interrupts the fiber on state exit', async () => {
+      const createEffectMachineFeature = (EffectPkg as any).createEffectMachineFeature;
+      expect(typeof createEffectMachineFeature).toBe('function');
+      expect('registerTaskAdapter' in AngularPkg).toBe(false);
+      expect('effectTaskAdapter' in EffectPkg).toBe(false);
+
+      let fiberInterrupted = false;
+
+      class LoyaltyError extends Data.TaggedError('LoyaltyError')<{
+        readonly reason: string;
+      }> {}
+
+      const loyaltyFeature = createEffectMachineFeature<{
+        events: {
+          CHECK: string;
+          CANCEL: void;
+        };
+        states: 'idle' | 'checking' | 'verified' | 'failed';
+      }>()({
+        id: 'loyaltyEffect',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'CHECK', awaiting('checking'), { call: (m) => m._checkLoyalty }],
+          ['checking', 'CANCEL', 'idle'],
+          ['checking', 'DONE', 'verified', { call: (m) => m._savePoints }],
+          ['checking', 'ERROR', 'failed', { call: (m) => m._saveError }],
+        ],
+        state: {
+          points: 0,
+          errorReason: null as string | null,
+        },
+        methods: (store) => ({
+          _checkLoyalty: (memberId: string) =>
+            Effect.gen(function* () {
+              yield* Effect.addFinalizer(() =>
+                Effect.sync(() => {
+                  if (memberId === 'SLOW') {
+                    fiberInterrupted = true;
+                  }
+                }),
+              );
+              if (memberId === 'SLOW') {
+                yield* Effect.sleep('500 millis');
+                return { points: 999 };
+              }
+              if (memberId === 'BAD') {
+                return yield* Effect.fail(new LoyaltyError({ reason: 'Card expired' }));
+              }
+              return { points: 420 };
+            }).pipe(Effect.scoped),
+          _savePoints: (res: { points: number }) =>
+            patchState(store, { points: res.points }),
+          _saveError: (err: LoyaltyError) =>
+            patchState(store, { errorReason: err.reason }),
+        }),
+      });
+
+      const Store = signalStore(withStateMachine(loyaltyFeature));
+      const store = new Store();
+
+      // 1. Test interruption on state exit
+      store.send('CHECK', 'SLOW');
+      expect(store.state()).toBe('checking');
+      store.send('CANCEL');
+      expect(store.state()).toBe('idle');
+      await new Promise((r) => setTimeout(r, 10));
+      expect(fiberInterrupted).toBe(true);
+
+      // 2. Test typed success (A -> DONE)
+      store.send('CHECK', 'VIP');
+      await new Promise((r) => setTimeout(r, 10));
+      expect(store.state()).toBe('verified');
+      expect(store.points()).toBe(420);
+
+      // 3. Test typed failure (E -> ERROR)
+      store.reset();
+      store.send('CHECK', 'BAD');
+      await new Promise((r) => setTimeout(r, 10));
+      expect(store.state()).toBe('failed');
+      expect(store.errorReason()).toBe('Card expired');
     });
   });
 });

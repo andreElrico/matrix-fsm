@@ -9,6 +9,7 @@ import {
   createFSM,
   createMachineInstance,
   each,
+  every,
   finalState,
   getShortestPaths,
   MatrixFsmInfiniteLoopError,
@@ -56,6 +57,7 @@ type AuthEvents = {
 };
 
 interface AuthMethods {
+  _authenticate(): void;
   _setInvalidEmail(): void;
   _setError(err: Error): void;
 }
@@ -72,7 +74,7 @@ const authFSM = createFSM<{
   id: 'auth',
   initial: 'loginView',
   transitions: [
-    ['loginView',         'LOGIN',                awaiting('authenticating'), { guard: hasValidInput }],
+    ['loginView',         'LOGIN',                awaiting('authenticating'), { guard: hasValidInput, call: (m) => m._authenticate }],
     ['loginView',         'LOGIN',                stay(),                     { call: (m) => m._setInvalidEmail }],
     ['authenticating',    'CANCEL',               'loginView'],
     ['authenticating',    'DONE',                 'proUpsellPromo',           { guard: shouldShowPromo }],
@@ -160,6 +162,7 @@ describe('@matrix-fsm/core', () => {
   it('supports unified createFSM as a sub-machine, infers finalState outcomes without parent event duplication, and rejects typo outcomes', () => {
     // Sub-machine that omits `context` in FSMContract and only declares events, states, and methods
     interface PaymentMethods {
+      _chargeCard(): void;
       _onPaymentError(err: Error): void;
     }
     const paymentSub = createFSM<{
@@ -170,7 +173,7 @@ describe('@matrix-fsm/core', () => {
       id: 'payment',
       initial: 'enteringCard',
       transitions: [
-        ['enteringCard',  'PAY',    awaiting('chargingCard')],
+        ['enteringCard',  'PAY',    awaiting('chargingCard'), { call: (m) => m._chargeCard }],
         ['chargingCard',  'DONE',   finalState('PAID')],
         ['chargingCard',  'ERROR',  'enteringCard',          { call: (m) => m._onPaymentError }],
       ],
@@ -186,11 +189,12 @@ describe('@matrix-fsm/core', () => {
     const uploadChild = createFSM<{
       events: { START: void };
       context: { progress: number };
+      methods: { _upload(): void };
     }>()({
       id: 'uploadItem',
       initial: 'queued',
       transitions: [
-        ['queued',     'START',  awaiting('uploading')],
+        ['queued',     'START',  awaiting('uploading'), { call: (m) => m._upload }],
         ['uploading',  'DONE',   finalState('UPLOADED')],
         ['uploading',  'ERROR',  'failed'],
       ],
@@ -227,7 +231,7 @@ describe('@matrix-fsm/core', () => {
       CheckoutContext & { progress: number }
     >();
     expectTypeOf<ExtractAllMethods<typeof checkoutFSM>>().toEqualTypeOf<
-      CheckoutMethods & PaymentMethods
+      CheckoutMethods & PaymentMethods & { _upload(): void }
     >();
     expectTypeOf<ExtractEvents<typeof checkoutFSM>>().toEqualTypeOf<
       'UPLOAD_FILES' | 'CANCEL' | 'PAY' | 'START'
@@ -299,14 +303,14 @@ describe('@matrix-fsm/core', () => {
     }>([
       ['loginView', 'LOGIN', 'ssoRedirect',             { guard: hasValidInput }],
       ['loginView', 'LOGIN', 'mfaChallenge',            { guard: shouldShowPromo }],
-      ['loginView', 'LOGIN', awaiting('authenticating'), { guard: hasValidInput }],
+      ['loginView', 'LOGIN', awaiting('authenticating'), { guard: hasValidInput, call: (m) => m._authenticate }],
       ['loginView', 'LOGIN', stay(),                    { call: (m) => m._setInvalidEmail }],
     ]);
 
     const handleByMachineType = transitions<typeof authFSM>([
       ['loginView', 'LOGIN', 'ssoRedirect',             { guard: hasValidInput }],
       ['loginView', 'LOGIN', 'mfaChallenge',            { guard: shouldShowPromo }],
-      ['loginView', 'LOGIN', awaiting('authenticating'), { guard: hasValidInput }],
+      ['loginView', 'LOGIN', awaiting('authenticating'), { guard: hasValidInput, call: (m) => m._authenticate }],
       ['loginView', 'LOGIN', stay(),                    { call: (m) => m._setInvalidEmail }],
     ]);
 
@@ -355,6 +359,7 @@ describe('@matrix-fsm/core', () => {
       context: BaristaInputs & { temp: number; percent: number };
       states: 'ticketQueued' | 'brewingCoffee' | 'cleaning';
       methods: {
+        _startBrewing(): void;
         _tickProgress(ev: { readonly delta: number }, ctx: BaristaInputs & { temp: number; percent: number }): void;
       };
     }>()({
@@ -362,7 +367,7 @@ describe('@matrix-fsm/core', () => {
       initial: 'ticketQueued',
       // prettier-ignore
       transitions: [
-        ['ticketQueued',  'START_BREWING',  awaiting('brewingCoffee'), { output: 'STEAM_READY' }],
+        ['ticketQueued',  'START_BREWING',  awaiting('brewingCoffee'), { call: (m) => m._startBrewing, output: 'STEAM_READY' }],
         ['brewingCoffee', 'TICK_PROGRESS',  stay(),                    { call: (m) => m._tickProgress, output: ['PROGRESS', (ctx) => ({ percent: ctx.percent })] }],
         ['brewingCoffee', 'NEEDS_CLEANING', 'cleaning',                { output: ['CLEAN_ALERT'] }],
         ['brewingCoffee', 'DONE',           finalState(),              { output: ['COFFEE_READY', (ctx) => ({ drinkName: ctx.selectedDrink, temp: ctx.temp })] }],
@@ -861,6 +866,7 @@ describe('@matrix-fsm/core', () => {
       const logs: string[] = [];
       const appFSM = createFSM<{
         events: { LOGOUT: void; PING: void; STEP: void };
+        outputs: { loggedOut: void };
         states: 'idle' | 'editing' | 'unsavedWarning' | 'loggedOut';
         methods: {
           _warnUnsaved(): void;
@@ -873,7 +879,7 @@ describe('@matrix-fsm/core', () => {
         transitions: [
           ['idle',       'STEP',   'editing'],
           ['editing',    'LOGOUT', 'unsavedWarning', { call: (m) => m._warnUnsaved }],
-          [anyState(),   'LOGOUT', 'loggedOut',      { call: (m) => m._forceLogout }],
+          [anyState(),   'LOGOUT', finalState('loggedOut'), { call: (m) => m._forceLogout }],
           [anyState(),   'PING',   stay(),           { call: (m) => m._recordPing }],
         ],
       });
@@ -921,7 +927,7 @@ describe('@matrix-fsm/core', () => {
       // Mermaid rendering includes (*) wildcard node
       const diagram = toMermaid(appFSM);
       expect(diagram).toContain('state "(*)" as anyState');
-      expect(diagram).toContain('anyState --> loggedOut : LOGOUT');
+      expect(diagram).toContain('anyState --> [*] : LOGOUT (loggedOut)');
     });
   });
 
@@ -1423,12 +1429,13 @@ describe('@matrix-fsm/core', () => {
           ABORT: void;
         };
         states: 'idle' | 'checking' | 'preparing' | 'done';
+        methods: { _checkOrder(): void };
       }>()({
         id: 'shopFlow',
         initial: 'idle',
         context: { vip: false },
         transitions: [
-          ['idle',            'ORDER',              awaiting('checking')],
+          ['idle',            'ORDER',              awaiting('checking'), { call: (m) => m._checkOrder }],
           ['checking',        'DONE',               'preparing'],
           ['preparing',       always(),             all(subA, subB), { guard: (ctx) => ctx.vip }],
           ['preparing',       after(500),           all(subA, subB)],
@@ -2210,7 +2217,7 @@ describe('@matrix-fsm/core', () => {
             },
           ],
           [subPayment, 'DONE', 'paid'],
-          [anyState(), 'CANCEL', 'cart'],
+          [anyState(), 'CANCEL', finalState()],
         ],
       });
 
@@ -2242,6 +2249,352 @@ describe('@matrix-fsm/core', () => {
 
       expect(inst.can('CONFIRM_PIN', { pin: '12' })).toBe(false);
       expect(inst.can('CONFIRM_PIN', { pin: '1234' })).toBe(true);
+    });
+  });
+
+  describe('Cycle 51: Fix instance.can() Returning true on Pure No-Op stay() Fallbacks', () => {
+    it('returns false for pure no-op stay() fallback rows (without call or output) when preceding guards fail, while returning true for stay() rows with call or output', () => {
+      const cascadeFSM = createFSM<{
+        context: { readonly country: string | null };
+        events: {
+          SELECT_CITY: string;
+          SELECT_PLACE: string;
+          PING: void;
+        };
+        outputs: {
+          PONG: void;
+        };
+        methods: {
+          _selectPlace: (place: string) => void;
+          _loadPlaces: (city: string, signal: AbortSignal) => Promise<void>;
+        };
+      }>()({
+        id: 'cascadeCanFsm',
+        initial: 'idle',
+        context: { country: null },
+        transitions: [
+          [
+            'idle',
+            'SELECT_CITY',
+            awaiting('loadingPlaces'),
+            {
+              guard: (ctx) => ctx.country !== null,
+              call: (m) => m._loadPlaces,
+            },
+          ],
+          ['idle', 'SELECT_CITY', stay()], // Pure No-Op fallback for ESLint require-fallback-transition
+          ['idle', 'SELECT_PLACE', stay(), { call: (m) => m._selectPlace }],
+          ['idle', 'PING', stay(), { output: 'PONG' }],
+          ['loadingPlaces', 'DONE', 'idle'],
+          ['loadingPlaces', 'ERROR', 'idle'],
+        ],
+      });
+
+      const inst = createMachineInstance(cascadeFSM);
+
+      // Guard is false (country === null), falls through to pure no-op stay() -> can() MUST be false!
+      expect(inst.can('SELECT_CITY', 'Berlin')).toBe(false);
+
+      // stay() with call or output -> can() MUST be true!
+      expect(inst.can('SELECT_PLACE', 'Alexanderplatz')).toBe(true);
+      expect(inst.can('PING')).toBe(true);
+
+      // Once country is set, guard passes -> can('SELECT_CITY') is true!
+      inst.patchContext({ country: 'DE' });
+      expect(inst.can('SELECT_CITY', 'Berlin')).toBe(true);
+    });
+  });
+
+  describe('Cycle 52: Restrict anyState() to stay(), finalState(), or ERROR Transitions (No Hope-Driven State Jumps)', () => {
+    it('rejects anyState() state jumps at compile time while allowing stay(), finalState(), and VIA === ERROR', () => {
+      // Valid uses of anyState(): stay(), finalState(), and VIA === 'ERROR'
+      const validGlobalFSM = createFSM<{
+        events: {
+          VOUCHER_SCANNED: string;
+          ABORT: void;
+          NEXT: void;
+        };
+        outputs: {
+          ABORTED: void;
+        };
+        methods: {
+          _applyVoucher: (code: string) => void;
+        };
+      }>()({
+        id: 'validGlobalFsm',
+        initial: 'step1',
+        transitions: [
+          ['step1', 'NEXT', 'step2'],
+          [anyState(), 'VOUCHER_SCANNED', stay(), { call: (m) => m._applyVoucher }],
+          [anyState(), 'ABORT', finalState('ABORTED')],
+          [anyState(), 'ERROR', 'errorState'],
+        ],
+      });
+
+      const inst = createMachineInstance(validGlobalFSM);
+      expect(inst.state()).toBe('step1');
+      inst.send('ERROR');
+      expect(inst.state()).toBe('errorState');
+
+      // Invalid Hope-Driven jumps from anyState() must fail at compile time:
+      createFSM<{
+        events: {
+          SELECT_2: void;
+          LOAD_3: void;
+        };
+        methods: {
+          _load3: (_: void, signal: AbortSignal) => Promise<void>;
+        };
+      }>()({
+        id: 'invalidHopeDrivenFsm',
+        initial: 'step1',
+        transitions: [
+          // @ts-expect-error - anyState() cannot jump to a regular resting state unless VIA is 'ERROR'
+          [anyState(), 'SELECT_2', 'step3'],
+          // @ts-expect-error - anyState() cannot jump to awaiting() unless VIA is 'ERROR'
+          [anyState(), 'LOAD_3', awaiting('loading3'), { call: (m) => m._load3 }],
+          // @ts-expect-error - anyState() is forbidden inside Column 1 state arrays
+          [[anyState(), 'step1'], 'SELECT_2', stay()],
+          ['loading3', 'DONE', 'step3'],
+          ['loading3', 'ERROR', 'step1'],
+        ],
+      });
+    });
+  });
+
+  describe('Cycle 53: Timer-Ontologie — after(ms) Must Change State (Forbid stay()) & every(ms) for Intervals', () => {
+    it('forbids after() with stay() and forbids every() without stay() at compile time, while executing dynamic every((c) => c.ms) intervals with live speed adjustment and cleanup on state exit', () => {
+      vi.useFakeTimers();
+      try {
+        // Compile-time checks: after() forbids stay(), every() requires stay()
+        createFSM<{
+          context: { readonly ms: number };
+          states: 'ticking' | 'done';
+        }>()({
+          id: 'invalidTimersFsm',
+          initial: 'ticking',
+          context: { ms: 1000 },
+          transitions: [
+            // @ts-expect-error - after() must change state (stay() is forbidden)
+            ['ticking', after(1000), stay()],
+            // @ts-expect-error - every() is a recurring in-place interval and requires stay()
+            ['ticking', every(500), 'done'],
+          ],
+        });
+
+        let ticks = 0;
+        let currentSpeed = 1000;
+
+        const tickerFSM = createFSM<{
+          context: { readonly ms: number; readonly count: number };
+          events: {
+            START: void;
+            SET_SPEED: number;
+            PAUSE: void;
+          };
+          states: 'stopped' | 'ticking';
+          methods: {
+            _tick: () => void;
+            _setSpeed: (speed: number) => void;
+          };
+        }>()({
+          id: 'tickerFsm',
+          initial: 'stopped',
+          context: { ms: 1000, count: 0 },
+          transitions: [
+            ['stopped', 'START', 'ticking'],
+            ['ticking', every((c) => c.ms), stay(), { call: (m) => m._tick }],
+            ['ticking', 'SET_SPEED', stay(), { call: (m) => m._setSpeed }],
+            ['ticking', 'PAUSE', 'stopped'],
+          ],
+        });
+
+        const inst = createMachineInstance(tickerFSM, {
+          getContext: () => ({ ms: currentSpeed, count: ticks }),
+          methods: {
+            _tick: () => {
+              ticks += 1;
+            },
+            _setSpeed: (speed: number) => {
+              currentSpeed = speed;
+            },
+          },
+        });
+
+        // In 'stopped', no interval runs
+        vi.advanceTimersByTime(3000);
+        expect(ticks).toBe(0);
+
+        // Transition to 'ticking' (ms = 1000)
+        inst.send('START');
+        expect(inst.state()).toBe('ticking');
+
+        vi.advanceTimersByTime(3000);
+        expect(ticks).toBe(3);
+
+        // Dynamically change speed from 1000ms to 200ms via stay()
+        inst.send('SET_SPEED', 200);
+        expect(inst.state()).toBe('ticking');
+
+        vi.advanceTimersByTime(1000);
+        expect(ticks).toBe(8); // 3 + 5 ticks at 200ms
+
+        // Transition to 'stopped' ('PAUSE') -> interval immediately cleared
+        inst.send('PAUSE');
+        expect(inst.state()).toBe('stopped');
+
+        vi.advanceTimersByTime(2000);
+        expect(ticks).toBe(8);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('Cycle 55: Unify tasks and methods — awaiting("state") Invokes { call: (m) => m._method }', () => {
+    it('executes async { call } on awaiting() in createMachineInstance with (payload, signal, ctx), aborts on state exit, and infers DONE payload from the call return type', async () => {
+      let receivedSignal: AbortSignal | null = null;
+      let savedCities: string[] = [];
+
+      const cityFSM = createFSM<{
+        context: { readonly region: string };
+        events: {
+          LOAD: string;
+          CANCEL: void;
+        };
+        states: 'idle' | 'loading' | 'ready' | 'error';
+        methods: {
+          _fetchCities: (
+            countryId: string,
+            signal: AbortSignal,
+            ctx: Readonly<{ readonly region: string }>,
+          ) => Promise<string[]>;
+          _setCities: (cities: string[]) => void;
+          _setError: (err: unknown) => void;
+        };
+      }>()({
+        id: 'cityFsm',
+        initial: 'idle',
+        context: { region: 'EU' },
+        transitions: [
+          ['idle', 'LOAD', awaiting('loading'), { call: (m) => m._fetchCities }],
+          ['loading', 'CANCEL', 'idle'],
+          ['loading', 'DONE', 'ready', { call: (m) => m._setCities }],
+          ['loading', 'ERROR', 'error', { call: (m) => m._setError }],
+        ],
+      });
+
+      let resolveFetch: ((cities: string[]) => void) | null = null;
+      const inst = createMachineInstance(cityFSM, {
+        methods: {
+          _fetchCities: (countryId, signal, ctx) => {
+            expect(countryId).toBe('DE');
+            expect(ctx.region).toBe('EU');
+            receivedSignal = signal;
+            return new Promise<string[]>((resolve) => {
+              resolveFetch = resolve;
+            });
+          },
+          _setCities: (cities) => {
+            savedCities = cities;
+          },
+          _setError: () => undefined,
+        },
+      });
+
+      inst.send('LOAD', 'DE');
+      expect(inst.state()).toBe('loading');
+      expect(inst.isPending()).toBe(true);
+      expect(receivedSignal?.aborted).toBe(false);
+
+      // Cancel in-flight -> aborts signal and ignores stale resolution!
+      inst.send('CANCEL');
+      expect(inst.state()).toBe('idle');
+      expect(receivedSignal?.aborted).toBe(true);
+      resolveFetch?.(['Stale']);
+      await Promise.resolve();
+      expect(savedCities).toEqual([]);
+
+      // Re-run and resolve -> transitions to 'ready' with typed payload
+      inst.send('LOAD', 'DE');
+      resolveFetch?.(['Berlin', 'Munich']);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(inst.state()).toBe('ready');
+      expect(savedCities).toEqual(['Berlin', 'Munich']);
+    });
+  });
+
+  describe('Cycle 56: Named Domain Outcomes from awaiting() Calls via outcome(eventName, payload?)', () => {
+    it('routes awaiting() resolution directly to the named event when outcome(eventName, payload) is returned, and infers payload in Column 4', async () => {
+      const coreExports = await import('../index.js');
+      const outcomeFn = (coreExports as any).outcome as <
+        const E extends string,
+        P = void,
+      >(
+        event: E,
+        payload?: P,
+      ) => any;
+      expect(typeof outcomeFn).toBe('function');
+
+      let challengeUrlReceived: string | null = null;
+      let receiptIdReceived: string | null = null;
+      let mode: '3ds' | 'approved' = '3ds';
+
+      const paymentFSM = createFSM<{
+        events: { PAY: { amount: number } };
+        states: 'checkout' | 'verifying' | 'paid' | 'challenge3ds' | 'paymentFailed';
+        methods: {
+          _verifyPayment: (
+            p: { amount: number },
+            signal: AbortSignal,
+          ) => Promise<
+            | ReturnType<typeof outcomeFn<'APPROVED', { receiptId: string }>>
+            | ReturnType<typeof outcomeFn<'REQUIRES_3DS', { challengeUrl: string }>>
+          >;
+          _onApproved: (p: { receiptId: string }) => void;
+          _on3ds: (p: { challengeUrl: string }) => void;
+        };
+      }>()({
+        id: 'paymentOutcomeFsm',
+        initial: 'checkout',
+        transitions: [
+          ['checkout', 'PAY', awaiting('verifying'), { call: (m) => m._verifyPayment }],
+          ['verifying', 'APPROVED', 'paid', { call: (m) => m._onApproved }],
+          ['verifying', 'REQUIRES_3DS', 'challenge3ds', { call: (m) => m._on3ds }],
+          ['verifying', 'ERROR', 'paymentFailed'],
+        ],
+      });
+
+      const inst = createMachineInstance(paymentFSM, {
+        methods: {
+          _verifyPayment: async () => {
+            if (mode === '3ds') {
+              return outcomeFn('REQUIRES_3DS', {
+                challengeUrl: 'https://3ds.example.com/challenge',
+              });
+            }
+            return outcomeFn('APPROVED', { receiptId: 'RCP-99' });
+          },
+          _onApproved: ({ receiptId }) => {
+            receiptIdReceived = receiptId;
+          },
+          _on3ds: ({ challengeUrl }) => {
+            challengeUrlReceived = challengeUrl;
+          },
+        },
+      });
+
+      inst.send('PAY', { amount: 42 });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(inst.state()).toBe('challenge3ds');
+      expect(challengeUrlReceived).toBe('https://3ds.example.com/challenge');
+
+      inst.reset();
+      mode = 'approved';
+      inst.send('PAY', { amount: 42 });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(inst.state()).toBe('paid');
+      expect(receiptIdReceived).toBe('RCP-99');
     });
   });
 });

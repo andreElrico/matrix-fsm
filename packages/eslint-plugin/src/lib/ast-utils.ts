@@ -105,6 +105,21 @@ export function extractNodeKey(
       if (argKey) {
         return `after(${argKey})`;
       }
+      return 'after(fn)';
+    }
+    if (calleeName === 'every' && node.arguments.length >= 1) {
+      const firstArg = node.arguments[0];
+      if (
+        firstArg.type === AST_NODE_TYPES.Literal &&
+        typeof firstArg.value === 'number'
+      ) {
+        return `every(${firstArg.value})`;
+      }
+      const argKey = extractNodeKey(firstArg);
+      if (argKey) {
+        return `every(${argKey})`;
+      }
+      return 'every(fn)';
     }
   }
   return null;
@@ -271,6 +286,32 @@ export function hasGuardOption(
   return false;
 }
 
+export function hasCallOption(
+  optionsNode: TSESTree.Node | null | undefined,
+): boolean {
+  if (!optionsNode || optionsNode.type !== AST_NODE_TYPES.ObjectExpression) {
+    return false;
+  }
+  for (const prop of optionsNode.properties) {
+    if (prop.type === AST_NODE_TYPES.Property) {
+      if (
+        (prop.key.type === AST_NODE_TYPES.Identifier &&
+          prop.key.name === 'call') ||
+        (prop.key.type === AST_NODE_TYPES.Literal && prop.key.value === 'call')
+      ) {
+        if (
+          prop.value.type === AST_NODE_TYPES.Identifier &&
+          prop.value.name === 'undefined'
+        ) {
+          return false;
+        }
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function parseTransitionRow(
   element: TSESTree.Node | null,
 ): ParsedTransitionRow | null {
@@ -347,6 +388,7 @@ function isMachineCreatorCallee(node: TSESTree.CallExpression): boolean {
     callee.type === AST_NODE_TYPES.Identifier &&
     (callee.name === 'createFSM' ||
       callee.name === 'createMachineFeature' ||
+      callee.name === 'createEffectMachineFeature' ||
       callee.name === 'subMachine')
   );
 }

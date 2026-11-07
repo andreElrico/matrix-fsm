@@ -99,10 +99,22 @@ export type CoffeeShopEvents = {
   LoyaltyApiTimeoutError: { message: string };
 };
 
+export interface LoyaltyCheckOutcome {
+  readonly isFreeDrink: boolean;
+  readonly customerCard: CustomerCard;
+  readonly finalPrice: number;
+}
+
 export type CoffeeShopMethods = {
   _selectDrink(payload: { drink: CoffeeDrink }): void;
   _setStamps(payload: { stamps: number }): void;
   _setMissingDrinkError(): void;
+  _checkLoyalty(
+    payload: void,
+    signal: AbortSignal,
+    ctx: Readonly<CoffeeShopContext>,
+  ): Promise<LoyaltyCheckOutcome>;
+  _applyLoyaltyResult(res: LoyaltyCheckOutcome): void;
   _markPaid(): void;
   _onCoffeeReady(output: {
     readonly drinkName: string;

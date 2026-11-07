@@ -3,7 +3,7 @@
  * Uses `createMachineFeature` (Sandwich Pattern):
  * 1. Public Contract (Events, States)
  * 2. Pure Transition Matrix (0% DI inside transitions)
- * 3. Encapsulated State, Methods & Async Tasks
+ * 3. Encapsulated State & Methods (Sync + Async)
  */
 
 import { inject } from '@angular/core';
@@ -19,11 +19,15 @@ import {
   type CoffeeShopEvents,
   type CoffeeShopMethods,
   type CoffeeShopStates,
+  type LoyaltyCheckOutcome,
 } from './coffee-shop.domain';
 
-// Pure guards (0% DI, strictly reads ctx):
+// Pure guards (0% DI, strictly reads ctx / payload):
 const hasSelectedDrink = (ctx: CoffeeShopContext) => ctx.selectedDrink !== null;
-const isFreeDrink = (ctx: CoffeeShopContext) => ctx.isFreeDrink === true;
+const isFreeDrink = (
+  ctx: CoffeeShopContext,
+  payload?: LoyaltyCheckOutcome,
+) => (payload ? payload.isFreeDrink : ctx.isFreeDrink === true);
 
 export { baristaFSM };
 
@@ -38,7 +42,7 @@ export const coffeeShopFSM = createMachineFeature<{
     /* FROM                 VIA                         TO                            OPTIONS */
     ['customerBrowsing',    'SELECT_DRINK',             stay(),                       { call: (m) => m._selectDrink }],
     ['customerBrowsing',    'SET_STAMPS',               stay(),                       { call: (m) => m._setStamps }],
-    ['customerBrowsing',    'PLACE_ORDER',              awaiting('checkingLoyalty'),  { guard: hasSelectedDrink }],
+    ['customerBrowsing',    'PLACE_ORDER',              awaiting('checkingLoyalty'),  { guard: hasSelectedDrink, call: (m) => m._checkLoyalty }],
     ['customerBrowsing',    'PLACE_ORDER',              stay(),                       { call: (m) => m._setMissingDrinkError }],
 
     // Cashier checks loyalty card via API call:
@@ -48,12 +52,13 @@ export const coffeeShopFSM = createMachineFeature<{
     // 10th drink is FREE -> bypass payment and route directly into Barista Sub-FSM with typed input!
     ['checkingLoyalty',     'DONE',                     baristaFSM,                   {
                                                                                         guard: isFreeDrink,
+                                                                                        call: (m) => m._applyLoyaltyResult,
                                                                                         input: (ctx) => ({ selectedDrink: ctx.selectedDrink ?? COFFEE_MENU[0] }),
                                                                                       }],
-    ['checkingLoyalty',     'DONE',                     'awaitingPayment'],
+    ['checkingLoyalty',     'DONE',                     'awaitingPayment',            { call: (m) => m._applyLoyaltyResult }],
 
     // Loyalty error recovery options:
-    ['loyaltyErrorView',    'RETRY',                    awaiting('checkingLoyalty')],
+    ['loyaltyErrorView',    'RETRY',                    awaiting('checkingLoyalty'),  { call: (m) => m._checkLoyalty }],
     ['loyaltyErrorView',    'BYPASS_CARD',              'awaitingPayment'],
     ['loyaltyErrorView',    'CANCEL',                   'customerBrowsing'],
 
@@ -73,7 +78,10 @@ export const coffeeShopFSM = createMachineFeature<{
     ['drinkingCoffee',      'FINISH_COFFEE',            'customerBrowsing',           { call: (m) => m._finishCoffee }],
   ],
   state: initialCoffeeShopContext,
-  methods: (store): CoffeeShopMethods => ({
+  methods: (
+    store,
+    api = inject(CoffeeShopApiService),
+  ): CoffeeShopMethods => ({
     _selectDrink: ({ drink }) =>
       patchState(store, {
         selectedDrink: drink,
@@ -90,6 +98,26 @@ export const coffeeShopFSM = createMachineFeature<{
     _setMissingDrinkError: () =>
       patchState(store, {
         error: 'Please select a coffee first!',
+      }),
+    _checkLoyalty: async (_payload, signal, ctx) => {
+      const res = await api.checkLoyalty(
+        ctx.customerCard.cardId,
+        ctx.customerCard.customerName,
+        ctx.customerCard.currentStamps,
+        signal,
+      );
+      return {
+        isFreeDrink: res.isFreeDrink,
+        customerCard: res.card,
+        finalPrice: res.isFreeDrink ? 0 : (ctx.selectedDrink?.price ?? 0),
+      };
+    },
+    _applyLoyaltyResult: (res) =>
+      patchState(store, {
+        isFreeDrink: res.isFreeDrink,
+        customerCard: res.customerCard,
+        finalPrice: res.finalPrice,
+        error: null,
       }),
     _markPaid: () =>
       patchState(store, {
@@ -110,21 +138,5 @@ export const coffeeShopFSM = createMachineFeature<{
           ),
         },
       }),
-  }),
-  tasks: (api = inject(CoffeeShopApiService)) => ({
-    checkingLoyalty: async (ctx, signal) => {
-      const res = await api.checkLoyalty(
-        ctx.customerCard.cardId,
-        ctx.customerCard.customerName,
-        ctx.customerCard.currentStamps,
-        signal,
-      );
-      return {
-        isFreeDrink: res.isFreeDrink,
-        customerCard: res.card,
-        finalPrice: res.isFreeDrink ? 0 : (ctx.selectedDrink?.price ?? 0),
-        error: null,
-      };
-    },
   }),
 });

@@ -107,7 +107,8 @@ export const pureMachineDefinition = createRule<[], MessageIds>({
           if (
             spec.type === AST_NODE_TYPES.ImportSpecifier &&
             spec.imported.type === AST_NODE_TYPES.Identifier &&
-            spec.imported.name === 'createMachineFeature'
+            (spec.imported.name === 'createMachineFeature' ||
+              spec.imported.name === 'createEffectMachineFeature')
           ) {
             hasCreateMachineFeature = true;
           }
@@ -145,7 +146,8 @@ export const pureMachineDefinition = createRule<[], MessageIds>({
         const unwrapped = unwrapCallee(node.callee);
         if (
           unwrapped.type === AST_NODE_TYPES.Identifier &&
-          unwrapped.name === 'createMachineFeature'
+          (unwrapped.name === 'createMachineFeature' ||
+            unwrapped.name === 'createEffectMachineFeature')
         ) {
           hasCreateMachineFeature = true;
         }

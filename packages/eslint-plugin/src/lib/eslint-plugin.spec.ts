@@ -179,7 +179,7 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
         'require-awaiting-handlers',
         `
         const handleLoginSubmit = transitions([
-          ['loginView', 'LOGIN', awaiting('authenticating')],
+          ['loginView', 'LOGIN', awaiting('authenticating'), { call: (m) => m._login }],
         ]);
         createFSM()({
           id: 'auth',
@@ -203,7 +203,7 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
           id: 'auth',
           initial: 'loginView',
           transitions: [
-            ['loginView', 'LOGIN', awaiting('authenticating')],
+            ['loginView', 'LOGIN', awaiting('authenticating'), { call: (m) => m._login }],
             ['authenticating', 'DONE', 'loggedIn'],
           ],
         });
@@ -222,7 +222,7 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
           id: 'loader',
           initial: 'idle',
           transitions: [
-            ['idle',        'LOAD',  awaiting('loadingData')],
+            ['idle',        'LOAD',  awaiting('loadingData'), { call: (m) => m._load }],
             ['loadingData', 'DONE',  'ready'],
             [anyState(),    'ERROR', 'errorView'],
           ],
@@ -873,6 +873,125 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
         `,
       );
       expect(validMsgs).toHaveLength(0);
+    });
+  });
+
+  describe('14. Cycle 52: valid-any-state-target (No Hope-Driven State Jumps from anyState())', () => {
+    it('allows anyState() with stay(), finalState(), or VIA === ERROR', () => {
+      const { messages } = verifyRule(
+        'valid-any-state-target' as any,
+        `
+        createFSM()({
+          id: 'checkout',
+          initial: 'step1',
+          transitions: [
+            ['step1',    'NEXT',            'step2'],
+            [anyState(), 'VOUCHER_SCANNED', stay(),       { call: (m) => m._applyVoucher }],
+            [anyState(), 'ABORT',           finalState()],
+            [anyState(), 'ERROR',           'errorState'],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(0);
+    });
+
+    it('reports error when anyState() jumps to a resting state, awaiting() state, or is used inside a Column 1 array', () => {
+      const { messages } = verifyRule(
+        'valid-any-state-target' as any,
+        `
+        createFSM()({
+          id: 'hopeDriven',
+          initial: 'step1',
+          transitions: [
+            [anyState(),            'SELECT_2', 'step3'],
+            [anyState(),            'LOAD_3',   awaiting('loading3')],
+            [[anyState(), 'step1'], 'PING',     stay()],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(3);
+      expect(messages[0].messageId).toBe('invalidAnyStateTarget');
+      expect(messages[1].messageId).toBe('invalidAnyStateTarget');
+      expect(messages[2].messageId).toBe('anyStateInArray');
+    });
+  });
+
+  describe('15. Cycle 53: valid-timer-transitions (after(ms) vs every(ms) Timer Ontology)', () => {
+    it('passes when after(ms) transitions to a state and every(ms) uses stay()', () => {
+      const { messages } = verifyRule(
+        'valid-timer-transitions' as any,
+        `
+        createFSM()({
+          id: 'timers',
+          initial: 'ticking',
+          transitions: [
+            ['ticking', every((c) => c.ms), stay(),    { call: (m) => m._tick }],
+            ['ticking', after(5000),        'timeout'],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(0);
+    });
+
+    it('reports error when after(ms) uses stay() or when every(ms) does not use stay()', () => {
+      const { messages } = verifyRule(
+        'valid-timer-transitions' as any,
+        `
+        createFSM()({
+          id: 'invalidTimers',
+          initial: 'ticking',
+          transitions: [
+            ['ticking', after(1000),        stay()],
+            ['ticking', every((c) => c.ms), 'stopped'],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(2);
+      expect(messages[0].messageId).toBe('afterCannotStay');
+      expect(messages[1].messageId).toBe('everyMustStay');
+    });
+  });
+
+  describe('16. Cycle 55 & 56: require-awaiting-handlers ({ call } required on awaiting() & Named Domain Outcomes)', () => {
+    it('reports error when awaiting("state") row is missing { call: (m) => m._fn }', () => {
+      const { messages } = verifyRule(
+        'require-awaiting-handlers',
+        `
+        createFSM()({
+          id: 'missingCallOnAwaiting',
+          initial: 'idle',
+          transitions: [
+            ['idle',    'LOAD',  awaiting('loading')],
+            ['loading', 'DONE',  'ready'],
+            ['loading', 'ERROR', 'error'],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(1);
+    });
+
+    it('passes when awaiting("verifying") has { call } and uses named domain outcome events ("APPROVED", "REQUIRES_3DS") plus "ERROR" instead of generic "DONE"', () => {
+      const { messages } = verifyRule(
+        'require-awaiting-handlers',
+        `
+        createFSM()({
+          id: 'namedOutcomes',
+          initial: 'checkout',
+          transitions: [
+            ['checkout',  'PAY',          awaiting('verifying'), { call: (m) => m._verifyPayment }],
+            ['verifying', 'APPROVED',     'paid',                { call: (m) => m._onApproved }],
+            ['verifying', 'REQUIRES_3DS', 'challenge3ds',        { call: (m) => m._on3ds }],
+            ['verifying', 'ERROR',        'paymentFailed'],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(0);
     });
   });
 });

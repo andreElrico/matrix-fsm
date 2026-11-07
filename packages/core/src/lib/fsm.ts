@@ -9,6 +9,7 @@ import {
   isAwaitingNode,
   isCombinatorNode,
   isEachNode,
+  isEveryNode,
   isFinalNode,
   isFSMDefinition,
   isStayNode,
@@ -81,7 +82,7 @@ export function resolveSourceIds(source: unknown): string[] {
 }
 
 export function resolveViaId(via: unknown): string {
-  if (isAfterNode(via) || isAlwaysNode(via)) {
+  if (isAfterNode(via) || isEveryNode(via) || isAlwaysNode(via)) {
     return via.id;
   }
   return String(via);
@@ -212,15 +213,17 @@ function buildFSM<
   type EffectiveContext = ResolveContext<TContext, TTransitions>;
   const states = new Set<string>([config.initial]);
   const awaitingStates = new Set<string>();
+  const awaitingCallSelectors = new Map<string, any>();
   const subMachines = new Map<string, SubMachineRef<any, any>>();
   const eachNodes = new Map<string, EachNode<any, any>>();
   const combinatorNodes = new Map<string, CombinatorNode<any, any>>();
 
   for (const row of config.transitions) {
-    const [from, via, to] = row as unknown as readonly [
+    const [from, via, to, options] = row as unknown as readonly [
       unknown,
       unknown,
       unknown,
+      TransitionOptions<EffectiveContext, any, TMethods> | undefined,
     ];
 
     const fromItems = Array.isArray(from) ? from : [from];
@@ -252,6 +255,9 @@ function buildFSM<
     if (isAwaitingNode(to)) {
       states.add(to.state);
       awaitingStates.add(to.state);
+      if (options?.call && !awaitingCallSelectors.has(to.state)) {
+        awaitingCallSelectors.set(to.state, options.call);
+      }
     } else if (isFinalNode(to)) {
       // FinalNode is a terminal outcome marker, not a resting state in `states`
     } else if (toSub) {
@@ -383,6 +389,8 @@ function buildFSM<
         !resolved.stayed && subMachines.has(currentState)
           ? (subMachines.get(currentState) ?? null)
           : null;
+      const isNoOpStay =
+        resolved.stayed && !options?.call && !options?.output;
 
       return {
         matched: true,
@@ -394,6 +402,7 @@ function buildFSM<
         inputSelector,
         inputMapped,
         stayed: resolved.stayed,
+        isNoOpStay,
         isAwaiting: resolved.stayed
           ? awaitingStates.has(currentState)
           : isTargetAwaiting,
@@ -474,6 +483,7 @@ function buildFSM<
     transitions: config.transitions,
     states,
     awaitingStates,
+    awaitingCallSelectors,
     subMachines,
     eachNodes,
     combinatorNodes,

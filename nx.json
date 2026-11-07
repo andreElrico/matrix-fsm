@@ -72,6 +72,9 @@
     "test": {
       "dependsOn": ["^build"]
     },
+    "lint": {
+      "dependsOn": ["^build"]
+    },
     "@angular/build:application": {
       "cache": true,
       "dependsOn": ["^build"],

@@ -1,5 +1,5 @@
 import nx from '@nx/eslint-plugin';
-import matrixFsm from '@matrix-fsm/eslint-plugin';
+import matrixFsm from '../../packages/eslint-plugin/dist/index.js';
 import baseConfig from '../../eslint.config.mjs';
 
 export default [

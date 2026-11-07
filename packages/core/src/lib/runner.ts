@@ -5,6 +5,8 @@
 import { resolveSourceIds } from './fsm.js';
 import {
   isAfterNode,
+  isEveryNode,
+  isOutcomeNode,
   MAX_SYNC_MICROSTEPS,
   MatrixFsmInfiniteLoopError,
 } from './primitives.js';
@@ -12,6 +14,7 @@ import type {
   AnyFSMDefinition,
   CombinatorNode,
   EachNode,
+  EveryNode,
   ExtractContext,
   ExtractMethods,
   ExtractStates,
@@ -181,13 +184,49 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
   }> = [];
   let isProcessing = false;
   const activeTimers: Array<ReturnType<typeof setTimeout>> = [];
+  const activeEveryTimers = new Map<
+    string,
+    {
+      timerId: ReturnType<typeof setTimeout> | null;
+      currentDelay: number;
+      via: EveryNode<any>;
+    }
+  >();
+  let activeTask: {
+    readonly stateName: string;
+    readonly entryEpoch: number;
+    cancelled: boolean;
+    readonly abortController: AbortController;
+    teardown: (() => void) | null;
+  } | null = null;
   const debugLog = resolveDebugLogger(hooks?.debug);
+
+  const cancelActiveTask = (): void => {
+    if (!activeTask) {
+      return;
+    }
+    const taskToCancel = activeTask;
+    activeTask = null;
+    taskToCancel.cancelled = true;
+    taskToCancel.abortController.abort();
+    if (taskToCancel.teardown) {
+      const cleanup = taskToCancel.teardown;
+      taskToCancel.teardown = null;
+      cleanup();
+    }
+  };
 
   const clearActiveTimers = (): void => {
     for (const timer of activeTimers) {
       clearTimeout(timer);
     }
     activeTimers.length = 0;
+    for (const entry of activeEveryTimers.values()) {
+      if (entry.timerId !== null) {
+        clearTimeout(entry.timerId);
+      }
+    }
+    activeEveryTimers.clear();
   };
 
   const destroyActiveCombinator = (): void => {
@@ -212,6 +251,41 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     }
   };
 
+  const scheduleOrUpdateEveryTimer = (
+    stateName: string,
+    entryEpoch: number,
+    via: EveryNode<any>,
+    forceReschedule: boolean,
+  ): void => {
+    const rawMs =
+      typeof via.ms === 'function' ? via.ms(readEffectiveContext()) : via.ms;
+    const delay =
+      typeof rawMs === 'number' && Number.isFinite(rawMs) && rawMs > 0
+        ? rawMs
+        : 0;
+    const existing = activeEveryTimers.get(via.id);
+    if (!forceReschedule && existing && existing.currentDelay === delay) {
+      return;
+    }
+    if (existing?.timerId !== null && existing?.timerId !== undefined) {
+      clearTimeout(existing.timerId);
+    }
+    if (delay <= 0) {
+      activeEveryTimers.set(via.id, { timerId: null, currentDelay: 0, via });
+      return;
+    }
+    const timerId = setTimeout(() => {
+      if (
+        !isDestroyed &&
+        stateEpoch === entryEpoch &&
+        currentState === stateName
+      ) {
+        sendInternal(via.id, undefined, false, false);
+      }
+    }, delay);
+    activeEveryTimers.set(via.id, { timerId, currentDelay: delay, via });
+  };
+
   const scheduleStateTimers = (stateName: string): void => {
     clearActiveTimers();
     const entryEpoch = stateEpoch;
@@ -219,18 +293,30 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     for (const row of fsm.transitions) {
       const [from, via] = row as unknown as readonly [unknown, unknown];
       const srcIds = resolveSourceIds(from);
-      if (
-        (srcIds.includes(stateName) || srcIds.includes('*')) &&
-        isAfterNode(via) &&
-        !scheduledIds.has(via.id)
-      ) {
+      if (!srcIds.includes(stateName) && !srcIds.includes('*')) {
+        continue;
+      }
+      if (isAfterNode(via) && !scheduledIds.has(via.id)) {
         scheduledIds.add(via.id);
-        const timerId = setTimeout(() => {
-          if (!isDestroyed && stateEpoch === entryEpoch && currentState === stateName) {
-            sendInternal(via.id, undefined, false, false);
-          }
-        }, via.ms);
-        activeTimers.push(timerId);
+        const rawMs =
+          typeof via.ms === 'function'
+            ? via.ms(readEffectiveContext())
+            : via.ms;
+        if (typeof rawMs === 'number' && Number.isFinite(rawMs) && rawMs >= 0) {
+          const timerId = setTimeout(() => {
+            if (
+              !isDestroyed &&
+              stateEpoch === entryEpoch &&
+              currentState === stateName
+            ) {
+              sendInternal(via.id, undefined, false, false);
+            }
+          }, rawMs);
+          activeTimers.push(timerId);
+        }
+      } else if (isEveryNode(via) && !scheduledIds.has(via.id)) {
+        scheduledIds.add(via.id);
+        scheduleOrUpdateEveryTimer(stateName, entryEpoch, via, true);
       }
     }
   };
@@ -687,6 +773,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
 
     if (!evaluation.stayed) {
       clearActiveTimers();
+      cancelActiveTask();
       hooks?.onExit?.[prevState]?.(readEffectiveContext());
       currentState = evaluation.nextState;
       stateEpoch++;
@@ -694,7 +781,9 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
 
     currentContext = evaluation.nextContext;
 
-    if (evaluation.callSelector) {
+    const isEnteringAwaiting = !evaluation.stayed && evaluation.isAwaiting;
+
+    if (evaluation.callSelector && !isEnteringAwaiting) {
       invokeCallSelector(
         evaluation.callSelector,
         hooks?.methods as Record<string, any> | undefined,
@@ -738,6 +827,14 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
     }
 
     if (evaluation.stayed) {
+      for (const [everyId, entry] of activeEveryTimers.entries()) {
+        scheduleOrUpdateEveryTimer(
+          currentState,
+          stateEpoch,
+          entry.via,
+          event === everyId,
+        );
+      }
       hooks?.inspect?.({
         machineId: fsm.id,
         from: prevState,
@@ -788,6 +885,15 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
 
     hooks?.onEnter?.[currentState]?.(readEffectiveContext());
     scheduleStateTimers(currentState);
+    if (isEnteringAwaiting) {
+      startAwaitingCallIfNeeded(
+        currentState,
+        evaluation.callSelector ??
+          fsm.awaitingCallSelectors?.get(currentState) ??
+          null,
+        payload,
+      );
+    }
     if (
       !isDone() &&
       (fsm.hasTransitionFor(currentState, '__always__') ||
@@ -825,6 +931,119 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
   };
 
   let isDestroyed = false;
+
+  const handleAwaitingSuccess = (
+    handle: NonNullable<typeof activeTask>,
+    result: unknown,
+  ): void => {
+    if (
+      isDestroyed ||
+      handle.cancelled ||
+      handle.abortController.signal.aborted ||
+      stateEpoch !== handle.entryEpoch ||
+      activeTask !== handle
+    ) {
+      return;
+    }
+    activeTask = null;
+    if (isOutcomeNode(result)) {
+      sendInternal(result.event, result.payload, false, false);
+    } else {
+      sendInternal('DONE', result, false, false);
+    }
+  };
+
+  const handleAwaitingFailure = (
+    handle: NonNullable<typeof activeTask>,
+    err: unknown,
+  ): void => {
+    if (
+      isDestroyed ||
+      handle.cancelled ||
+      handle.abortController.signal.aborted ||
+      stateEpoch !== handle.entryEpoch ||
+      activeTask !== handle
+    ) {
+      return;
+    }
+    activeTask = null;
+    if (typeof err === 'object' && err !== null) {
+      if (
+        '_tag' in err &&
+        typeof (err as { _tag: unknown })._tag === 'string'
+      ) {
+        const tag = (err as { _tag: string })._tag;
+        if (fsm.hasTransitionFor(currentState, tag)) {
+          sendInternal(tag, err, false, false);
+          return;
+        }
+      }
+      if (
+        'name' in err &&
+        typeof (err as { name: unknown }).name === 'string' &&
+        (err as { name: string }).name !== 'Error'
+      ) {
+        const errName = (err as { name: string }).name;
+        if (fsm.hasTransitionFor(currentState, errName)) {
+          sendInternal(errName, err, false, false);
+          return;
+        }
+      }
+    }
+    sendInternal('ERROR', err, false, false);
+  };
+
+  const startAwaitingCallIfNeeded = (
+    stateName: string,
+    callSelector: TransitionCallSelector<any, any, TContext> | null,
+    eventPayload: unknown,
+  ): void => {
+    const methodsTarget = hooks?.methods as Record<string, any> | undefined;
+    if (!callSelector || !methodsTarget) {
+      return;
+    }
+    const fn =
+      typeof callSelector === 'function'
+        ? callSelector(methodsTarget)
+        : methodsTarget[callSelector];
+    if (typeof fn !== 'function') {
+      return;
+    }
+    cancelActiveTask();
+    const abortController = new AbortController();
+    const handle = {
+      stateName,
+      entryEpoch: stateEpoch,
+      cancelled: false,
+      abortController,
+      teardown: null as (() => void) | null,
+    };
+    activeTask = handle;
+    try {
+      const ret = fn.call(
+        methodsTarget,
+        eventPayload,
+        abortController.signal,
+        readEffectiveContext(),
+      );
+      if (ret && typeof (ret as PromiseLike<unknown>).then === 'function') {
+        (ret as PromiseLike<unknown>).then(
+          (val) => handleAwaitingSuccess(handle, val),
+          (err) => handleAwaitingFailure(handle, err),
+        );
+        return;
+      }
+      if (isOutcomeNode(ret)) {
+        handleAwaitingSuccess(handle, ret);
+        return;
+      }
+      if (ret !== undefined) {
+        handleAwaitingSuccess(handle, ret);
+      }
+    } catch (syncErr) {
+      handleAwaitingFailure(handle, syncErr);
+    }
+  };
 
   const sendInternal = (
     event: string,
@@ -906,8 +1125,13 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
         return true;
       }
     }
-    return fsm.evaluate(currentState, event, payload, readEffectiveContext())
-      .matched;
+    const evalResult = fsm.evaluate(
+      currentState,
+      event,
+      payload,
+      readEffectiveContext(),
+    );
+    return evalResult.matched && !evalResult.isNoOpStay;
   };
 
   const send = (event: string, payload?: unknown): void => {
@@ -924,6 +1148,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
   const destroy = (): void => {
     isDestroyed = true;
     clearActiveTimers();
+    cancelActiveTask();
     eventQueue.length = 0;
     isProcessing = false;
     if (activeSubMachine) {
@@ -966,6 +1191,7 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
 
   const restoreSnapshot = (snapshot: MachineSnapshot<TFSM>): void => {
     clearActiveTimers();
+    cancelActiveTask();
     eventQueue.length = 0;
     if (activeSubMachine) {
       activeSubMachine.destroy();
@@ -1031,6 +1257,13 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       }
     }
     scheduleStateTimers(currentState);
+    if (fsm.awaitingStates.has(currentState)) {
+      startAwaitingCallIfNeeded(
+        currentState,
+        fsm.awaitingCallSelectors?.get(currentState) ?? null,
+        undefined,
+      );
+    }
     if (
       fsm.hasTransitionFor(currentState, '__always__') ||
       fsm.hasTransitionFor('*', '__always__')
@@ -1052,6 +1285,13 @@ export function createMachineInstance<TFSM extends AnyFSMDefinition>(
       ...(hooks?.initialContext ?? {}),
     };
     scheduleStateTimers(currentState);
+    if (fsm.awaitingStates.has(currentState)) {
+      startAwaitingCallIfNeeded(
+        currentState,
+        fsm.awaitingCallSelectors?.get(currentState) ?? null,
+        undefined,
+      );
+    }
     if (
       fsm.hasTransitionFor(currentState, '__always__') ||
       fsm.hasTransitionFor('*', '__always__')

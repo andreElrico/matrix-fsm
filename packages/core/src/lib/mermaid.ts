@@ -9,6 +9,7 @@ import {
   isAwaitingNode,
   isCombinatorNode,
   isEachNode,
+  isEveryNode,
   isFinalNode,
   isFSMDefinition,
   isStayNode,
@@ -96,10 +97,12 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
       const fromId = sanitizeMermaidId(fromRaw);
       const formatViaSingle = (v: unknown): string =>
         isAfterNode(v)
-          ? `after(${v.ms}ms)`
-          : isAlwaysNode(v)
-            ? 'always()'
-            : String(v);
+          ? `after(${typeof v.ms === 'number' ? `${v.ms}ms` : 'dynamic'})`
+          : isEveryNode(v)
+            ? `every(${typeof v.ms === 'number' ? `${v.ms}ms` : 'dynamic'})`
+            : isAlwaysNode(v)
+              ? 'always()'
+              : String(v);
       const viaLabel = Array.isArray(via)
         ? via.map(formatViaSingle).join(' | ')
         : formatViaSingle(via);
@@ -211,7 +214,10 @@ export function getShortestPaths(
 
   const formatViaKey = (via: unknown): string => {
     if (isAfterNode(via)) {
-      return `after(${via.ms}ms)`;
+      return `after(${typeof via.ms === 'number' ? `${via.ms}ms` : 'dynamic'})`;
+    }
+    if (isEveryNode(via)) {
+      return `every(${typeof via.ms === 'number' ? `${via.ms}ms` : 'dynamic'})`;
     }
     if (isAlwaysNode(via)) {
       return 'always()';

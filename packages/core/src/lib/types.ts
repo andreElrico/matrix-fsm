@@ -93,6 +93,52 @@ export interface AwaitingNode<TState extends string = string> {
   readonly state: TState;
 }
 
+export interface OutcomeNode<
+  TEvent extends string = string,
+  TPayload = void,
+> {
+  readonly __type: 'outcome';
+  readonly event: TEvent;
+  readonly payload: TPayload;
+}
+
+export interface SubscribableLike<T = any> {
+  subscribe(...args: any[]): any;
+}
+
+export interface ResourceRefLike<T = any> {
+  readonly value: () => T;
+  readonly status: () => any;
+  readonly error: () => any;
+  readonly reload: () => any;
+}
+
+export type UnwrapStandardAsyncReturn<T> =
+  [0] extends [1 & T]
+    ? any
+    : T extends PromiseLike<infer U>
+      ? Awaited<U>
+      : T extends ResourceRefLike<infer U>
+        ? U
+        : T extends SubscribableLike<infer U>
+          ? U
+          : T;
+
+export type ExtractMethodOutcomeEvents<TMethods> =
+  [0] extends [1 & TMethods]
+    ? never
+    : TMethods extends object
+      ? {
+          [K in keyof TMethods]: TMethods[K] extends (...args: any[]) => infer R
+            ? UnwrapStandardAsyncReturn<R> extends infer Unwrapped
+              ? Unwrapped extends OutcomeNode<infer E extends string, any>
+                ? E
+                : never
+              : never
+            : never;
+        }[keyof TMethods]
+      : never;
+
 export interface StayNode {
   readonly __type: 'stay';
 }
@@ -108,11 +154,18 @@ export interface FinalNode<TOutcome extends string = string> {
   readonly isBare?: boolean;
 }
 
-export interface AfterNode<TMs extends number = number> {
+export interface AfterNode<TMs extends number = number, TContext = any> {
   readonly __type: 'after';
   readonly __kind: 'after';
-  readonly ms: TMs;
-  readonly id: `__after_${TMs}__`;
+  readonly ms: TMs | ((ctx: ReadonlyContext<TContext>) => number);
+  readonly id: string;
+}
+
+export interface EveryNode<TContext = any> {
+  readonly __type: 'every';
+  readonly __kind: 'every';
+  readonly ms: number | ((ctx: ReadonlyContext<TContext>) => number);
+  readonly id: string;
 }
 
 export interface AlwaysNode {
@@ -207,7 +260,7 @@ export type ExpectedCallSignature<RowPayload, TContext = any> =
   [0] extends [1 & RowPayload]
     ? (payload: any, ctx: ReadonlyContext<TContext>) => unknown
     : [RowPayload] extends [void | undefined]
-      ? () => unknown
+      ? (() => unknown) | ((payload: void, ctx: ReadonlyContext<TContext>) => unknown)
       : void extends RowPayload
         ? (() => unknown) &
             ((
@@ -215,6 +268,34 @@ export type ExpectedCallSignature<RowPayload, TContext = any> =
               ctx: ReadonlyContext<TContext>,
             ) => unknown)
         : (payload: RowPayload, ctx: ReadonlyContext<TContext>) => unknown;
+
+export type ExpectedAwaitingCallSignature<RowPayload, TContext = any> =
+  [0] extends [1 & RowPayload]
+    ? (
+        payload: any,
+        signal: AbortSignal,
+        ctx: ReadonlyContext<TContext>,
+      ) => unknown
+    : [RowPayload] extends [void | undefined]
+      ?
+          | (() => unknown)
+          | ((
+              payload: void,
+              signal: AbortSignal,
+              ctx: ReadonlyContext<TContext>,
+            ) => unknown)
+      : void extends RowPayload
+        ? (() => unknown) &
+            ((
+              payload: Exclude<RowPayload, void | undefined>,
+              signal: AbortSignal,
+              ctx: ReadonlyContext<TContext>,
+            ) => unknown)
+        : (
+            payload: RowPayload,
+            signal: AbortSignal,
+            ctx: ReadonlyContext<TContext>,
+          ) => unknown;
 
 export type TransitionCallSelector<
   TMethods = Record<string, any>,
@@ -224,7 +305,11 @@ export type TransitionCallSelector<
   | ((
       methods: TMethods,
     ) =>
-      | ((payload: TPayload, ctx: ReadonlyContext<TContext>) => void)
+      | ((
+          payload: TPayload,
+          signalOrCtx: any,
+          ctx: ReadonlyContext<TContext>,
+        ) => unknown)
       | undefined)
   | Extract<keyof TMethods, string>;
 
@@ -236,6 +321,16 @@ export type StrictTransitionCallSelector<
   | ((
       methods: TMethods,
     ) => ExpectedCallSignature<TPayload, TContext> | undefined)
+  | Extract<keyof TMethods, string>;
+
+export type StrictAwaitingTransitionCallSelector<
+  TMethods = Record<string, any>,
+  TPayload = any,
+  TContext = any,
+> =
+  | ((
+      methods: TMethods,
+    ) => ExpectedAwaitingCallSignature<TPayload, TContext> | undefined)
   | Extract<keyof TMethods, string>;
 
 export type AllowedOutputKey<TOutputs> =
@@ -389,6 +484,26 @@ export type StrictTransitionOptions<
     : TransitionOutputTuple<TOutputs, TContext, TPayload>;
 };
 
+export type StrictAwaitingTransitionOptions<
+  TContext = any,
+  TPayload = any,
+  TMethods = any,
+  TInput = any,
+  TOutputs = EmptyObject,
+> = Omit<
+  TransitionOptions<TContext, TPayload, TMethods, TInput, TOutputs>,
+  'call' | 'output'
+> & {
+  readonly call: StrictAwaitingTransitionCallSelector<
+    TMethods,
+    TPayload,
+    TContext
+  >;
+  readonly output?: IsUnion<Extract<keyof TOutputs, string>> extends true
+    ? unknown
+    : TransitionOutputTuple<TOutputs, TContext, TPayload>;
+};
+
 export type TransitionOptionsWithoutOutput<
   TContext = any,
   TPayload = any,
@@ -444,9 +559,15 @@ export type TransitionVia<
   TMethods = any,
 > =
   | TEvent
-  | readonly (TEvent | BuiltInLifecycleEvent)[]
+  | ExtractMethodOutcomeEvents<TMethods>
+  | readonly (
+      | TEvent
+      | ExtractMethodOutcomeEvents<TMethods>
+      | BuiltInLifecycleEvent
+    )[]
   | BuiltInLifecycleEvent
-  | AfterNode<number>
+  | AfterNode<number, TContext>
+  | EveryNode<TContext>
   | AlwaysNode
   | ExtractedMarker<TContext, TMethods>;
 
@@ -529,9 +650,15 @@ export type TransitionRow<
           )[],
       via:
         | string
-        | AfterNode<number>
+        | AfterNode<number, TContext>
+        | EveryNode<TContext>
         | AlwaysNode
-        | readonly (string | AfterNode<number> | AlwaysNode)[],
+        | readonly (
+            | string
+            | AfterNode<number, TContext>
+            | EveryNode<TContext>
+            | AlwaysNode
+          )[],
       to: TransitionToNonNamedFinal<TState, TContext, TMethods>,
       options?: TransitionOptions<
         TContext,
@@ -554,9 +681,15 @@ export type TransitionRow<
           )[],
       via:
         | string
-        | AfterNode<number>
+        | AfterNode<number, TContext>
+        | EveryNode<TContext>
         | AlwaysNode
-        | readonly (string | AfterNode<number> | AlwaysNode)[],
+        | readonly (
+            | string
+            | AfterNode<number, TContext>
+            | EveryNode<TContext>
+            | AlwaysNode
+          )[],
       to: FinalNode<AllowedNamedFinalOutcome<TOutputs>>,
       options?: TransitionOptionsWithoutOutput<TContext, any, TMethods, any>,
     ];
@@ -610,6 +743,7 @@ export interface TransitionEvaluation<
   ) => Record<string, unknown>) | null;
   readonly inputMapped: Record<string, unknown> | null;
   readonly stayed: boolean;
+  readonly isNoOpStay?: boolean;
   readonly isAwaiting: boolean;
   readonly finalOutcome: string | null;
   readonly finalPayload?: unknown;
@@ -649,6 +783,10 @@ export interface FSMDefinition<
   readonly __outputBrand?: TOutput;
   readonly states: ReadonlySet<string>;
   readonly awaitingStates: ReadonlySet<string>;
+  readonly awaitingCallSelectors?: ReadonlyMap<
+    string,
+    TransitionCallSelector<TMethods, any, TContext>
+  >;
   readonly subMachines: ReadonlyMap<string, SubMachineRef<any, any>>;
   readonly eachNodes: ReadonlyMap<string, EachNode<any, any>>;
   readonly combinatorNodes?: ReadonlyMap<string, CombinatorNode<any, any>>;
@@ -844,6 +982,63 @@ type IsStayNode<T> =
         ? true
         : false;
 
+type IsFinalNode<T> =
+  [0] extends [1 & T]
+    ? false
+    : [T] extends [never]
+      ? false
+      : [T] extends [FinalNode<any>]
+        ? true
+        : false;
+
+type IsAfterNode<T> =
+  [0] extends [1 & T]
+    ? false
+    : [T] extends [never]
+      ? false
+      : [T] extends [AfterNode<any, any>]
+        ? true
+        : false;
+
+type IsEveryNode<T> =
+  [0] extends [1 & T]
+    ? false
+    : [T] extends [never]
+      ? false
+      : [T] extends [EveryNode<any>]
+        ? true
+        : false;
+
+type IsInvalidAfterRow<Via, To> =
+  IsAfterNode<Via> extends true ? IsStayNode<To> : false;
+
+type IsInvalidEveryRow<Via, To> =
+  IsEveryNode<Via> extends true
+    ? IsStayNode<To> extends true
+      ? false
+      : true
+    : false;
+
+type HasAnyStateInArray<From> =
+  [0] extends [1 & From]
+    ? false
+    : From extends readonly (infer El)[]
+      ? true extends (El extends any ? IsAnyStateNode<El> : false)
+        ? true
+        : false
+      : false;
+
+type IsInvalidAnyStateRow<From, Via, To> =
+  IsAnyStateNode<From> extends true
+    ? IsStayNode<To> extends true
+      ? false
+      : IsFinalNode<To> extends true
+        ? false
+        : [Via] extends ['ERROR']
+          ? false
+          : true
+    : false;
+
 type IsTerminalSubMachineOutput<From, Via> =
   [0] extends [1 & From]
     ? false
@@ -991,7 +1186,8 @@ type AllowedSubMachineVia<From, TEvent extends string> =
           | ExtractEmittedOutputs<From>
           | ExtractOutputKeys<From>)
   | 'ERROR'
-  | AfterNode<number>
+  | AfterNode<number, any>
+  | EveryNode<any>
   | TEvent;
 
 type ResolveSubMachineOutputPayload<From, Via> =
@@ -1024,83 +1220,240 @@ type ExtractActorOutputForKey<TActor, K extends string> = TActor extends any
     : never
   : never;
 
-type ResolveSingleViaPayload<From, SingleVia, TEventsMap> =
-  IsSubMachineNode<From> extends true
-    ? ResolveSubMachineOutputPayload<From, SingleVia>
-    : From extends CombinatorNode<'all', infer TMachines>
-      ? SingleVia extends 'ALL_DONE'
+type IsAwaitingNode<T> =
+  [0] extends [1 & T]
+    ? false
+    : [T] extends [never]
+      ? false
+      : [T] extends [AwaitingNode<any>]
+        ? true
+        : false;
+
+type ExtractAsyncReturnFromMethods<TMethods> =
+  [0] extends [1 & TMethods]
+    ? any
+    : IsDefaultOrUntypedObject<TMethods> extends true
+      ? any
+      : TMethods extends object
         ? {
-            readonly [M in TMachines[number] as SubMachineNodeId<M>]: ExtractTerminalOutputPayload<M>;
-          }
-        : SingleVia extends 'DONE'
-          ? {
-              -readonly [K in keyof TMachines]: ExtractTerminalOutputPayload<
-                TMachines[K]
-              >;
-            }
-          : SingleVia extends 'ERROR'
-            ? [ExtractActorOutputForKey<TMachines[number], 'ERROR'>] extends [
-                never,
-              ]
-              ? any
-              : ExtractActorOutputForKey<TMachines[number], 'ERROR'>
+            [K in keyof TMethods]: TMethods[K] extends (...args: any[]) => infer R
+              ? R extends
+                  | PromiseLike<any>
+                  | SubscribableLike<any>
+                  | ResourceRefLike<any>
+                  | OutcomeNode<any, any>
+                ? R
+                : never
+              : never;
+          }[keyof TMethods] extends infer AsyncReturns
+          ? [AsyncReturns] extends [never]
+            ? any
+            : AsyncReturns
+          : any
+        : any;
+
+type ExtractAwaitingCallReturnFromRow<
+  Row,
+  TargetState extends string,
+  TMethods,
+> = Row extends readonly [
+  any,
+  any,
+  AwaitingNode<TargetState>,
+  { readonly call: infer CallSel },
+]
+  ? CallSel extends keyof TMethods
+    ? TMethods[CallSel] extends (...args: any[]) => infer R
+      ? R
+      : any
+    : CallSel extends (m: any) => infer Fn
+      ? [0] extends [1 & Fn]
+        ? ExtractAsyncReturnFromMethods<TMethods>
+        : Fn extends (...args: any[]) => infer R
+          ? R
+          : ExtractAsyncReturnFromMethods<TMethods>
+      : ExtractAsyncReturnFromMethods<TMethods>
+  : never;
+
+export type ExtractAwaitingReturnForState<
+  From,
+  TTransitions extends readonly any[],
+  TMethods = any,
+> = [0] extends [1 & TTransitions]
+  ? ExtractAsyncReturnFromMethods<TMethods>
+  : From extends string
+    ? ExtractAwaitingCallReturnFromRow<
+        TTransitions[number],
+        From,
+        TMethods
+      > extends infer R
+      ? [R] extends [never]
+        ? ExtractAsyncReturnFromMethods<TMethods>
+        : R
+      : ExtractAsyncReturnFromMethods<TMethods>
+    : ExtractAsyncReturnFromMethods<TMethods>;
+
+type IsAwaitingStateInTransitions<
+  From,
+  TTransitions extends readonly any[],
+> = [0] extends [1 & TTransitions]
+  ? false
+  : From extends string
+    ? [
+        Extract<
+          TTransitions[number],
+          readonly [any, any, AwaitingNode<From>, ...any[]]
+        >,
+      ] extends [never]
+      ? false
+      : true
+    : false;
+
+type ResolveAwaitingViaPayload<
+  From,
+  SingleVia,
+  TTransitions extends readonly any[],
+  TMethods,
+> = UnwrapStandardAsyncReturn<
+  ExtractAwaitingReturnForState<From, TTransitions, TMethods>
+> extends infer Unwrapped
+  ? [0] extends [1 & Unwrapped]
+    ? any
+    : SingleVia extends 'DONE'
+      ? Exclude<Unwrapped, OutcomeNode<any, any>>
+      : SingleVia extends string
+        ? [Extract<Unwrapped, OutcomeNode<SingleVia, any>>] extends [never]
+          ? any
+          : Extract<Unwrapped, OutcomeNode<SingleVia, any>> extends OutcomeNode<
+                SingleVia,
+                infer P
+              >
+            ? P
             : any
-      : From extends CombinatorNode<'any', infer TMachines>
+        : any
+  : any;
+
+type ResolveSingleViaPayload<
+  From,
+  SingleVia,
+  TEventsMap,
+  TTransitions extends readonly any[] = readonly any[],
+  TMethods = any,
+> = IsSubMachineNode<From> extends true
+  ? ResolveSubMachineOutputPayload<From, SingleVia>
+  : From extends CombinatorNode<'all', infer TMachines>
+    ? SingleVia extends 'ALL_DONE'
+      ? {
+          readonly [M in TMachines[number] as SubMachineNodeId<M>]: ExtractTerminalOutputPayload<M>;
+        }
+      : SingleVia extends 'DONE'
+        ? {
+            -readonly [K in keyof TMachines]: ExtractTerminalOutputPayload<
+              TMachines[K]
+            >;
+          }
+        : SingleVia extends 'ERROR'
+          ? [ExtractActorOutputForKey<TMachines[number], 'ERROR'>] extends [
+              never,
+            ]
+            ? any
+            : ExtractActorOutputForKey<TMachines[number], 'ERROR'>
+          : any
+    : From extends CombinatorNode<'any', infer TMachines>
+      ? SingleVia extends 'DONE' | 'ALL_DONE'
+        ? ExtractTerminalOutputPayload<TMachines[number]>
+        : SingleVia extends 'ERROR'
+          ? [ExtractActorOutputForKey<TMachines[number], 'ERROR'>] extends [
+              never,
+            ]
+            ? any
+            : {
+                -readonly [K in keyof TMachines]: ExtractActorOutputForKey<
+                  TMachines[K],
+                  'ERROR'
+                >;
+              }
+          : SingleVia extends string
+            ? [
+                ExtractActorOutputForKey<TMachines[number], SingleVia>,
+              ] extends [never]
+              ? any
+              : ExtractActorOutputForKey<TMachines[number], SingleVia>
+            : any
+      : From extends CombinatorNode<'race', infer TMachines>
         ? SingleVia extends 'DONE' | 'ALL_DONE'
           ? ExtractTerminalOutputPayload<TMachines[number]>
-          : SingleVia extends 'ERROR'
-            ? [ExtractActorOutputForKey<TMachines[number], 'ERROR'>] extends [
-                never,
-              ]
+          : SingleVia extends string
+            ? [
+                ExtractActorOutputForKey<TMachines[number], SingleVia>,
+              ] extends [never]
               ? any
-              : {
-                  -readonly [K in keyof TMachines]: ExtractActorOutputForKey<
-                    TMachines[K],
-                    'ERROR'
-                  >;
-                }
-            : SingleVia extends string
-              ? [
-                  ExtractActorOutputForKey<TMachines[number], SingleVia>,
-                ] extends [never]
-                ? any
-                : ExtractActorOutputForKey<TMachines[number], SingleVia>
-              : any
-        : From extends CombinatorNode<'race', infer TMachines>
-          ? SingleVia extends 'DONE' | 'ALL_DONE'
-            ? ExtractTerminalOutputPayload<TMachines[number]>
-            : SingleVia extends string
-              ? [
-                  ExtractActorOutputForKey<TMachines[number], SingleVia>,
-                ] extends [never]
-                ? any
-                : ExtractActorOutputForKey<TMachines[number], SingleVia>
-              : any
-          : From extends EachNode<any, infer TSub>
-            ? SingleVia extends 'ALL_DONE' | 'DONE'
-              ? Array<ExtractTerminalOutputPayload<TSub>>
-              : any
-            : SingleVia extends AfterNode<any> | AlwaysNode
-              ? void
-              : [0] extends [1 & TEventsMap]
-                ? any
-                : TEventsMap extends object
-                  ? string extends keyof TEventsMap
-                    ? any
-                    : keyof TEventsMap extends never
-                      ? any
-                      : SingleVia extends keyof TEventsMap
-                        ? TEventsMap[SingleVia]
+              : ExtractActorOutputForKey<TMachines[number], SingleVia>
+            : any
+        : From extends EachNode<any, infer TSub>
+          ? SingleVia extends 'ALL_DONE' | 'DONE'
+            ? Array<ExtractTerminalOutputPayload<TSub>>
+            : any
+          : SingleVia extends AfterNode<any, any> | EveryNode<any> | AlwaysNode
+            ? void
+            : [0] extends [1 & TEventsMap]
+              ? IsAwaitingStateInTransitions<From, TTransitions> extends true
+                ? ResolveAwaitingViaPayload<
+                    From,
+                    SingleVia,
+                    TTransitions,
+                    TMethods
+                  >
+                : any
+              : TEventsMap extends object
+                ? string extends keyof TEventsMap
+                  ? IsAwaitingStateInTransitions<
+                      From,
+                      TTransitions
+                    > extends true
+                    ? ResolveAwaitingViaPayload<
+                        From,
+                        SingleVia,
+                        TTransitions,
+                        TMethods
+                      >
+                    : any
+                  : keyof TEventsMap extends never
+                    ? IsAwaitingStateInTransitions<
+                        From,
+                        TTransitions
+                      > extends true
+                      ? ResolveAwaitingViaPayload<
+                          From,
+                          SingleVia,
+                          TTransitions,
+                          TMethods
+                        >
+                      : any
+                    : SingleVia extends keyof TEventsMap
+                      ? TEventsMap[SingleVia]
+                      : IsAwaitingStateInTransitions<
+                            From,
+                            TTransitions
+                          > extends true
+                        ? ResolveAwaitingViaPayload<
+                            From,
+                            SingleVia,
+                            TTransitions,
+                            TMethods
+                          >
                         : any
-                  : any;
+                : any;
 
 export type ResolveRowPayload<
   From,
   Via,
   TEventsMap = Record<string, any>,
+  TTransitions extends readonly any[] = readonly any[],
+  TMethods = any,
 > = Via extends readonly (infer SingleVia)[]
-  ? ResolveSingleViaPayload<From, SingleVia, TEventsMap>
-  : ResolveSingleViaPayload<From, Via, TEventsMap>;
+  ? ResolveSingleViaPayload<From, SingleVia, TEventsMap, TTransitions, TMethods>
+  : ResolveSingleViaPayload<From, Via, TEventsMap, TTransitions, TMethods>;
 
 type IsNamedFinalNode<To> =
   [0] extends [1 & To]
@@ -1128,28 +1481,38 @@ type ValidateRowOptions<
         TOutputs
       >,
     ]
-  : IsNamedFinalNode<To> extends true
-    ? Rest extends readonly [any]
-      ? [
-          options?: TransitionOptionsWithoutOutput<
-            TContext,
-            TPayload,
-            TMethods,
-            AllowedSubInput<To>
-          >,
-        ]
-      : []
-    : Rest extends readonly [any]
-      ? [
-          options?: StrictTransitionOptions<
-            TContext,
-            TPayload,
-            TMethods,
-            AllowedSubInput<To>,
-            TOutputs
-          >,
-        ]
-      : [];
+  : IsAwaitingNode<To> extends true
+    ? [
+        options: StrictAwaitingTransitionOptions<
+          TContext,
+          TPayload,
+          TMethods,
+          AllowedSubInput<To>,
+          TOutputs
+        >,
+      ]
+    : IsNamedFinalNode<To> extends true
+      ? Rest extends readonly [any]
+        ? [
+            options?: TransitionOptionsWithoutOutput<
+              TContext,
+              TPayload,
+              TMethods,
+              AllowedSubInput<To>
+            >,
+          ]
+        : []
+      : Rest extends readonly [any]
+        ? [
+            options?: StrictTransitionOptions<
+              TContext,
+              TPayload,
+              TMethods,
+              AllowedSubInput<To>,
+              TOutputs
+            >,
+          ]
+        : [];
 
 /**
  * Validates each row of a `transitions` array:
@@ -1189,7 +1552,23 @@ export type ValidateTransitionRows<
         ? {
             readonly __error: 'anyState() is only allowed in Column 1 (FROM), never in Column 3 (TO)';
           }
-        : IsSubMachineNode<From> extends true
+        : HasAnyStateInArray<From> extends true
+          ? {
+              readonly __error: 'anyState() cannot be used inside a Column 1 (FROM) state array';
+            }
+          : IsInvalidAnyStateRow<From, Via, To> extends true
+            ? {
+                readonly __error: "anyState() in Column 1 (FROM) is only allowed with stay(), finalState(), or when Column 2 (VIA) is 'ERROR'";
+              }
+            : IsInvalidAfterRow<Via, To> extends true
+              ? {
+                  readonly __error: 'after(ms) must transition to a state; stay() is forbidden on after() transitions (use every() for recurring intervals)';
+                }
+              : IsInvalidEveryRow<Via, To> extends true
+                ? {
+                    readonly __error: 'every(ms) is a recurring interval and requires stay() in Column 3 (TO)';
+                  }
+                : IsSubMachineNode<From> extends true
           ? readonly [
               from: From,
               via: AllowedSubMachineVia<From, TEvent>,
@@ -1211,7 +1590,13 @@ export type ValidateTransitionRows<
                 ...ValidateRowOptions<
                   Rest,
                   TContext,
-                  ResolveRowPayload<From, Via, TEventsMap>,
+                  ResolveRowPayload<
+                    From,
+                    Via,
+                    TEventsMap,
+                    TTransitions,
+                    TMethods
+                  >,
                   TMethods,
                   To,
                   TOutputs
@@ -1225,7 +1610,13 @@ export type ValidateTransitionRows<
                   ...ValidateRowOptions<
                     Rest,
                     TContext,
-                    ResolveRowPayload<From, Via, TEventsMap>,
+                    ResolveRowPayload<
+                      From,
+                      Via,
+                      TEventsMap,
+                      TTransitions,
+                      TMethods
+                    >,
                     TMethods,
                     To,
                     TOutputs
@@ -1239,7 +1630,13 @@ export type ValidateTransitionRows<
                   ...ValidateRowOptions<
                     Rest,
                     TContext,
-                    ResolveRowPayload<From, Via, TEventsMap>,
+                    ResolveRowPayload<
+                      From,
+                      Via,
+                      TEventsMap,
+                      TTransitions,
+                      TMethods
+                    >,
                     TMethods,
                     To,
                     TOutputs
@@ -1253,7 +1650,13 @@ export type ValidateTransitionRows<
                     ...ValidateRowOptions<
                       Rest,
                       TContext,
-                      ResolveRowPayload<From, Via, TEventsMap>,
+                      ResolveRowPayload<
+                        From,
+                        Via,
+                        TEventsMap,
+                        TTransitions,
+                        TMethods
+                      >,
                       TMethods,
                       To,
                       TOutputs
@@ -1536,7 +1939,7 @@ type ExtractShallowEvents<TFSM> =
     any,
     infer TEvents,
     infer TTransitions,
-    any,
+    infer TMethods,
     any,
     any
   >
@@ -1544,7 +1947,10 @@ type ExtractShallowEvents<TFSM> =
         | (string extends keyof TEvents
             ? never
             : Extract<keyof TEvents, string>)
-        | ExtractRowEvent<TTransitions[number]>
+        | Exclude<
+            ExtractRowEvent<TTransitions[number]>,
+            ExtractMethodOutcomeEvents<TMethods>
+          >
     : never;
 
 export type ExtractEvents<TFSM> =
