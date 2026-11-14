@@ -110,8 +110,6 @@ export function finalState(outcome?: string): FinalNode<string> {
   });
 }
 
-let dynamicTimerCounter = 0;
-
 /**
  * Declarative one-shot timer marker for Column 2 (`VIA`).
  * Automatically fires after `ms` milliseconds while in the source state (must transition out of the state; `stay()` is forbidden)
@@ -123,7 +121,7 @@ export function after<const TMs extends number, TContext = any>(
   const id =
     typeof ms === 'number'
       ? (`__after_${ms}__` as const)
-      : (`__after_fn_${++dynamicTimerCounter}__` as const);
+      : ('__after_fn__' as const);
   return Object.freeze({
     __type: 'after' as const,
     __kind: 'after' as const,
@@ -143,7 +141,7 @@ export function every<TContext = any>(
   const id =
     typeof ms === 'number'
       ? (`__every_${ms}__` as const)
-      : (`__every_fn_${++dynamicTimerCounter}__` as const);
+      : ('__every_fn__' as const);
   return Object.freeze({
     __type: 'every' as const,
     __kind: 'every' as const,

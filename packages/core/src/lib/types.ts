@@ -462,12 +462,6 @@ export interface TransitionOptions<
   readonly output?: TransitionOutputTuple<TOutputs, TOutputContext, TPayload>;
 }
 
-type IsUnion<T, U = T> = T extends any
-  ? [U] extends [T]
-    ? false
-    : true
-  : false;
-
 export type StrictTransitionOptions<
   TContext = any,
   TPayload = any,
@@ -479,9 +473,7 @@ export type StrictTransitionOptions<
   'call' | 'output'
 > & {
   readonly call?: StrictTransitionCallSelector<TMethods, TPayload, TContext>;
-  readonly output?: IsUnion<Extract<keyof TOutputs, string>> extends true
-    ? unknown
-    : TransitionOutputTuple<TOutputs, TContext, TPayload>;
+  readonly output?: TransitionOutputTuple<TOutputs, TContext, TPayload>;
 };
 
 export type StrictAwaitingTransitionOptions<
@@ -499,9 +491,7 @@ export type StrictAwaitingTransitionOptions<
     TPayload,
     TContext
   >;
-  readonly output?: IsUnion<Extract<keyof TOutputs, string>> extends true
-    ? unknown
-    : TransitionOutputTuple<TOutputs, TContext, TPayload>;
+  readonly output?: TransitionOutputTuple<TOutputs, TContext, TPayload>;
 };
 
 export type TransitionOptionsWithoutOutput<
@@ -558,11 +548,13 @@ export type TransitionVia<
   TContext = any,
   TMethods = any,
 > =
-  | TEvent
-  | ExtractMethodOutcomeEvents<TMethods>
+  | ([0] extends [1 & TMethods]
+      ? string
+      : TEvent | ExtractMethodOutcomeEvents<TMethods>)
   | readonly (
-      | TEvent
-      | ExtractMethodOutcomeEvents<TMethods>
+      | ([0] extends [1 & TMethods]
+          ? string
+          : TEvent | ExtractMethodOutcomeEvents<TMethods>)
       | BuiltInLifecycleEvent
     )[]
   | BuiltInLifecycleEvent
@@ -930,13 +922,15 @@ type HandledEventsForSubMachineId<
     ? Row extends readonly [infer RFrom, infer RVia extends string, ...any[]]
       ? (RFrom extends readonly (infer El)[] ? El : RFrom) extends infer RItem
         ? RItem extends any
-          ? SubMachineNodeId<RItem> extends TSubId
-            ? [SubMachineNodeId<RItem>] extends [never]
-              ? never
-              : RVia
-            : RItem extends TSubId
-              ? RVia
-              : never
+          ? RItem extends AnyStateNode
+            ? RVia
+            : SubMachineNodeId<RItem> extends TSubId
+              ? [SubMachineNodeId<RItem>] extends [never]
+                ? never
+                : RVia
+              : RItem extends TSubId
+                ? RVia
+                : never
           : never
         : never
       : never
@@ -1319,18 +1313,20 @@ type ResolveAwaitingViaPayload<
 > extends infer Unwrapped
   ? [0] extends [1 & Unwrapped]
     ? any
-    : SingleVia extends 'DONE'
-      ? Exclude<Unwrapped, OutcomeNode<any, any>>
-      : SingleVia extends string
-        ? [Extract<Unwrapped, OutcomeNode<SingleVia, any>>] extends [never]
-          ? any
-          : Extract<Unwrapped, OutcomeNode<SingleVia, any>> extends OutcomeNode<
-                SingleVia,
-                infer P
-              >
-            ? P
-            : any
-        : any
+    : unknown extends Unwrapped
+      ? any
+      : SingleVia extends 'DONE'
+        ? Exclude<Unwrapped, OutcomeNode<any, any>>
+        : SingleVia extends string
+          ? [Extract<Unwrapped, OutcomeNode<SingleVia, any>>] extends [never]
+            ? any
+            : Extract<Unwrapped, OutcomeNode<SingleVia, any>> extends OutcomeNode<
+                  SingleVia,
+                  infer P
+                >
+              ? P
+              : any
+          : any
   : any;
 
 type ResolveSingleViaPayload<
@@ -1642,6 +1638,26 @@ export type ValidateTransitionRows<
                     TOutputs
                   >,
                 ]
+              : IsAwaitingNode<To> extends true
+                ? readonly [
+                    from: From,
+                    via: Via,
+                    to: To,
+                    ...ValidateRowOptions<
+                      Rest,
+                      TContext,
+                      ResolveRowPayload<
+                        From,
+                        Via,
+                        TEventsMap,
+                        TTransitions,
+                        TMethods
+                      >,
+                      TMethods,
+                      To,
+                      TOutputs
+                    >,
+                  ]
               : Rest extends readonly [any]
                 ? readonly [
                     from: From,

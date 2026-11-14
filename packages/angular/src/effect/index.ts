@@ -53,46 +53,59 @@ export type NormalizeEffectMethods<TMethods> = {
     : TMethods[K];
 };
 
-const effectExecutorAdapter: CustomTaskAdapter = {
-  canHandle(result: unknown): boolean {
-    return Effect.isEffect(result);
-  },
-  execute(
-    result: unknown,
-    callbacks: {
-      onSuccess: (output: unknown) => void;
-      onFailure: (err: unknown) => void;
-      isCancelled: () => boolean;
-    },
-  ): () => void {
-    let fiber: Fiber.Fiber<any, any> | null = Effect.runFork(
-      result as Effect.Effect<unknown, any, never>,
-    );
+export interface EffectRuntimeLike<R = never> {
+  readonly runFork: <A, E>(
+    effect: Effect.Effect<A, E, R>,
+  ) => Fiber.Fiber<A, any>;
+}
 
-    fiber.addObserver((exit) => {
-      if (callbacks.isCancelled()) {
-        return;
-      }
-      if (Exit.isSuccess(exit)) {
-        callbacks.onSuccess(exit.value);
-      } else {
-        if (Cause.hasInterruptsOnly(exit.cause)) {
+function createEffectExecutorAdapter(
+  runtimeOption?: EffectRuntimeLike<never> | (() => EffectRuntimeLike<never>),
+): CustomTaskAdapter {
+  return {
+    canHandle(result: unknown): boolean {
+      return Effect.isEffect(result);
+    },
+    execute(
+      result: unknown,
+      callbacks: {
+        onSuccess: (output: unknown) => void;
+        onFailure: (err: unknown) => void;
+        isCancelled: () => boolean;
+      },
+    ): () => void {
+      const rt =
+        typeof runtimeOption === 'function' ? runtimeOption() : runtimeOption;
+      const spawnedFiber: Fiber.Fiber<any, any> = rt
+        ? rt.runFork(result as Effect.Effect<unknown, any, never>)
+        : Effect.runFork(result as Effect.Effect<unknown, any, never>);
+      let fiber: Fiber.Fiber<any, any> | null = spawnedFiber;
+
+      spawnedFiber.addObserver((exit) => {
+        if (callbacks.isCancelled()) {
           return;
         }
-        const squashedError = Cause.squash(exit.cause);
-        callbacks.onFailure(squashedError);
-      }
-    });
+        if (Exit.isSuccess(exit)) {
+          callbacks.onSuccess(exit.value);
+        } else {
+          if (Cause.hasInterruptsOnly(exit.cause)) {
+            return;
+          }
+          const squashedError = Cause.squash(exit.cause);
+          callbacks.onFailure(squashedError);
+        }
+      });
 
-    return () => {
-      if (fiber) {
-        const fiberToInterrupt = fiber;
-        fiber = null;
-        Effect.runFork(Fiber.interrupt(fiberToInterrupt));
-      }
-    };
-  },
-};
+      return () => {
+        if (fiber) {
+          const fiberToInterrupt = fiber;
+          fiber = null;
+          Effect.runFork(Fiber.interrupt(fiberToInterrupt));
+        }
+      };
+    },
+  };
+}
 
 export type EffectMachineFeatureConfig<
   TId extends string,
@@ -114,6 +127,9 @@ export type EffectMachineFeatureConfig<
 > = {
   readonly id: TId;
   readonly initial: TInitial;
+  readonly runtime?:
+    | EffectRuntimeLike<never>
+    | (() => EffectRuntimeLike<never>);
   readonly transitions: TTransitions &
     ValidateTransitionRows<
       TTransitions,
@@ -205,33 +221,46 @@ export function createEffectMachineFeature<
   ResolveContext<FeatureInputs<TContract> & TState, TTransitions>,
   FeatureEvents<TContract>,
   TTransitions,
-  NormalizeEffectMethods<TMethods>,
+  TMethods,
   FeatureInputs<TContract>,
   FeatureOutputs<TContract>
 > {
   return (config: any) =>
-    buildMachineFeatureRuntime(config, effectExecutorAdapter);
+    buildMachineFeatureRuntime(
+      config,
+      createEffectExecutorAdapter(config.runtime),
+    );
 }
 
 /**
- * Bridges an `Effect.Effect<A, E, never>` into an `AbortSignal`-aware Promise
+ * Bridges an `Effect.Effect<A, E, R>` into an `AbortSignal`-aware Promise
  * that automatically interrupts the underlying Effect Fiber when `signal` aborts.
  */
-export function runEffect<A, E = unknown>(
-  effect: Effect.Effect<A, E, never>,
+export function runEffect<A, E = unknown, R = never>(
+  effect: Effect.Effect<A, E, R>,
   signal?: AbortSignal,
+  runtime?: EffectRuntimeLike<R>,
 ): Promise<A> {
   return new Promise<A>((resolve, reject) => {
+    const createAbortError = () =>
+      signal?.reason !== undefined
+        ? signal.reason
+        : new DOMException('The operation was aborted.', 'AbortError');
+
     if (signal?.aborted) {
+      reject(createAbortError());
       return;
     }
     let settled = false;
-    const fiber = Effect.runFork(effect);
+    const fiber = runtime
+      ? runtime.runFork(effect)
+      : Effect.runFork(effect as Effect.Effect<A, E, never>);
 
     const onAbort = () => {
       if (!settled) {
         settled = true;
         Effect.runFork(Fiber.interrupt(fiber));
+        reject(createAbortError());
       }
     };
 
@@ -245,7 +274,7 @@ export function runEffect<A, E = unknown>(
       settled = true;
       if (Exit.isSuccess(exit)) {
         resolve(exit.value);
-      } else if (!Cause.hasInterruptsOnly(exit.cause)) {
+      } else {
         reject(Cause.squash(exit.cause));
       }
     });

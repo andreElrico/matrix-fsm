@@ -22,6 +22,7 @@ import {
   finalState,
   getShortestPaths,
   MatrixFsmInfiniteLoopError,
+  patchMachineState,
   provideStateMachine,
   race,
   stay,
@@ -3370,7 +3371,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
 
   describe('Cycle 58: Clean Separation of createMachineFeature and createEffectMachineFeature', () => {
     it('executes Effect.Effect<A, E> in createEffectMachineFeature via Effect.runFork and interrupts the fiber on state exit', async () => {
-      const createEffectMachineFeature = (EffectPkg as any).createEffectMachineFeature;
+      const { createEffectMachineFeature } = EffectPkg;
       expect(typeof createEffectMachineFeature).toBe('function');
       expect('registerTaskAdapter' in AngularPkg).toBe(false);
       expect('effectTaskAdapter' in EffectPkg).toBe(false);
@@ -3449,6 +3450,323 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       await new Promise((r) => setTimeout(r, 10));
       expect(store.state()).toBe('failed');
       expect(store.errorReason()).toBe('Card expired');
+    });
+  });
+
+  describe('Cycle 60: Angular & Effect Audit Fixes (runEffect Abort Settlement, flushTasks Adapter Tracking, provideStateMachine Merge, each() Re-Entry Cleanup, Wildcard & Unhandled Sub-Errors, patchContext & TDZ)', () => {
+    it('settles (rejects) runEffect Promise when pre-aborted, aborted mid-flight, or interrupted so callers never hang', async () => {
+      const { runEffect } = EffectPkg;
+
+      // 1. Pre-aborted signal must reject immediately
+      const preAborted = new AbortController();
+      preAborted.abort(new Error('Already aborted'));
+      await expect(
+        runEffect(Effect.succeed(42), preAborted.signal),
+      ).rejects.toThrow('Already aborted');
+
+      // 2. Mid-flight abort must reject promptly
+      const midAbort = new AbortController();
+      const pendingPromise = runEffect(
+        Effect.sleep('10 seconds').pipe(Effect.as('done')),
+        midAbort.signal,
+      );
+      setTimeout(() => midAbort.abort(new Error('Cancelled mid-flight')), 5);
+      await expect(pendingPromise).rejects.toThrow('Cancelled mid-flight');
+
+      // 3. Self-interrupted Effect (Effect.interrupt) must reject rather than hanging forever
+      await expect(runEffect(Effect.interrupt)).rejects.toBeDefined();
+    });
+
+    it('tracks Effect fibers in createFeatureTester.flushTasks(), supports custom Effect runtime, and preserves taskAdapter/state in provideStateMachine overrides', async () => {
+      const { createEffectMachineFeature } = EffectPkg;
+
+      let customRuntimeUsed = false;
+      const customFeature = createEffectMachineFeature<{
+        events: { FETCH: void; CANCEL: void };
+        states: 'idle' | 'loading' | 'loaded';
+      }>()({
+        id: 'effectTesterFeature',
+        initial: 'idle',
+        runtime: () => {
+          customRuntimeUsed = true;
+          return { runFork: Effect.runFork };
+        },
+        transitions: [
+          ['idle', 'FETCH', awaiting('loading'), { call: (m) => m._fetch }],
+          ['loading', 'CANCEL', 'idle'],
+          ['loading', 'DONE', 'loaded', { call: (m) => m._save }],
+        ],
+        state: {
+          value: 'initial',
+        },
+        methods: (store) => ({
+          _fetch: () =>
+            Effect.sleep('15 millis').pipe(Effect.as({ value: 'from-effect' })),
+          _save: (res: { value: string }) =>
+            patchState(store, { value: res.value }),
+        }),
+      });
+
+      const tester = createFeatureTester(customFeature);
+      tester.send('FETCH');
+      expect(tester.state()).toBe('loading');
+      expect(customRuntimeUsed).toBe(true);
+
+      // flushTasks() must await the in-flight Effect fiber without manual setTimeout!
+      await tester.flushTasks();
+      expect(tester.state()).toBe('loaded');
+      expect(tester.context().value).toBe('from-effect');
+
+      // Also verify provideStateMachine(customFeature, { methods }) preserves taskAdapter and state!
+      const parentFSM = createFSM<{
+        events: { START: void };
+        states: 'idle' | 'done';
+      }>()({
+        id: 'parentForEffectOverride',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'START', customFeature],
+          [customFeature, 'DONE', 'done'],
+        ],
+      });
+
+      provideStateMachine(customFeature, {
+        methods: (store) => ({
+          _fetch: () => Effect.succeed({ value: 'overridden-effect' }),
+          _save: (res: { value: string }) => {
+            patchMachineState(store, { value: res.value });
+          },
+        }),
+      });
+
+      const ParentStore = signalStore(withStateMachine(parentFSM));
+      const parent = new ParentStore();
+      parent.send('START');
+      expect(parent.fsmState()).toBe('effectTesterFeature');
+      // Child entered 'idle', send FETCH to child
+      parent.send('FETCH' as any);
+      await new Promise((r) => setTimeout(r, 10));
+      expect(parent.fsmSubState()).toBe('loaded');
+      expect(parent.fsmSubContext()?.['value']).toBe('overridden-effect');
+    });
+
+    it('cleans up each() registry on exit and completion so re-entering with identical item IDs spawns fresh children', () => {
+      let spawnCount = 0;
+      const itemWorker = createMachineFeature<{
+        inputs: { id: string };
+        events: { STEP: void };
+        outputs: { DONE: { id: string; run: number } };
+        states: 'working';
+      }>()({
+        id: 'itemWorkerReentry',
+        initial: 'working',
+        transitions: [
+          [
+            'working',
+            'STEP',
+            finalState(),
+            {
+              output: [
+                'DONE',
+                (ctx) => ({ id: ctx.id, run: ++spawnCount }),
+              ],
+            },
+          ],
+        ],
+      });
+
+      let batchResults: Array<{ id: string; run: number }> = [];
+      const batchCoordinator = createMachineFeature<{
+        events: {
+          START: void;
+          CANCEL: void;
+          STEP: void;
+        };
+        states: 'idle' | 'done';
+      }>()({
+        id: 'batchCoordinator',
+        initial: 'idle',
+        state: {
+          items: [{ id: 'a' }, { id: 'b' }],
+        },
+        transitions: [
+          [['idle', 'done'], 'START', each('items', itemWorker)],
+          [each('items', itemWorker), 'CANCEL', 'idle'],
+          [
+            each('items', itemWorker),
+            'ALL_DONE',
+            'done',
+            { call: (m) => m._saveBatch },
+          ],
+        ],
+        methods: () => ({
+          _saveBatch: (res: Array<{ id: string; run: number }>) => {
+            batchResults = res;
+          },
+        }),
+      });
+
+      const Store = signalStore(withStateMachine(batchCoordinator));
+      const store = new Store();
+
+      // 1. Cancel run: exiting on CANCEL clears pool from childMachines()
+      store.send('START');
+      expect(store.childMachines()['items']?.length).toBe(2);
+      store.send('CANCEL');
+      expect(store.state()).toBe('idle');
+      expect(store.childMachines()['items']).toBeUndefined();
+
+      // 2. First completed run: complete all items
+      store.send('START');
+      expect(store.childMachines()['items']?.length).toBe(2);
+      store.send('STEP');
+      expect(store.state()).toBe('done');
+      expect(batchResults).toEqual([
+        { id: 'a', run: 1 },
+        { id: 'b', run: 2 },
+      ]);
+
+      // 3. Re-enter directly from 'done' with the SAME item IDs ('a', 'b'): must spawn fresh children, not reuse done ones!
+      store.send('START');
+      expect(store.state()).toBe('each:items');
+      expect(
+        store.childMachines()['items']?.every((c) => !c.isDone),
+      ).toBe(true);
+      store.send('STEP');
+      expect(store.state()).toBe('done');
+      expect(batchResults).toEqual([
+        { id: 'a', run: 3 },
+        { id: 'b', run: 4 },
+      ]);
+    });
+
+    it('routes sub-machine ERROR to parent [anyState(), ERROR, ...], propagates __UNHANDLED_ERROR__ from sub-machines, and avoids TDZ on initial always() -> finalState() in createFeatureTester', async () => {
+      // 1. Initial always() -> finalState() in createFeatureTester without TDZ ReferenceError
+      const instantDoneFeature = createMachineFeature<{
+        outputs: { DONE: { instant: boolean } };
+        states: 'start';
+      }>()({
+        id: 'instantDoneFeature',
+        initial: 'start',
+        transitions: [
+          [
+            'start',
+            always(),
+            finalState(),
+            { output: ['DONE', () => ({ instant: true })] },
+          ],
+        ],
+      });
+
+      const instantTester = createFeatureTester(instantDoneFeature);
+      expect(instantTester.isDone()).toBe(true);
+      expect(instantTester.emittedOutputs()).toEqual([
+        { type: 'DONE', payload: { instant: true } },
+      ]);
+
+      // 2. Unhandled child awaiting error propagates to parent [anyState(), 'ERROR', 'globalError']
+      const crashingChild = createMachineFeature<{
+        events: { CRASH: void };
+        states: 'idle' | 'crashing';
+      }>()({
+        id: 'crashingChild',
+        initial: 'idle',
+        transitions: [
+          [
+            'idle',
+            'CRASH',
+            awaiting('crashing'),
+            { call: (m) => m._crashNow },
+          ],
+          // Note: child intentionally has NO 'ERROR' handler for 'crashing'
+        ],
+        methods: () => ({
+          _crashNow: async () => {
+            throw new Error('Unhandled child boom');
+          },
+        }),
+      });
+
+      let caughtError: unknown = null;
+      const parentFeature = createMachineFeature<{
+        events: { ENTER: void; CRASH: void };
+        states: 'idle' | 'globalError';
+      }>()({
+        id: 'parentCatchesWildcardSubError',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'ENTER', crashingChild],
+          [crashingChild, 'DONE', 'idle'],
+          [
+            anyState(),
+            'ERROR',
+            'globalError',
+            { call: (m) => m._recordError },
+          ],
+        ],
+        methods: () => ({
+          _recordError: (err: unknown) => {
+            caughtError = err;
+          },
+        }),
+      });
+
+      const parentTester = createFeatureTester(parentFeature);
+      parentTester.send('ENTER');
+      parentTester.send('CRASH');
+      await parentTester.flushTasks();
+      expect(parentTester.state()).toBe('globalError');
+      expect((caughtError as Error)?.message).toBe('Unhandled child boom');
+    });
+
+    it('keeps every() alive across unmatched ticks and re-evaluates dynamic every() and always() on patchContext() in SignalStore', () => {
+      vi.useFakeTimers();
+      try {
+        let ticks = 0;
+        const feature = createMachineFeature<{
+          events: { START: void };
+          states: 'polling' | 'autoDone';
+        }>()({
+          id: 'angularDynamicEveryAndAlways',
+          initial: 'polling',
+          state: {
+            active: false,
+            intervalMs: 50,
+            ready: false,
+          },
+          transitions: [
+            [
+              'polling',
+              every((ctx) => ctx.intervalMs),
+              stay(),
+              { guard: (ctx) => ctx.active, call: (m) => m._tick },
+            ],
+            ['polling', always(), 'autoDone', { guard: (ctx) => ctx.ready }],
+          ],
+          methods: () => ({
+            _tick: () => {
+              ticks++;
+            },
+          }),
+        });
+
+        const Store = signalStore(withStateMachine(feature));
+        const store = new Store();
+
+        // 1. Tick 1 has guard false (active === false); timer must NOT die
+        vi.advanceTimersByTime(50);
+        expect(ticks).toBe(0);
+
+        store.patchContext({ active: true });
+        vi.advanceTimersByTime(50);
+        expect(ticks).toBe(1);
+
+        // 2. patchContext({ ready: true }) triggers always() immediately
+        store.patchContext({ ready: true });
+        expect(store.state()).toBe('autoDone');
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

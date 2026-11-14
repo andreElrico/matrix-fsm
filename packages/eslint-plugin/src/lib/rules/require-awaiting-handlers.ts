@@ -65,17 +65,21 @@ export const requireAwaitingHandlers = createRule<[], MessageIds>({
         }
 
         const allRows: ParsedTransitionRow[] = [];
+        let hasUnresolvedSpread = false;
         for (const el of arrayNode.elements) {
           if (!el) {
             continue;
           }
-          if (
-            el.type === AST_NODE_TYPES.SpreadElement &&
-            el.argument.type === AST_NODE_TYPES.Identifier
-          ) {
-            const spreadRows = extractedVars.get(el.argument.name);
-            if (spreadRows) {
-              allRows.push(...spreadRows);
+          if (el.type === AST_NODE_TYPES.SpreadElement) {
+            if (el.argument.type === AST_NODE_TYPES.Identifier) {
+              const spreadRows = extractedVars.get(el.argument.name);
+              if (spreadRows) {
+                allRows.push(...spreadRows);
+              } else {
+                hasUnresolvedSpread = true;
+              }
+            } else {
+              hasUnresolvedSpread = true;
             }
             continue;
           }
@@ -160,7 +164,7 @@ export const requireAwaitingHandlers = createRule<[], MessageIds>({
         }
 
         for (const row of allRows) {
-          if (row.anyCombinatorCall) {
+          if (row.anyCombinatorCall && !hasUnresolvedSpread) {
             const { stateKey, callNode } = row.anyCombinatorCall;
             const hasError =
               errorStates.has(stateKey) || errorStates.has('anyState()');
@@ -187,6 +191,9 @@ export const requireAwaitingHandlers = createRule<[], MessageIds>({
                 state: stateName,
               },
             });
+          }
+          if (hasUnresolvedSpread) {
+            continue;
           }
           const hasDone =
             doneStates.has(stateName) || doneStates.has('anyState()');

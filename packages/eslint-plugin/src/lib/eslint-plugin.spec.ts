@@ -994,4 +994,43 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
       expect(messages).toHaveLength(0);
     });
   });
+
+  describe('17. Cycle 61: ESLint Plugin Audit Fixes (Disconnected Cycle Reachability & Unresolved Spread Bailout)', () => {
+    it('no-unreachable-states: detects disconnected state cycles (deadA <-> deadB) that are unreachable from initial', () => {
+      const { messages } = verifyRule(
+        'no-unreachable-states',
+        `
+        createFSM()({
+          id: 'disconnectedCycle',
+          initial: 'idle',
+          transitions: [
+            ['idle',  'START', 'active'],
+            ['deadA', 'NEXT',  'deadB'],
+            ['deadB', 'PREV',  'deadA'],
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(2);
+      expect(messages[0].messageId).toBe('unreachableState');
+      expect(messages[1].messageId).toBe('unreachableState');
+    });
+
+    it('require-awaiting-handlers: does not report false positives when transitions contain an unresolved imported spread', () => {
+      const { messages } = verifyRule(
+        'require-awaiting-handlers',
+        `
+        createFSM()({
+          id: 'withImportedSpread',
+          initial: 'idle',
+          transitions: [
+            ['idle', 'FETCH', awaiting('loading'), { call: (m) => m._fetch }],
+            ...importedAwaitingHandlers,
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(0);
+    });
+  });
 });

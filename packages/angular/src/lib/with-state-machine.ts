@@ -668,7 +668,30 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     | ((output: { readonly type: string; readonly payload: unknown }) => void)
     | undefined = initialEmitOutput;
 
-  const effectiveConfig = config ?? defaultFeatureConfigs.get(fsm);
+  const baseFeatureConfig = defaultFeatureConfigs.get(fsm);
+  const effectiveConfig = (
+    config && baseFeatureConfig && config !== baseFeatureConfig
+      ? {
+          ...baseFeatureConfig,
+          ...config,
+          methods:
+            baseFeatureConfig.methods && config.methods
+              ? (store: any) => ({
+                  ...resolveMethodsConfig(
+                    baseFeatureConfig.methods,
+                    store,
+                    hostInjector,
+                  ),
+                  ...resolveMethodsConfig(
+                    config.methods,
+                    store,
+                    hostInjector,
+                  ),
+                })
+              : (config.methods ?? baseFeatureConfig.methods),
+        }
+      : (config ?? baseFeatureConfig)
+  ) as StateMachineFeatureConfig<TFSM, any> | undefined;
 
   const runWithDI = <R>(fn: () => R): R | undefined => {
     try {
@@ -802,10 +825,6 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
       ...prev,
       ...patch,
     }));
-    if (!hostStore) {
-      patchState(effectiveStoreSource as any, patch as Record<string, unknown>);
-      return;
-    }
     if (storeStateKeys.size > 0) {
       const storeSlicePatch: Record<string, unknown> = {};
       let hasMatchingStoreKey = false;
@@ -1216,7 +1235,10 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
       }
 
       destroyActiveSubNode();
-      if (fsm.hasTransitionFor(refId, outcome)) {
+      if (
+        fsm.hasTransitionFor(refId, outcome) ||
+        fsm.hasTransitionFor('*', outcome)
+      ) {
         dispatchInternal(outcome, outputPayload, true, true);
       } else {
         throw new Error(
@@ -1341,11 +1363,37 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
 
       // 1. Check explicit executor adapter (used by createEffectMachineFeature in @matrix-fsm/angular/effect)
       if (effectiveConfig?.taskAdapter?.canHandle(result)) {
-        handle.teardown = effectiveConfig.taskAdapter.execute<TContext>(result, {
-          onSuccess: (output) => handleTaskSuccess(handle, output),
-          onFailure: (err) => handleTaskFailure(handle, err),
-          isCancelled: () => handle.cancelled,
-        });
+        let resolveTracked: (() => void) | undefined;
+        if (onTrackPromise) {
+          onTrackPromise(
+            new Promise<void>((r) => {
+              resolveTracked = r;
+            }),
+          );
+        }
+        try {
+          const adapterTeardown = effectiveConfig.taskAdapter.execute<TContext>(
+            result,
+            {
+              onSuccess: (output) => {
+                resolveTracked?.();
+                handleTaskSuccess(handle, output);
+              },
+              onFailure: (err) => {
+                resolveTracked?.();
+                handleTaskFailure(handle, err);
+              },
+              isCancelled: () => handle.cancelled,
+            },
+          );
+          handle.teardown = () => {
+            resolveTracked?.();
+            adapterTeardown();
+          };
+        } catch (adapterErr) {
+          resolveTracked?.();
+          throw adapterErr;
+        }
         return;
       }
 
@@ -1516,6 +1564,25 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
             publishChildSnapshots();
             checkEachAllDone(eachNode);
           },
+          (emitted) => {
+            if (emitted.type === '__UNHANDLED_ERROR__') {
+              if (
+                fsm.hasTransitionFor(eachNode.id, 'ERROR') ||
+                fsm.hasTransitionFor('*', 'ERROR')
+              ) {
+                dispatchInternal('ERROR', emitted.payload, true, true);
+                return;
+              }
+              onEmitOutput?.(emitted);
+              return;
+            }
+            if (
+              fsm.hasTransitionFor(eachNode.id, emitted.type) ||
+              fsm.hasTransitionFor('*', emitted.type)
+            ) {
+              dispatchInternal(emitted.type, emitted.payload, true);
+            }
+          },
         );
         registry.set(id, childNode);
       }
@@ -1606,7 +1673,22 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
           return;
         }
         const refId = activeSubRef.id;
-        if (!fsm.hasTransitionFor(refId, emitted.type)) {
+        if (emitted.type === '__UNHANDLED_ERROR__') {
+          destroyActiveSubNode();
+          if (
+            fsm.hasTransitionFor(refId, 'ERROR') ||
+            fsm.hasTransitionFor('*', 'ERROR')
+          ) {
+            dispatchInternal('ERROR', emitted.payload, true, true, refId);
+            return;
+          }
+          onEmitOutput?.(emitted);
+          return;
+        }
+        if (
+          !fsm.hasTransitionFor(refId, emitted.type) &&
+          !fsm.hasTransitionFor('*', emitted.type)
+        ) {
           throw new Error(
             `[MatrixFSM Error]: Sub-machine '${refId}' emitted output '${emitted.type}', but parent '${fsm.id}' has no matching transition. Prevented silent deadlock!`,
           );
@@ -1657,17 +1739,17 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
       destroyActiveCombinator();
       if (
         fsm.hasTransitionFor(combId, preferredOutcome) ||
-        fsm.hasTransitionFor('anyState', preferredOutcome)
+        fsm.hasTransitionFor('*', preferredOutcome)
       ) {
         dispatchInternal(preferredOutcome, payload, true, true);
       } else if (
         fsm.hasTransitionFor(combId, 'ALL_DONE') ||
-        fsm.hasTransitionFor('anyState', 'ALL_DONE')
+        fsm.hasTransitionFor('*', 'ALL_DONE')
       ) {
         dispatchInternal('ALL_DONE', payload, true, true);
       } else if (
         fsm.hasTransitionFor(combId, 'DONE') ||
-        fsm.hasTransitionFor('anyState', 'DONE')
+        fsm.hasTransitionFor('*', 'DONE')
       ) {
         dispatchInternal('DONE', payload, true, true);
       }
@@ -1722,7 +1804,7 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
           const combId = combNode.id;
           if (
             fsm.hasTransitionFor(combId, 'ALL_DONE') ||
-            fsm.hasTransitionFor('anyState', 'ALL_DONE')
+            fsm.hasTransitionFor('*', 'ALL_DONE')
           ) {
             settleCombinator('ALL_DONE', { ...completedOutputs });
           } else {
@@ -1756,6 +1838,17 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
       }
     };
 
+    const isActorKeyedInput = Boolean(
+      inputMapped &&
+        typeof inputMapped === 'object' &&
+        combNode.machines.some(
+          (m: AnyFSMDefinition) =>
+            m.id in inputMapped &&
+            typeof inputMapped[m.id] === 'object' &&
+            inputMapped[m.id] !== null,
+        ),
+    );
+
     combNode.machines.forEach((childFSM: AnyFSMDefinition, idx: number) => {
       const isFeatureChild = defaultFeatureConfigs.has(childFSM);
       const keyedChildInput =
@@ -1766,12 +1859,14 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
         inputMapped[childFSM.id] !== null
           ? (inputMapped[childFSM.id] as Record<string, unknown>)
           : null;
+      const mappedForChild = isActorKeyedInput
+        ? (keyedChildInput ?? {})
+        : { ...(inputMapped ?? {}), ...(keyedChildInput ?? {}) };
       const initialChildInput = isFeatureChild
-        ? { ...(inputMapped ?? {}), ...(keyedChildInput ?? {}) }
+        ? mappedForChild
         : {
             ...(getEffectiveContext() as Record<string, unknown>),
-            ...(inputMapped ?? {}),
-            ...(keyedChildInput ?? {}),
+            ...mappedForChild,
           };
 
       const childNode = spawnChildNode(
@@ -1798,9 +1893,9 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
             return;
           }
           if (
-            fsm.hasTransitionFor( childFSM.id, emitted.type) ||
+            fsm.hasTransitionFor(childFSM.id, emitted.type) ||
             fsm.hasTransitionFor(combNode.id, emitted.type) ||
-            fsm.hasTransitionFor('anyState', emitted.type)
+            fsm.hasTransitionFor('*', emitted.type)
           ) {
             dispatchInternal(
               emitted.type,
@@ -2030,6 +2125,15 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     );
 
     if (!evaluation.matched) {
+      const everyEntry = activeEveryTimers.get(event);
+      if (everyEntry) {
+        scheduleOrUpdateEveryTimer(
+          currentState,
+          stateEpoch,
+          everyEntry.via,
+          true,
+        );
+      }
       debugLog?.(
         `[MatrixFSM:${fsm.id}] Ignored event '${event}' in state '${currentState}'`,
       );
@@ -2070,6 +2174,10 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
             if (!child.isDone() && child.destroy) {
               child.destroy();
             }
+          }
+          if (!fromChildTerminal) {
+            eachRegistries.delete(exitingEach.key);
+            publishChildSnapshots();
           }
         }
       }
@@ -2176,6 +2284,13 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
     }
 
     if (evaluation.enteredEach) {
+      const existingPool = eachRegistries.get(evaluation.enteredEach.key);
+      if (existingPool) {
+        for (const child of existingPool.values()) {
+          child.destroy?.();
+        }
+        eachRegistries.delete(evaluation.enteredEach.key);
+      }
       syncEachInstances(evaluation.enteredEach, resolvedInputMapped);
     }
 
@@ -2370,6 +2485,17 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
 
   const patchContext = (patch: Partial<TContext>): void => {
     applyContextPatch(patch);
+    const activeState = untracked(() => fsmStateSig());
+    for (const [, entry] of activeEveryTimers.entries()) {
+      scheduleOrUpdateEveryTimer(activeState, stateEpoch, entry.via, false);
+    }
+    if (
+      untracked(() => doneOutcomeSig()) === null &&
+      (fsm.hasTransitionFor(activeState, '__always__') ||
+        fsm.hasTransitionFor('*', '__always__'))
+    ) {
+      dispatchInternal('__always__', undefined, false, false);
+    }
   };
 
   const getSnapshot = (): MachineSnapshot<TFSM> => {
@@ -2517,19 +2643,11 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
       ...(initialOverrideArg ?? {}),
     } as TContext;
     rawContextSig.set(nextInit);
-    if (!hostStore) {
-      patchState(effectiveStoreSource as any, nextInit as Record<string, unknown>);
-    } else if (storeStateKeys.size > 0) {
-      const storeResetPatch: Record<string, unknown> = {
-        ...initialStoreStateSnapshot,
-        ...initialSyncedPatch,
-        ...nextSyncedPatch,
-      };
-      if (initialOverrideArg && typeof initialOverrideArg === 'object') {
-        for (const [k, v] of Object.entries(initialOverrideArg)) {
-          if (storeStateKeys.has(k)) {
-            storeResetPatch[k] = v;
-          }
+    if (storeStateKeys.size > 0) {
+      const storeResetPatch: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(nextInit as Record<string, unknown>)) {
+        if (storeStateKeys.has(k)) {
+          storeResetPatch[k] = v;
         }
       }
       patchState(effectiveStoreSource as any, storeResetPatch);
@@ -3198,25 +3316,31 @@ export function createFeatureTester<TFSM extends AnyFSMDefinition>(
     }),
   };
 
-  const runner = createScopedMachineRunner(
+  const checkAndRecordTerminal = (
+    r: ReturnType<typeof createScopedMachineRunner<TFSM>> | undefined,
+  ) => {
+    if (!r || recordedTerminal || !r.isDone()) {
+      return;
+    }
+    recordedTerminal = true;
+    const outcome = r.finalOutcome();
+    if (outcome) {
+      emittedOutputsList.push({
+        type: outcome,
+        payload: r.hasFinalPayloadSelector() ? r.finalPayload() : undefined,
+      });
+    }
+  };
+
+  let runner!: ReturnType<typeof createScopedMachineRunner<TFSM>>;
+  runner = createScopedMachineRunner<TFSM>(
     feature,
     testerConfig,
     testerInjector,
     initialCombined,
     undefined,
     () => {
-      if (!recordedTerminal && runner.isDone()) {
-        recordedTerminal = true;
-        const outcome = runner.finalOutcome();
-        if (outcome) {
-          emittedOutputsList.push({
-            type: outcome,
-            payload: runner.hasFinalPayloadSelector()
-              ? runner.finalPayload()
-              : undefined,
-          });
-        }
-      }
+      checkAndRecordTerminal(runner);
     },
     (output) => {
       emittedOutputsList.push(output);
@@ -3224,6 +3348,7 @@ export function createFeatureTester<TFSM extends AnyFSMDefinition>(
     options?.actorMethods,
     trackPromise,
   );
+  checkAndRecordTerminal(runner);
 
   const flushTasks = async (): Promise<void> => {
     let safety = 0;

@@ -2453,7 +2453,7 @@ describe('@matrix-fsm/core', () => {
 
   describe('Cycle 55: Unify tasks and methods — awaiting("state") Invokes { call: (m) => m._method }', () => {
     it('executes async { call } on awaiting() in createMachineInstance with (payload, signal, ctx), aborts on state exit, and infers DONE payload from the call return type', async () => {
-      let receivedSignal: AbortSignal | null = null;
+      let receivedSignal = null as AbortSignal | null;
       let savedCities: string[] = [];
 
       const cityFSM = createFSM<{
@@ -2484,7 +2484,7 @@ describe('@matrix-fsm/core', () => {
         ],
       });
 
-      let resolveFetch: ((cities: string[]) => void) | null = null;
+      let resolveFetch = null as ((cities: string[]) => void) | null;
       const inst = createMachineInstance(cityFSM, {
         methods: {
           _fetchCities: (countryId, signal, ctx) => {
@@ -2595,6 +2595,256 @@ describe('@matrix-fsm/core', () => {
       await new Promise((r) => setTimeout(r, 0));
       expect(inst.state()).toBe('paid');
       expect(receiptIdReceived).toBe('RCP-99');
+    });
+  });
+
+  describe('Cycle 59: Core Audit Fixes (Compile-Time awaiting Call, Deferred Selectors, Wildcard Sub-Exits, Resting State awaitingStates, Named finalState Void Payload, Dynamic Timers & patchContext)', () => {
+    it('enforces compile-time { call } on 3-tuple awaiting() rows and validates output on multi-output contracts', () => {
+      createFSM<{
+        events: { FETCH: void };
+        states: 'idle' | 'loading' | 'ready' | 'error';
+        methods: { _fetch: () => Promise<void> };
+      }>()({
+        id: 'missingCall3Tuple',
+        initial: 'idle',
+        transitions: [
+          // @ts-expect-error - awaiting() requires a 4th column with { call }
+          ['idle', 'FETCH', awaiting('loading')],
+          ['loading', 'DONE', 'ready'],
+          ['loading', 'ERROR', 'error'],
+        ],
+      });
+    });
+
+    it('does not invoke input or output selectors during can() or before call mutates context', () => {
+      let outputSelectorCalls = 0;
+      let inputSelectorCalls = 0;
+
+      const subChild = createFSM<{
+        inputs: { token: string };
+        states: 'working';
+      }>()({
+        id: 'subChild',
+        initial: 'working',
+        transitions: [['working', 'DONE', finalState()]],
+      });
+
+      const machine = createFSM<{
+        context: { result: { id: string } | null; token: string | null };
+        events: { FINISH: { id: string }; ENTER_SUB: { token: string } };
+        outputs: { FINISHED: { id: string } };
+        states: 'active';
+        methods: {
+          _saveResult: (p: { id: string }) => void;
+          _saveToken: (p: { token: string }) => void;
+        };
+      }>()({
+        id: 'deferredSelectorMachine',
+        initial: 'active',
+        context: { result: null, token: null },
+        transitions: [
+          [
+            'active',
+            'FINISH',
+            finalState(),
+            {
+              call: (m) => m._saveResult,
+              output: [
+                'FINISHED',
+                (ctx) => {
+                  outputSelectorCalls++;
+                  // Must read post-call context where ctx.result is non-null!
+                  return { id: ctx.result!.id };
+                },
+              ],
+            },
+          ],
+          [
+            'active',
+            'ENTER_SUB',
+            subChild,
+            {
+              call: (m) => m._saveToken,
+              input: (ctx) => {
+                inputSelectorCalls++;
+                return { token: ctx.token! };
+              },
+            },
+          ],
+          [subChild, 'DONE', finalState()],
+        ],
+      });
+
+      const inst = createMachineInstance(machine, {
+        methods: {
+          _saveResult: (p) => inst.patchContext({ result: p }),
+          _saveToken: (p) => inst.patchContext({ token: p.token }),
+        },
+      });
+
+      // 1. can() must NOT invoke input or output selectors
+      expect(inst.can('FINISH', { id: '123' })).toBe(true);
+      expect(inst.can('ENTER_SUB', { token: 'abc' })).toBe(true);
+      expect(outputSelectorCalls).toBe(0);
+      expect(inputSelectorCalls).toBe(0);
+
+      // 2. send('ENTER_SUB') invokes call first, then input selector exactly once
+      inst.send('ENTER_SUB', { token: 'secret-token' });
+      expect(inputSelectorCalls).toBe(1);
+      expect(inst.subContext()?.['token']).toBe('secret-token');
+
+      // 3. Reset and send('FINISH') invokes call first, then output selector exactly once
+      inst.reset();
+      inst.send('FINISH', { id: 'res-99' });
+      expect(outputSelectorCalls).toBe(1);
+      expect(inst.isDone()).toBe(true);
+      expect(inst.finalPayload?.()).toEqual({ id: 'res-99' });
+    });
+
+    it('does not mark a resting state as awaitingStates merely because it handles DONE or ERROR, and does not auto-fire DONE on sync call', () => {
+      let initCalled = false;
+      const wizardFSM = createFSM<{
+        events: { OPEN_EDITOR: void; DONE: void; ERROR: void };
+        states: 'idle' | 'editing' | 'summary' | 'errorScreen';
+        methods: { _initEditor: () => void };
+      }>()({
+        id: 'wizardRestingDone',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'OPEN_EDITOR', 'editing', { call: (m) => m._initEditor }],
+          ['editing', 'DONE', 'summary'],
+          ['editing', 'ERROR', 'errorScreen'],
+        ],
+      });
+
+      expect(wizardFSM.awaitingStates.has('editing')).toBe(false);
+
+      const inst = createMachineInstance(wizardFSM, {
+        methods: {
+          _initEditor: () => {
+            initCalled = true;
+          },
+        },
+      });
+
+      inst.send('OPEN_EDITOR');
+      expect(initCalled).toBe(true);
+      expect(inst.state()).toBe('editing');
+      expect(inst.isPending()).toBe(false);
+    });
+
+    it('allows [anyState(), ERROR, ...] to handle sub-machine and combinator ERROR outcomes, and does not leak child context on named finalState', () => {
+      const childActor = createFSM<{
+        context: { secretInternal: string };
+        events: { FAIL: void; CANCEL: void };
+        outputs: { CANCELLED: void; ERROR: void };
+        states: 'running';
+      }>()({
+        id: 'childActor',
+        initial: 'running',
+        context: { secretInternal: 'do-not-leak' },
+        transitions: [
+          ['running', 'FAIL', finalState('ERROR')],
+          ['running', 'CANCEL', finalState('CANCELLED')],
+        ],
+      });
+
+      let cancelledPayload: unknown = 'unset';
+      const parentFSM = createFSM<{
+        events: { START: void; FAIL: void; CANCEL: void };
+        states: 'idle' | 'cancelledView' | 'globalError';
+        methods: { _onCancelled: (payload: void) => void };
+      }>()({
+        id: 'parentWithWildcardError',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'START', childActor],
+          [childActor, 'CANCELLED', 'cancelledView', { call: (m) => m._onCancelled }],
+          [anyState(), 'ERROR', 'globalError'],
+        ],
+      });
+
+      const inst = createMachineInstance(parentFSM, {
+        methods: {
+          _onCancelled: (p) => {
+            cancelledPayload = p;
+          },
+        },
+      });
+
+      // 1. Named finalState('CANCELLED') delivers undefined payload (not child's internal context)
+      inst.send('START');
+      inst.send('CANCEL');
+      expect(inst.state()).toBe('cancelledView');
+      expect(cancelledPayload).toBeUndefined();
+
+      // 2. Sub-machine finalState('ERROR') matches parent's [anyState(), 'ERROR', 'globalError']
+      inst.reset();
+      inst.send('START');
+      inst.send('FAIL');
+      expect(inst.state()).toBe('globalError');
+    });
+
+    it('supports guarded dynamic after() fallback rows, keeps every() alive across unmatched ticks, and re-evaluates dynamic every() and always() on patchContext()', () => {
+      vi.useFakeTimers();
+      try {
+        let ticks = 0;
+        const timerMachine = createFSM<{
+          context: { urgent: boolean; delayMs: number; pollMs: number; ready: boolean };
+          events: { START_POLL: void };
+          states: 'waiting' | 'escalated' | 'normalTimeout' | 'polling' | 'autoDone';
+          methods: { _onTick: () => void };
+        }>()({
+          id: 'timerMachine',
+          initial: 'waiting',
+          context: { urgent: false, delayMs: 100, pollMs: 50, ready: false },
+          transitions: [
+            [
+              'waiting',
+              after((ctx) => ctx.delayMs),
+              'escalated',
+              { guard: (ctx) => ctx.urgent },
+            ],
+            ['waiting', after((ctx) => ctx.delayMs), 'normalTimeout'],
+            ['normalTimeout', 'START_POLL', 'polling'],
+            [
+              'polling',
+              every((ctx) => ctx.pollMs),
+              stay(),
+              { guard: (ctx) => ctx.urgent, call: (m) => m._onTick },
+            ],
+            ['polling', always(), 'autoDone', { guard: (ctx) => ctx.ready }],
+          ],
+        });
+
+        const inst = createMachineInstance(timerMachine, {
+          methods: {
+            _onTick: () => {
+              ticks++;
+            },
+          },
+        });
+
+        // 1. Guarded dynamic after() falls back to 2nd row when guard is false
+        vi.advanceTimersByTime(100);
+        expect(inst.state()).toBe('normalTimeout');
+
+        // 2. Enter polling: guard is false on 1st tick at 50ms, but timer must stay alive when urgent becomes true!
+        inst.send('START_POLL');
+        expect(inst.state()).toBe('polling');
+        vi.advanceTimersByTime(50);
+        expect(ticks).toBe(0);
+
+        inst.patchContext({ urgent: true });
+        vi.advanceTimersByTime(50);
+        expect(ticks).toBe(1);
+
+        // 3. patchContext({ ready: true }) immediately evaluates always() transition
+        inst.patchContext({ ready: true });
+        expect(inst.state()).toBe('autoDone');
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

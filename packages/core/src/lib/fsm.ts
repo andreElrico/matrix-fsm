@@ -213,6 +213,9 @@ function buildFSM<
   type EffectiveContext = ResolveContext<TContext, TTransitions>;
   const states = new Set<string>([config.initial]);
   const awaitingStates = new Set<string>();
+  const explicitAwaitingStates = new Set<string>();
+  const plainTargetStates = new Set<string>();
+  const doneOrErrorSourceStates = new Set<string>();
   const awaitingCallSelectors = new Map<string, any>();
   const subMachines = new Map<string, SubMachineRef<any, any>>();
   const eachNodes = new Map<string, EachNode<any, any>>();
@@ -233,7 +236,7 @@ function buildFSM<
         // Wildcard source in Column 1; do not add to concrete states set
       } else if (isAwaitingNode(fromItem)) {
         states.add(fromItem.state);
-        awaitingStates.add(fromItem.state);
+        explicitAwaitingStates.add(fromItem.state);
       } else if (fromSub) {
         states.add(fromSub.id);
         subMachines.set(fromSub.id, fromSub);
@@ -246,7 +249,7 @@ function buildFSM<
       } else if (typeof fromItem === 'string') {
         states.add(fromItem);
         if (via === 'DONE' || via === 'ERROR') {
-          awaitingStates.add(fromItem);
+          doneOrErrorSourceStates.add(fromItem);
         }
       }
     }
@@ -254,7 +257,7 @@ function buildFSM<
     const toSub = toSubMachineRef(to);
     if (isAwaitingNode(to)) {
       states.add(to.state);
-      awaitingStates.add(to.state);
+      explicitAwaitingStates.add(to.state);
       if (options?.call && !awaitingCallSelectors.has(to.state)) {
         awaitingCallSelectors.set(to.state, options.call);
       }
@@ -271,6 +274,16 @@ function buildFSM<
       combinatorNodes.set(to.id, to);
     } else if (!isStayNode(to) && typeof to === 'string') {
       states.add(to);
+      plainTargetStates.add(to);
+    }
+  }
+
+  for (const s of explicitAwaitingStates) {
+    awaitingStates.add(s);
+  }
+  for (const s of doneOrErrorSourceStates) {
+    if (!plainTargetStates.has(s)) {
+      awaitingStates.add(s);
     }
   }
 
@@ -332,9 +345,7 @@ function buildFSM<
               eventPayload: any,
             ) => Record<string, unknown>)
           : null;
-      const inputMapped = inputSelector
-        ? inputSelector(nextContext, payload)
-        : null;
+      const inputMapped = null;
 
       let outputType: string | null = null;
       let outputSelector:
@@ -358,9 +369,7 @@ function buildFSM<
           outputSelector = typeof selector === 'function' ? selector : null;
           emittedOutput = {
             type: outputType,
-            payload: outputSelector
-              ? outputSelector(nextContext, payload)
-              : undefined,
+            payload: undefined,
           };
         }
       }
@@ -379,9 +388,8 @@ function buildFSM<
         isFinal &&
         (outputSelector !== null ||
           options?.output !== undefined ||
-          Boolean(isFinalNode(to) && to.isBare));
-      const finalPayload =
-        outputSelector !== null ? emittedOutput?.payload : undefined;
+          Boolean(isFinalNode(to) && (to.isBare || !options?.call)));
+      const finalPayload = undefined;
       const isTargetAwaiting =
         resolved.isAwaiting || awaitingStates.has(effectiveNextState);
 

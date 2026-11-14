@@ -101,19 +101,48 @@ export const noUnreachableStates = createRule<[], MessageIds>({
         const reachableStates = new Set<string>();
         if (initialKey) {
           reachableStates.add(initialKey);
-        }
-
-        for (const row of allRows) {
-          if (
-            row.toKey &&
-            row.toKey !== 'stay()' &&
-            row.toKey !== 'finalState()' &&
-            row.toKey !== row.fromKey
-          ) {
-            reachableStates.add(row.toKey);
-            for (const childKey of row.toChildKeys) {
-              if (childKey !== row.fromKey) {
-                reachableStates.add(childKey);
+          let changed = true;
+          while (changed) {
+            changed = false;
+            for (const row of allRows) {
+              if (
+                !row.toKey ||
+                row.toKey === 'stay()' ||
+                row.toKey === 'finalState()'
+              ) {
+                continue;
+              }
+              const canEnterFromRow = row.fromKeys.some(
+                (fKey) => fKey === 'anyState()' || reachableStates.has(fKey),
+              );
+              if (!canEnterFromRow) {
+                continue;
+              }
+              if (!reachableStates.has(row.toKey)) {
+                reachableStates.add(row.toKey);
+                changed = true;
+              }
+              for (const childKey of row.toChildKeys) {
+                if (!reachableStates.has(childKey)) {
+                  reachableStates.add(childKey);
+                  changed = true;
+                }
+              }
+            }
+          }
+        } else {
+          for (const row of allRows) {
+            if (
+              row.toKey &&
+              row.toKey !== 'stay()' &&
+              row.toKey !== 'finalState()' &&
+              row.toKey !== row.fromKey
+            ) {
+              reachableStates.add(row.toKey);
+              for (const childKey of row.toChildKeys) {
+                if (childKey !== row.fromKey) {
+                  reachableStates.add(childKey);
+                }
               }
             }
           }
