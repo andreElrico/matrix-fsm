@@ -1,7 +1,7 @@
 import tseslint from 'typescript-eslint';
 import { type ESLint, Linter } from 'eslint';
 import { describe, expect, it } from 'vitest';
-import { plugin } from '../index.js';
+import { configs, plugin } from '../index.js';
 
 function verifyRule(
   ruleId: keyof typeof plugin.rules,
@@ -1026,6 +1026,69 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
           transitions: [
             ['idle', 'FETCH', awaiting('loading'), { call: (m) => m._fetch }],
             ...importedAwaitingHandlers,
+          ],
+        });
+        `,
+      );
+      expect(messages).toHaveLength(0);
+    });
+  });
+
+  describe('18. Cycle 62: ESLint Duplication & Rule Fixes', () => {
+    it('configs.recommended does not enable duplicate no-shadowed-transitions alongside no-unreachable-transitions', () => {
+      expect(configs.recommended.rules['@matrix-fsm/no-unreachable-transitions']).toBe('error');
+      expect(
+        (configs.recommended.rules as Record<string, unknown>)[
+          '@matrix-fsm/no-shadowed-transitions'
+        ],
+      ).toBeUndefined();
+    });
+
+    it('no-unreachable-transitions: allows two distinct functional after(fn) selectors in the same state while flagging identical unguarded after(fn)', () => {
+      const validResult = verifyRule(
+        'no-unreachable-transitions',
+        `
+        createFSM()({
+          id: 'distinctFunctionalTimers',
+          initial: 'waiting',
+          transitions: [
+            ['waiting', after((ctx) => ctx.shortMs), 'warn'],
+            ['waiting', after((ctx) => ctx.longMs),  'timeout'],
+          ],
+        });
+        `,
+      );
+      expect(validResult.messages).toHaveLength(0);
+
+      const invalidResult = verifyRule(
+        'no-unreachable-transitions',
+        `
+        createFSM()({
+          id: 'identicalFunctionalTimers',
+          initial: 'waiting',
+          transitions: [
+            ['waiting', after((ctx) => ctx.delayMs), 'warn'],
+            ['waiting', after((ctx) => ctx.delayMs), 'timeout'],
+          ],
+        });
+        `,
+      );
+      expect(invalidResult.messages).toHaveLength(1);
+      expect(invalidResult.messages[0].messageId).toBe('unreachableTransition');
+    });
+
+    it('require-exit-for-targets: allows combinators exited via per-actor rows or anyState()', () => {
+      const { messages } = verifyRule(
+        'require-exit-for-targets',
+        `
+        createFSM()({
+          id: 'combinatorPerActorExit',
+          initial: 'idle',
+          transitions: [
+            ['idle',       'START', race(BaristaFSM, BakeryFSM)],
+            [BaristaFSM,   'DONE',  'baristaWon'],
+            [BakeryFSM,    'DONE',  'bakeryWon'],
+            [anyState(),   'ERROR', 'failed'],
           ],
         });
         `,

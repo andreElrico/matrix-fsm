@@ -6,6 +6,7 @@
 
 import { AST_NODE_TYPES, ESLintUtils, type TSESTree } from '@typescript-eslint/utils';
 import {
+  extractNodeKey,
   getExtractedTransitionsArray,
   getMachineTransitionsArray,
   hasCallOption,
@@ -97,21 +98,17 @@ export const requireAwaitingHandlers = createRule<[], MessageIds>({
         }
 
         const externalEvents = new Set<string>(['CANCEL', 'ERROR']);
+        const extractViaKeys = (row: ParsedTransitionRow): string[] =>
+          row.viaNode.type === AST_NODE_TYPES.ArrayExpression
+            ? row.viaNode.elements
+                .map((el) => (el ? extractNodeKey(el) : null))
+                .filter((k): k is string => k !== null)
+            : row.viaKey
+              ? [row.viaKey]
+              : [];
+
         for (const row of allRows) {
-          const viaKeys =
-            row.viaNode.type === AST_NODE_TYPES.ArrayExpression
-              ? row.viaNode.elements
-                  .map((el) =>
-                    el &&
-                    el.type === AST_NODE_TYPES.Literal &&
-                    typeof el.value === 'string'
-                      ? el.value
-                      : null,
-                  )
-                  .filter((k): k is string => k !== null)
-              : row.viaKey
-                ? [row.viaKey]
-                : [];
+          const viaKeys = extractViaKeys(row);
           const isFromNonAwaiting = row.fromKeys.some(
             (fKey) => fKey !== 'anyState()' && !awaitingStateNames.has(fKey),
           );
@@ -128,20 +125,7 @@ export const requireAwaitingHandlers = createRule<[], MessageIds>({
         const errorStates = new Set<string>();
 
         for (const row of allRows) {
-          const viaKeys =
-            row.viaNode.type === AST_NODE_TYPES.ArrayExpression
-              ? row.viaNode.elements
-                  .map((el) =>
-                    el &&
-                    el.type === AST_NODE_TYPES.Literal &&
-                    typeof el.value === 'string'
-                      ? el.value
-                      : null,
-                  )
-                  .filter((k): k is string => k !== null)
-              : row.viaKey
-                ? [row.viaKey]
-                : [];
+          const viaKeys = extractViaKeys(row);
           for (const fKey of row.fromKeys) {
             if (
               viaKeys.includes('DONE') ||

@@ -55,12 +55,19 @@ export function toSubMachineRef(
   return null;
 }
 
+export function sourceIncludesAnyState(source: unknown): boolean {
+  if (Array.isArray(source)) {
+    return source.some((el) => sourceIncludesAnyState(el));
+  }
+  return isAnyStateNode(source);
+}
+
 export function resolveSourceId(source: unknown): string {
   if (typeof source === 'string') {
     return source;
   }
   if (isAnyStateNode(source)) {
-    return '*';
+    return 'anyState()';
   }
   if (isAwaitingNode(source)) {
     return source.state;
@@ -77,6 +84,9 @@ export function resolveSourceId(source: unknown): string {
 export function resolveSourceIds(source: unknown): string[] {
   if (Array.isArray(source)) {
     return source.flatMap((el) => resolveSourceIds(el));
+  }
+  if (isAnyStateNode(source)) {
+    return [];
   }
   return [resolveSourceId(source)];
 }
@@ -289,13 +299,18 @@ function buildFSM<
 
   type StateUnion = ExtractStatesFromConfig<TInitial, TTransitions>;
 
-  const hasTransitionFor = (state: string, event: string): boolean => {
+  const hasTransitionFor = (
+    state: string,
+    event: string,
+    options?: { readonly exact?: boolean },
+  ): boolean => {
+    const allowAnyState = !options?.exact;
     for (const row of config.transitions) {
       const [from, via] = row as unknown as readonly [unknown, unknown];
-      if (
-        resolveSourceIds(from).includes(state) &&
-        resolveViaMatches(via, event)
-      ) {
+      const matchesState =
+        resolveSourceIds(from).includes(state) ||
+        (allowAnyState && sourceIncludesAnyState(from));
+      if (matchesState && resolveViaMatches(via, event)) {
         return true;
       }
     }
@@ -319,7 +334,7 @@ function buildFSM<
       ];
 
       const fromIds = resolveSourceIds(from);
-      const isWildcard = fromIds.includes('*');
+      const isWildcard = sourceIncludesAnyState(from);
       if (matchWildcard ? !isWildcard : isWildcard) {
         continue;
       }

@@ -20,6 +20,7 @@ import {
   type ExtractAllContext,
   type ExtractAllMethods,
   type ExtractAwaitingNodes,
+  type ExtractOwnAwaitingNodes,
   type ExtractContext,
   type ExtractEvents,
   type ExtractFinalOutcomes,
@@ -28,6 +29,7 @@ import {
   type ExtractStates,
   type ExtractTerminalOutputs,
   type RequiredTasksMap,
+  type SubscribableLike,
 } from '../index.js';
 
 interface AuthContext {
@@ -2845,6 +2847,465 @@ describe('@matrix-fsm/core', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  describe('Cycle 62: Kill "*" Wildcard Duplication, Distinct Functional Timers & Mermaid Fixes', () => {
+    it('fsm.hasTransitionFor(state, event) matches anyState() natively without "*" and supports { exact: true }', () => {
+      const m = createFSM<{
+        states: 'idle' | 'working';
+        events: { WORK: void; CANCEL: void };
+      }>()({
+        id: 'anyStateCheck',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'WORK', 'working'],
+          [anyState(), 'CANCEL', finalState()],
+        ],
+      });
+
+      expect(m.hasTransitionFor('idle', 'WORK')).toBe(true);
+      expect(m.hasTransitionFor('working', 'WORK')).toBe(false);
+      expect(m.hasTransitionFor('idle', 'CANCEL')).toBe(true);
+      expect(m.hasTransitionFor('working', 'CANCEL')).toBe(true);
+      expect(m.hasTransitionFor('idle', 'CANCEL', { exact: true })).toBe(false);
+      expect(m.hasTransitionFor('idle', 'WORK', { exact: true })).toBe(true);
+    });
+
+    it('delegates events to child subMachine with [anyState(), "CANCEL", ...] and routes _tag errors to [anyState(), tag, ...]', async () => {
+      const childFSM = createFSM<{
+        states: 'idle' | 'working' | 'aborted';
+        events: { STEP: void; CANCEL: void };
+        outputs: { DONE: void; ABORTED: void };
+      }>()({
+        id: 'childAnyCancel',
+        initial: 'working',
+        transitions: [
+          ['working', 'STEP', finalState('DONE')],
+          [anyState(), 'CANCEL', finalState('ABORTED')],
+        ],
+      });
+
+      let tagCaught = false;
+      const parentFSM = createFSM<{
+        states: 'idle' | 'fetching' | 'done' | 'childAborted';
+        events: {
+          START: void;
+          CANCEL: void;
+          RUN_TASK: void;
+          QuotaExceededError: unknown;
+        };
+        methods: {
+          _failWithTag: () => Promise<void>;
+          _onQuotaError: () => void;
+        };
+      }>()({
+        id: 'parentAnyCancel',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'START', childFSM],
+          [childFSM, 'DONE', 'done'],
+          [childFSM, 'ABORTED', 'childAborted'],
+          ['idle', 'RUN_TASK', awaiting('fetching'), { call: (m) => m._failWithTag }],
+          ['fetching', 'DONE', 'done'],
+          ['fetching', 'ERROR', 'idle'],
+          [anyState(), 'QuotaExceededError', stay(), { call: (m) => m._onQuotaError }],
+        ],
+      });
+
+      const inst = createMachineInstance(parentFSM, {
+        methods: {
+          _failWithTag: async () => {
+            throw { _tag: 'QuotaExceededError' };
+          },
+          _onQuotaError: () => {
+            tagCaught = true;
+          },
+        },
+      });
+
+      inst.send('START');
+      expect(inst.state()).toBe('childAnyCancel');
+      expect(inst.can('CANCEL')).toBe(true);
+      inst.send('CANCEL');
+      expect(inst.state()).toBe('childAborted');
+
+      inst.reset();
+      inst.send('RUN_TASK');
+      await new Promise((r) => setTimeout(r, 10));
+      expect(tagCaught).toBe(true);
+    });
+
+    it('schedules two distinct functional after(fn) timers in the same state independently', () => {
+      vi.useFakeTimers();
+      try {
+        const dualTimerFSM = createFSM<{
+          states: 'waiting' | 'shortFired' | 'longFired';
+          context: { allowShort: boolean; shortMs: number; longMs: number };
+        }>()({
+          id: 'dualFunctionalTimers',
+          initial: 'waiting',
+          context: { allowShort: false, shortMs: 50, longMs: 150 },
+          transitions: [
+            [
+              'waiting',
+              after((ctx) => ctx.shortMs),
+              'shortFired',
+              { guard: (ctx) => ctx.allowShort },
+            ],
+            ['waiting', after((ctx) => ctx.longMs), 'longFired'],
+          ],
+        });
+
+        const inst = createMachineInstance(dualTimerFSM);
+        vi.advanceTimersByTime(60);
+        // shortMs fired at 50ms, but allowShort is false; machine must remain in 'waiting'
+        expect(inst.state()).toBe('waiting');
+
+        vi.advanceTimersByTime(100);
+        // longMs fires at 150ms and transitions to 'longFired'
+        expect(inst.state()).toBe('longFired');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('toMermaid namespaces child sub-machine state IDs so shared state names ("idle") do not collide, and getShortestPaths relaxes 0-step always() paths', () => {
+      const sub = createFSM<{
+        states: 'idle' | 'brewing';
+        events: { BREW: void };
+      }>()({
+        id: 'barista',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'BREW', 'brewing'],
+          ['brewing', 'BREW', finalState()],
+        ],
+      });
+
+      const root = createFSM<{
+        states: 'idle' | 'fastTrack' | 'target';
+        events: { START: void; SLOW: void };
+      }>()({
+        id: 'coffeeShop',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'START', sub],
+          [sub, 'DONE', 'target'],
+          ['idle', 'SLOW', 'target'],
+          ['idle', always(), 'fastTrack'],
+          ['fastTrack', always(), 'target'],
+        ],
+      });
+
+      const diagram = toMermaid(root);
+      expect(diagram).toContain('state barista {');
+      expect(diagram).toContain('[*] --> barista_idle');
+      expect(diagram).toContain('barista_idle --> brewing : BREW');
+
+      const paths = getShortestPaths(root);
+      expect(paths['target']).toHaveLength(0);
+    });
+  });
+
+  describe('Cycle 63: Core Runner Parity (Sync undefined awaiting, SubscribableLike, Unhandled Child Errors, each() ERROR/Outputs, Child Hook Isolation & getContext Overlay)', () => {
+    it('synchronously resolves awaiting() returning undefined and supports SubscribableLike (Observable) with take(1) and unsubscribe on cancel', () => {
+      let unsubscribed = false;
+      let emitNext = null as ((v: string) => void) | null;
+
+      const fsm = createFSM<{
+        states: 'idle' | 'syncWait' | 'obsWait' | 'done';
+        events: { RUN_SYNC: void; RUN_OBS: void; CANCEL: void };
+        context: { result: string };
+        methods: {
+          _syncVoid: () => void;
+          _stream: () => SubscribableLike<string>;
+          _save: (val: string) => void;
+        };
+      }>()({
+        id: 'syncAndSubscribable',
+        initial: 'idle',
+        context: { result: '' },
+        transitions: [
+          ['idle', 'RUN_SYNC', awaiting('syncWait'), { call: (m) => m._syncVoid }],
+          ['syncWait', 'DONE', 'done'],
+          ['idle', 'RUN_OBS', awaiting('obsWait'), { call: (m) => m._stream }],
+          ['obsWait', 'DONE', 'done', { call: (m) => m._save }],
+          ['obsWait', 'CANCEL', 'idle'],
+        ],
+      });
+
+      const inst = createMachineInstance(fsm, {
+        methods: {
+          _syncVoid: () => {
+            // returns undefined synchronously
+          },
+          _stream: () => ({
+            subscribe(observer: any) {
+              emitNext = (v: string) => observer?.next?.(v);
+              return {
+                unsubscribe() {
+                  unsubscribed = true;
+                },
+              };
+            },
+          }),
+          _save: (val) => {
+            inst.patchContext({ result: val });
+          },
+        },
+      });
+
+      // 1. Sync undefined return from awaiting() transitions immediately via DONE
+      inst.send('RUN_SYNC');
+      expect(inst.state()).toBe('done');
+      expect(inst.isPending()).toBe(false);
+
+      // 2. SubscribableLike subscribes, unsubscribes on CANCEL, and takes first emission on DONE
+      inst.reset();
+      inst.send('RUN_OBS');
+      expect(inst.state()).toBe('obsWait');
+      expect(inst.isPending()).toBe(true);
+      inst.send('CANCEL');
+      expect(inst.state()).toBe('idle');
+      expect(unsubscribed).toBe(true);
+
+      unsubscribed = false;
+      inst.send('RUN_OBS');
+      emitNext?.('hello-obs');
+      expect(inst.state()).toBe('done');
+      expect(inst.context().result).toBe('hello-obs');
+      expect(unsubscribed).toBe(true);
+    });
+
+    it('propagates unhandled child awaiting() rejections to parent ERROR transitions in subMachine, all(), and each()', async () => {
+      const childNoLocalError = createFSM<{
+        states: 'idle' | 'working';
+        events: Record<never, never>;
+        methods: { _failAsync: () => Promise<string> };
+      }>()({
+        id: 'childNoLocalError',
+        initial: 'idle',
+        transitions: [
+          ['idle', always(), awaiting('working'), { call: (m) => m._failAsync }],
+          ['working', 'DONE', finalState()],
+        ],
+      });
+
+      const parentSub = createFSM<{
+        states: 'idle' | 'recovered';
+        events: { START: void };
+      }>()({
+        id: 'parentSubUnhandled',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'START', childNoLocalError],
+          [childNoLocalError, 'DONE', 'idle'],
+          [childNoLocalError, 'ERROR', 'recovered'],
+        ],
+      });
+
+      const instSub = createMachineInstance(parentSub, {
+        methods: {
+          _failAsync: async () => {
+            throw new Error('boom-sub');
+          },
+        } as any,
+      });
+      instSub.send('START');
+      await new Promise((r) => setTimeout(r, 10));
+      expect(instSub.state()).toBe('recovered');
+
+      const parallelAll = all(childNoLocalError);
+      const parentAll = createFSM<{
+        states: 'idle' | 'recovered';
+        events: { START: void };
+      }>()({
+        id: 'parentAllUnhandled',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'START', parallelAll],
+          [parallelAll, 'DONE', 'idle'],
+          [parallelAll, 'ERROR', 'recovered'],
+        ],
+      });
+
+      const instAll = createMachineInstance(parentAll, {
+        methods: {
+          _failAsync: async () => {
+            throw new Error('boom-all');
+          },
+        } as any,
+      });
+      instAll.send('START');
+      await new Promise((r) => setTimeout(r, 10));
+      expect(instAll.state()).toBe('recovered');
+    });
+
+    it('routes each() child finalState("ERROR") and non-terminal child outputs to parent', () => {
+      const itemChild = createFSM<{
+        states: 'running';
+        events: { PROGRESS: number; FAIL_ITEM: void; FINISH_ITEM: void };
+        output: { PROGRESS_OUT: number; ERROR: void };
+      }>()({
+        id: 'itemChild',
+        initial: 'running',
+        transitions: [
+          ['running', 'PROGRESS', stay(), { output: ['PROGRESS_OUT', (_ctx, p) => p] }],
+          ['running', 'FAIL_ITEM', finalState('ERROR')],
+          ['running', 'FINISH_ITEM', finalState()],
+        ],
+      });
+
+      const pool = each('items', itemChild);
+      const progressseen: number[] = [];
+      const parentFSM = createFSM<{
+        states: 'idle' | 'done' | 'failed';
+        events: { START: void; PROGRESS: number; FAIL_ITEM: void };
+        context: { items: string[] };
+        methods: { _onProgress: (p: number) => void };
+      }>()({
+        id: 'eachErrorAndOutputParent',
+        initial: 'idle',
+        context: { items: ['a', 'b'] },
+        transitions: [
+          ['idle', 'START', pool],
+          [pool, 'PROGRESS_OUT', stay(), { call: (m) => m._onProgress }],
+          [pool, 'DONE', 'done'],
+          [pool, 'ERROR', 'failed'],
+        ],
+      });
+
+      const inst = createMachineInstance(parentFSM, {
+        methods: {
+          _onProgress: (p) => progressseen.push(p),
+        },
+      });
+
+      inst.send('START');
+      inst.send('PROGRESS', 50);
+      // 2 items in pool -> both emit PROGRESS_OUT
+      expect(progressseen).toEqual([50, 50]);
+
+      inst.send('FAIL_ITEM');
+      expect(inst.state()).toBe('failed');
+    });
+
+    it('isolates parent onEnter/onExit hooks for parent states from firing when child enters/exits identically named states, and overlays patchContext on getContext', () => {
+      const events: string[] = [];
+      const childWithIdle = createFSM<{
+        states: 'idle' | 'working';
+        events: { STEP: void; FINISH: void };
+      }>()({
+        id: 'childWithIdle',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'STEP', 'working'],
+          ['working', 'FINISH', finalState()],
+        ],
+      });
+
+      const parentWithIdle = createFSM<{
+        states: 'idle' | 'complete';
+        events: { ENTER_SUB: void; STEP: void; FINISH: void; ABORT: void };
+        context: { count: number; label: string };
+      }>()({
+        id: 'parentWithIdle',
+        initial: 'idle',
+        context: { count: 1, label: 'init' },
+        transitions: [
+          ['idle', 'ENTER_SUB', childWithIdle],
+          [childWithIdle, 'DONE', 'complete'],
+          [childWithIdle, 'ABORT', 'idle'],
+        ],
+      });
+
+      const externalStore = { count: 10, label: 'external' };
+      const inst = createMachineInstance(parentWithIdle, {
+        getContext: () => externalStore,
+        onEnter: {
+          idle: () => events.push('enter:parent:idle'),
+          complete: () => events.push('enter:parent:complete'),
+        },
+        onExit: {
+          idle: () => events.push('exit:parent:idle'),
+          working: () => events.push('exit:childOnly:working'),
+        },
+      });
+
+      // Transition parent out of 'idle' into child (which starts in 'idle')
+      inst.send('ENTER_SUB');
+      // Only parent's exit:parent:idle should have fired — NOT enter:parent:idle when child entered its own 'idle'
+      expect(events).toEqual(['exit:parent:idle']);
+
+      // Transition child from 'idle' to 'working' — parent's exit:parent:idle must NOT fire!
+      inst.send('STEP');
+      expect(events).toEqual(['exit:parent:idle']);
+
+      // Hard-kill child while in 'working' (which is NOT a parent state) back to parent 'idle'
+      inst.send('ABORT');
+      expect(events).toEqual([
+        'exit:parent:idle',
+        'exit:childOnly:working',
+        'enter:parent:idle',
+      ]);
+
+      // patchContext overlays on top of getContext
+      inst.patchContext({ label: 'patched' });
+      expect(inst.context()).toEqual({ count: 10, label: 'patched' });
+    });
+  });
+
+  describe('Cycle 64: Type-Level Parity & Validation', () => {
+    it('excludes plain resting states from ExtractOwnAwaitingNodes even if they handle DONE/ERROR, and preserves doneOutcome in getSnapshot/restoreSnapshot', () => {
+      const parentFSM = createFSM<{
+        states: 'idle' | 'editing' | 'saving' | 'errorView';
+        events: {
+          OPEN_EDITOR: void;
+          SAVE: void;
+          DONE: void;
+          ERROR: void;
+        };
+        outputs: { FINISHED: void };
+        methods: {
+          _saveAsync: () => Promise<void>;
+        };
+      }>()({
+        id: 'parentCycle64',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'OPEN_EDITOR', 'editing'],
+          ['editing', 'DONE', finalState('FINISHED')],
+          ['editing', 'ERROR', 'errorView'],
+          ['idle', 'SAVE', awaiting('saving'), { call: (m) => m._saveAsync }],
+          ['saving', 'DONE', finalState('FINISHED')],
+          ['saving', 'ERROR', 'errorView'],
+        ],
+      });
+
+      // Compile-time: 'editing' is a plain target state, so only 'saving' is in ExtractOwnAwaitingNodes
+      expectTypeOf<
+        ExtractOwnAwaitingNodes<typeof parentFSM>
+      >().toEqualTypeOf<'saving'>();
+      expect([...parentFSM.awaitingStates]).toEqual(['saving']);
+
+      const inst = createMachineInstance(parentFSM, {
+        methods: {
+          _saveAsync: async () => {},
+        },
+      });
+
+      inst.send('OPEN_EDITOR');
+      inst.send('DONE');
+      expect(inst.isDone()).toBe(true);
+      expect(inst.finalOutcome()).toBe('FINISHED');
+
+      const snap = inst.getSnapshot();
+      inst.reset();
+      expect(inst.isDone()).toBe(false);
+      inst.restoreSnapshot(snap);
+      expect(inst.isDone()).toBe(true);
+      expect(inst.finalOutcome()).toBe('FINISHED');
     });
   });
 });

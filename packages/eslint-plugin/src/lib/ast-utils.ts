@@ -46,6 +46,48 @@ export function extractFromKeys(
   return key !== null ? [key] : [];
 }
 
+function serializeTimerExpr(
+  node: TSESTree.Node | null | undefined,
+  paramMap = new Map<string, string>(),
+): string {
+  if (!node) {
+    return '';
+  }
+  switch (node.type) {
+    case AST_NODE_TYPES.Identifier:
+      return paramMap.get(node.name) ?? node.name;
+    case AST_NODE_TYPES.Literal:
+      return JSON.stringify(node.value);
+    case AST_NODE_TYPES.MemberExpression:
+      return `${serializeTimerExpr(node.object, paramMap)}.${serializeTimerExpr(node.property, paramMap)}`;
+    case AST_NODE_TYPES.ArrowFunctionExpression:
+    case AST_NODE_TYPES.FunctionExpression: {
+      const nextMap = new Map(paramMap);
+      node.params.forEach((p, idx) => {
+        if (p.type === AST_NODE_TYPES.Identifier) {
+          nextMap.set(p.name, `$${idx}`);
+        }
+      });
+      return `(${node.params.map((_, i) => `$${i}`).join(',')})=>${serializeTimerExpr(node.body, nextMap)}`;
+    }
+    case AST_NODE_TYPES.BlockStatement:
+      return `{${node.body.map((s) => serializeTimerExpr(s, paramMap)).join(';')}}`;
+    case AST_NODE_TYPES.ReturnStatement:
+      return `return(${serializeTimerExpr(node.argument, paramMap)})`;
+    case AST_NODE_TYPES.BinaryExpression:
+    case AST_NODE_TYPES.LogicalExpression:
+      return `(${serializeTimerExpr(node.left, paramMap)}${node.operator}${serializeTimerExpr(node.right, paramMap)})`;
+    case AST_NODE_TYPES.UnaryExpression:
+      return `${node.operator}(${serializeTimerExpr(node.argument, paramMap)})`;
+    case AST_NODE_TYPES.ConditionalExpression:
+      return `(${serializeTimerExpr(node.test, paramMap)}?${serializeTimerExpr(node.consequent, paramMap)}:${serializeTimerExpr(node.alternate, paramMap)})`;
+    case AST_NODE_TYPES.CallExpression:
+      return `${serializeTimerExpr(node.callee, paramMap)}(${node.arguments.map((a) => serializeTimerExpr(a, paramMap)).join(',')})`;
+    default:
+      return node.type;
+  }
+}
+
 export function extractNodeKey(
   node: TSESTree.Node | null | undefined,
 ): string | null {
@@ -105,7 +147,7 @@ export function extractNodeKey(
       if (argKey) {
         return `after(${argKey})`;
       }
-      return 'after(fn)';
+      return `after(fn:${serializeTimerExpr(firstArg)})`;
     }
     if (calleeName === 'every' && node.arguments.length >= 1) {
       const firstArg = node.arguments[0];
@@ -119,7 +161,7 @@ export function extractNodeKey(
       if (argKey) {
         return `every(${argKey})`;
       }
-      return 'every(fn)';
+      return `every(fn:${serializeTimerExpr(firstArg)})`;
     }
   }
   return null;

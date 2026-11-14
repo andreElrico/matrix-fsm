@@ -116,7 +116,13 @@ export const requireExitForTargets = createRule<[], MessageIds>({
           if (!row.isTransientTarget || !row.toKey) {
             continue;
           }
-          if (!statesWithValidExit.has(row.toKey)) {
+          const hasDirectOrWildcardExit =
+            statesWithValidExit.has(row.toKey) ||
+            statesWithValidExit.has('anyState()');
+          const hasCombinatorChildExit =
+            row.toChildKeys.length > 0 &&
+            row.toChildKeys.some((ck) => statesWithValidExit.has(ck));
+          if (!hasDirectOrWildcardExit && !hasCombinatorChildExit) {
             context.report({
               node: row.toNode,
               messageId: 'missingExitTransition',

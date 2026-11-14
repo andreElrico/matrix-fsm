@@ -61,7 +61,6 @@ export const configs = {
       '@matrix-fsm/group-contiguous-transitions': 'error',
       '@matrix-fsm/require-fallback-transition': 'error',
       '@matrix-fsm/no-unreachable-transitions': 'error',
-      '@matrix-fsm/no-shadowed-transitions': 'error',
       '@matrix-fsm/no-duplicate-combinator-actors': 'error',
       '@matrix-fsm/require-awaiting-handlers': 'error',
       '@matrix-fsm/awaiting-naming-convention': 'error',

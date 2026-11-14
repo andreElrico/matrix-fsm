@@ -1,4 +1,10 @@
-import { computed, inject, InjectionToken, signal } from '@angular/core';
+import {
+  computed,
+  inject,
+  InjectionToken,
+  signal,
+  ɵɵdefineInjectable,
+} from '@angular/core';
 import {
   patchState,
   signalStore,
@@ -6,7 +12,15 @@ import {
   withState,
 } from '@ngrx/signals';
 import { Data, Effect } from 'effect';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  expectTypeOf,
+  it,
+  vi,
+} from 'vitest';
 import {
   after,
   all,
@@ -30,7 +44,35 @@ import {
   type Subscribable,
 } from '../index.js';
 import * as AngularPkg from '../index.js';
+import { createEffectMachineFeature } from '../effect/index.js';
 import * as EffectPkg from '../effect/index.js';
+
+function ensureJitCompilerFacade(): void {
+  const g = globalThis as Record<string, any>;
+  g['ng'] ??= {};
+  g['ng'].ɵcompilerFacade ??= {
+    compileFactoryDeclaration(
+      _env: unknown,
+      _url: string,
+      decl: { type: new (...args: any[]) => unknown },
+    ) {
+      return (...args: any[]) => new decl.type(...args);
+    },
+    compileInjectableDeclaration(
+      _env: unknown,
+      _url: string,
+      decl: { type: new (...args: any[]) => unknown; providedIn?: any },
+    ) {
+      return ɵɵdefineInjectable({
+        token: decl.type,
+        providedIn: decl.providedIn ?? null,
+        factory: () => new decl.type(),
+      });
+    },
+  };
+}
+
+ensureJitCompilerFacade();
 
 class NetworkTimeoutError extends Data.TaggedError('NetworkTimeoutError')<{
   readonly message: string;
@@ -3767,6 +3809,251 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  describe('Cycles 64, 65 & 66: Angular Validation, Runtime Parity, createFeatureTester & Effect-TS Fixes', () => {
+    it('rejects unknown VIA event strings in createMachineFeature without contract methods, and preserves strict context type in output selectors alongside void outputs', () => {
+      createMachineFeature<{
+        states: 'idle' | 'done';
+        events: { START: void };
+        outputs: { CANCELLED: void; READY: { readonly count: number } };
+      }>()({
+        id: 'strictViaAndOutputFeature',
+        initial: 'idle',
+        state: { count: 42 },
+        transitions: [
+          [
+            'idle',
+            'START',
+            finalState(),
+            {
+              output: [
+                'READY',
+                (ctx) => {
+                  expectTypeOf(ctx).toEqualTypeOf<
+                    Readonly<{ count: number }>
+                  >();
+                  return { count: ctx.count };
+                },
+              ],
+            },
+          ],
+          // @ts-expect-error Unknown event 'TYPO_EVENT' is not in events contract or method outcomes
+          ['idle', 'TYPO_EVENT', 'done'],
+        ],
+      });
+    });
+
+    it('handles duplicate primitives in each(), routes each() child finalState("ERROR") to parent ERROR, and isolates parent onExit hooks from child states', () => {
+      const exited: string[] = [];
+      const itemActor = createMachineFeature<{
+        states: 'idle' | 'working';
+        events: { FAIL_ONE: void; FINISH_ONE: void };
+        outputs: { DONE: void; ERROR: void };
+      }>()({
+        id: 'itemActor65',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'FAIL_ONE', finalState('ERROR')],
+          ['idle', 'FINISH_ONE', finalState('DONE')],
+        ],
+      });
+
+      const pool = each('tags', itemActor);
+      const parentFeature = createMachineFeature<{
+        states: 'idle' | 'done' | 'failed';
+        events: {
+          START_EACH: void;
+          FAIL_ONE: void;
+          FINISH_ONE: void;
+          ENTER_SUB: void;
+          HARD_KILL: void;
+        };
+      }>()({
+        id: 'parentEachAndHook65',
+        initial: 'idle',
+        state: { tags: ['dup', 'dup'] },
+        transitions: [
+          ['idle', 'START_EACH', pool],
+          [pool, 'ALL_DONE', 'done'],
+          [pool, 'ERROR', 'failed'],
+          ['idle', 'ENTER_SUB', itemActor],
+          [itemActor, 'DONE', 'done'],
+          [itemActor, 'ERROR', 'failed'],
+          [itemActor, 'HARD_KILL', 'done'],
+        ],
+        onExit: {
+          idle: () => exited.push('parent:exit:idle'),
+        },
+      });
+
+      const Store = signalStore(withStateMachine(parentFeature));
+      const store = new Store();
+
+      // 1. Duplicate primitives ['dup', 'dup'] spawn 2 distinct child instances (not 1)
+      store.send('START_EACH');
+      expect(store.childMachines()['tags']).toHaveLength(2);
+
+      // 2. Child finalState('ERROR') inside each() routes to [pool, 'ERROR', 'failed']
+      store.send('FAIL_ONE');
+      expect(store.state()).toBe('failed');
+
+      // 3. Hard-killing sub-machine while child is in 'idle' must NOT fire parent's onExit.idle again!
+      store.reset();
+      exited.length = 0;
+      store.send('ENTER_SUB');
+      expect(exited).toEqual(['parent:exit:idle']);
+      store.send('HARD_KILL');
+      expect(exited).toEqual(['parent:exit:idle']);
+    });
+
+    it('does not clobber defaultMachineFactories when provideStateMachine registers a scoped mock override, and preserves doneOutcome in getSnapshot/restoreSnapshot', () => {
+      const childFeature = createMachineFeature<{
+        states: 'idle';
+        events: { GO: void };
+        outputs: { DONE: { readonly source: string } };
+      }>()({
+        id: 'scopedChild65',
+        initial: 'idle',
+        transitions: [
+          [
+            'idle',
+            'GO',
+            finalState(),
+            { output: ['DONE', () => ({ source: 'default-feature' })] },
+          ],
+        ],
+      });
+
+      // Registering a scoped DI provider must NOT overwrite childFeature's default factory for non-DI callers
+      provideStateMachine(childFeature, {
+        methods: {},
+      });
+
+      const tester = createFeatureTester(childFeature);
+      tester.send('GO');
+      expect(tester.isDone()).toBe(true);
+      expect(tester.finalOutcome()).toBe('DONE');
+      expect(tester.emittedOutputs()).toEqual([
+        { type: 'DONE', payload: { source: 'default-feature' } },
+      ]);
+
+      const snap = tester.getSnapshot();
+      tester.reset();
+      expect(tester.isDone()).toBe(false);
+      tester.restoreSnapshot(snap);
+      expect(tester.isDone()).toBe(true);
+      expect(tester.finalOutcome()).toBe('DONE');
+    });
+
+    it('exposes subState, subContext, childMachines, actors, and sendToChild on createFeatureTester and awaits Subscribable in flushTasks()', async () => {
+      const childSub = createMachineFeature<{
+        states: 'waiting' | 'fetching';
+        events: { LOAD: void };
+        outputs: { DONE: string };
+      }>()({
+        id: 'childObsSub65',
+        initial: 'waiting',
+        state: { childTag: 'sub-ctx' },
+        transitions: [
+          [
+            'waiting',
+            'LOAD',
+            awaiting('fetching'),
+            { call: (m) => m._loadObs },
+          ],
+          [
+            'fetching',
+            'DONE',
+            finalState(),
+            { output: ['DONE', (_ctx, p) => p] },
+          ],
+        ],
+        methods: () => ({
+          _loadObs: () => ({
+            subscribe(observer?: { next?: (v: string) => void }) {
+              setTimeout(() => {
+                observer?.next?.('obs-done');
+              }, 10);
+              return () => {};
+            },
+          }),
+        }),
+      });
+
+      const parentFeat = createMachineFeature<{
+        states: 'idle' | 'completed';
+        events: { ENTER: void; LOAD: void };
+      }>()({
+        id: 'parentTesterFeat65',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'ENTER', childSub],
+          [childSub, 'DONE', 'completed'],
+        ],
+      });
+
+      const tester = createFeatureTester(parentFeat);
+      tester.send('ENTER');
+      expect(tester.subState()).toBe('waiting');
+      expect(tester.subContext()).toEqual({ childTag: 'sub-ctx' });
+      expect(tester.actors.childObsSub65()).toEqual({ childTag: 'sub-ctx' });
+
+      tester.send('LOAD');
+      expect(tester.isPending()).toBe(true);
+      await tester.flushTasks();
+      expect(tester.state()).toBe('completed');
+      expect(tester.isPending()).toBe(false);
+    });
+
+    it('Cycle 66: routes self-interrupted Effect to ERROR instead of hanging, and routes Effect.die defects to ERROR rather than domain _tag rows', async () => {
+      const effectFeature = createEffectMachineFeature<{
+        states: 'idle' | 'interrupting' | 'dying' | 'domainErrorCaught' | 'failed';
+        events: { RUN_INTERRUPT: void; RUN_DIE: void };
+      }>()({
+        id: 'effectSelfInterruptAndDie66',
+        initial: 'idle',
+        transitions: [
+          [
+            'idle',
+            'RUN_INTERRUPT',
+            awaiting('interrupting'),
+            { call: (m) => m._selfInterrupt },
+          ],
+          ['interrupting', 'DONE', 'idle'],
+          ['interrupting', 'ERROR', 'failed'],
+          [
+            'idle',
+            'RUN_DIE',
+            awaiting('dying'),
+            { call: (m) => m._dieWithFakeTag },
+          ],
+          ['dying', 'DONE', 'idle'],
+          ['dying', 'DomainTaggedError', 'domainErrorCaught'],
+          ['dying', 'ERROR', 'failed'],
+        ],
+        methods: () => ({
+          _selfInterrupt: () => Effect.interrupt,
+          _dieWithFakeTag: () =>
+            Effect.die({ _tag: 'DomainTaggedError', message: 'defect!' }),
+        }),
+      });
+
+      const tester = createFeatureTester(effectFeature);
+
+      // 1. Self-interrupted Effect must transition to 'failed' via ERROR and clear isPending()
+      tester.send('RUN_INTERRUPT');
+      await tester.flushTasks();
+      expect(tester.state()).toBe('failed');
+      expect(tester.isPending()).toBe(false);
+
+      // 2. Effect.die defect with a _tag property must route to 'ERROR' ('failed'), NOT 'DomainTaggedError' ('domainErrorCaught')!
+      tester.reset();
+      tester.send('RUN_DIE');
+      await tester.flushTasks();
+      expect(tester.state()).toBe('failed');
+      expect(tester.isPending()).toBe(false);
     });
   });
 });

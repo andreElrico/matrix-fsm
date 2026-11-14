@@ -103,7 +103,11 @@ export interface OutcomeNode<
 }
 
 export interface SubscribableLike<T = any> {
-  subscribe(...args: any[]): any;
+  subscribe(observer?: {
+    next?: (value: T) => void;
+    error?: (err: unknown) => void;
+    complete?: () => void;
+  }): { unsubscribe(): void } | (() => void) | any;
 }
 
 export interface ResourceRefLike<T = any> {
@@ -145,7 +149,6 @@ export interface StayNode {
 
 export interface AnyStateNode {
   readonly __type: 'anyState';
-  readonly __kind: 'anyState';
 }
 
 export interface FinalNode<TOutcome extends string = string> {
@@ -156,21 +159,18 @@ export interface FinalNode<TOutcome extends string = string> {
 
 export interface AfterNode<TMs extends number = number, TContext = any> {
   readonly __type: 'after';
-  readonly __kind: 'after';
   readonly ms: TMs | ((ctx: ReadonlyContext<TContext>) => number);
   readonly id: string;
 }
 
 export interface EveryNode<TContext = any> {
   readonly __type: 'every';
-  readonly __kind: 'every';
   readonly ms: number | ((ctx: ReadonlyContext<TContext>) => number);
   readonly id: string;
 }
 
 export interface AlwaysNode {
   readonly __type: 'always';
-  readonly __kind: 'always';
   readonly id: '__always__';
 }
 
@@ -222,7 +222,6 @@ export interface CombinatorNode<
     readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
 > {
   readonly __type: TKind;
-  readonly __kind: TKind;
   readonly id: `${TKind}:${JoinMachineIds<TMachines>}`;
   readonly machines: UnwrapSubMachineTuple<TMachines>;
 }
@@ -635,10 +634,12 @@ export type TransitionRow<
         | AnyFSMDefinition
         | SubMachineRef<any, any>
         | CombinatorNode<any, any>
+        | EachNode<any, any>
         | readonly (
             | AnyFSMDefinition
             | SubMachineRef<any, any>
             | CombinatorNode<any, any>
+            | EachNode<any, any>
           )[],
       via:
         | string
@@ -666,10 +667,12 @@ export type TransitionRow<
         | AnyFSMDefinition
         | SubMachineRef<any, any>
         | CombinatorNode<any, any>
+        | EachNode<any, any>
         | readonly (
             | AnyFSMDefinition
             | SubMachineRef<any, any>
             | CombinatorNode<any, any>
+            | EachNode<any, any>
           )[],
       via:
         | string
@@ -792,7 +795,11 @@ export interface FSMDefinition<
     TContext,
     TMethods
   >;
-  hasTransitionFor(state: string, event: string): boolean;
+  hasTransitionFor(
+    state: string,
+    event: string,
+    options?: { readonly exact?: boolean },
+  ): boolean;
 }
 
 export type AnyFSMDefinition = FSMDefinition<
@@ -1522,6 +1529,52 @@ type ValidateRowOptions<
  * 6. Forbids `anyState()` in Column 3 (`TO`).
  */
 
+type IsInvalidRowVia<
+  From,
+  Via,
+  TEvent extends string,
+  TMethods,
+  TEventsMap,
+  TTransitions extends readonly any[],
+> = [0] extends [1 & TEventsMap]
+  ? false
+  : [0] extends [1 & TMethods]
+    ? false
+    : TEventsMap extends object
+      ? string extends keyof TEventsMap
+        ? false
+        : keyof TEventsMap extends never
+          ? false
+          : Via extends
+                | ExtractedMarker<any, any>
+                | AfterNode<any, any>
+                | EveryNode<any>
+                | AlwaysNode
+            ? false
+            : IsSubMachineNode<From> extends true
+              ? false
+              : From extends
+                    | CombinatorNode<any, any>
+                    | EachNode<any, any>
+                    | AnyStateNode
+                    | readonly any[]
+                ? false
+                : IsAwaitingStateInTransitions<From, TTransitions> extends true
+                  ? false
+                  : From extends ExtractDoneSourceStates<TTransitions>
+                    ? false
+                    : [
+                          Exclude<
+                            ExtractViaStrings<Via>,
+                            | TEvent
+                            | BuiltInLifecycleEvent
+                            | ExtractMethodOutcomeEvents<TMethods>
+                          >,
+                        ] extends [never]
+                      ? false
+                      : true
+      : false;
+
 export type ValidateTransitionRows<
   TTransitions extends readonly any[],
   TContext = any,
@@ -1564,7 +1617,24 @@ export type ValidateTransitionRows<
                 ? {
                     readonly __error: 'every(ms) is a recurring interval and requires stay() in Column 3 (TO)';
                   }
-                : IsSubMachineNode<From> extends true
+                : IsInvalidRowVia<
+                      From,
+                      Via,
+                      TEvent,
+                      TMethods,
+                      TEventsMap,
+                      TTransitions
+                    > extends true
+                  ? {
+                      readonly __error: 'Unknown event in Column 2 (VIA); event is not declared in events contract or returned via outcome()';
+                      readonly invalidEvent: Exclude<
+                        ExtractViaStrings<Via>,
+                        | TEvent
+                        | BuiltInLifecycleEvent
+                        | ExtractMethodOutcomeEvents<TMethods>
+                      >;
+                    }
+                  : IsSubMachineNode<From> extends true
           ? readonly [
               from: From,
               via: AllowedSubMachineVia<From, TEvent>,
@@ -2034,11 +2104,30 @@ type ExtractDoneSourceStates<
       : never
     : never;
 
-type ExtractShallowAwaitingFromTransitions<
+type ExtractPlainTargetStates<
+  TTransitions extends readonly AnyTransitionRow<any, any>[],
+> = [0] extends [1 & TTransitions]
+  ? never
+  : TTransitions[number] extends infer Row
+    ? Row extends readonly [any, any, infer To, ...any[]]
+      ? To extends ExtractedMarker<any, any>
+        ? never
+        : To extends string
+          ? string extends To
+            ? never
+            : To
+          : never
+      : never
+    : never;
+
+export type ExtractShallowAwaitingFromTransitions<
   TTransitions extends readonly AnyTransitionRow<any, any>[],
 > =
   | ExtractDirectAwaiting<TTransitions>
-  | ExtractDoneSourceStates<TTransitions>;
+  | Exclude<
+      ExtractDoneSourceStates<TTransitions>,
+      ExtractPlainTargetStates<TTransitions>
+    >;
 
 type ExtractShallowAwaiting<TFSM> =
   TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any, any, any>

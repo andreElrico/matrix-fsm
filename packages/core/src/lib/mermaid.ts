@@ -25,18 +25,60 @@ function sanitizeMermaidId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_]/g, '_');
 }
 
-function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
+function renderMachineBody(
+  fsm: AnyFSMDefinition,
+  indent = '  ',
+  claimedIds = new Set<string>(
+    [...fsm.states].map((s) => sanitizeMermaidId(s)),
+  ),
+  scopePrefix = '',
+): string[] {
   const lines: string[] = [];
+  const localIdMap = new Map<string, string>();
+
+  const resolveScopedId = (rawState: string): string => {
+    const existing = localIdMap.get(rawState);
+    if (existing) {
+      return existing;
+    }
+    const baseSafe = sanitizeMermaidId(rawState);
+    if (scopePrefix && claimedIds.has(baseSafe)) {
+      const scoped = `${scopePrefix}_${baseSafe}`;
+      claimedIds.add(scoped);
+      localIdMap.set(rawState, scoped);
+      return scoped;
+    }
+    claimedIds.add(baseSafe);
+    localIdMap.set(rawState, baseSafe);
+    return baseSafe;
+  };
+
+  for (const st of fsm.states) {
+    resolveScopedId(st);
+  }
 
   // 1. Render awaiting state badges (⚡)
   for (const awaitingState of fsm.awaitingStates) {
-    const safeId = sanitizeMermaidId(awaitingState);
+    const safeId = resolveScopedId(awaitingState);
     lines.push(`${indent}state "⚡ ${awaitingState}" as ${safeId}`);
+  }
+
+  // 1b. Render state label aliases for any non-awaiting state whose ID was scoped to avoid collision
+  for (const [rawState, scopedId] of localIdMap.entries()) {
+    if (
+      scopedId !== sanitizeMermaidId(rawState) &&
+      !fsm.awaitingStates.has(rawState) &&
+      !fsm.eachNodes.has(rawState) &&
+      !fsm.combinatorNodes?.has(rawState) &&
+      !fsm.subMachines.has(rawState)
+    ) {
+      lines.push(`${indent}state "${rawState}" as ${scopedId}`);
+    }
   }
 
   // 2. Render each() parallel orchestration badges (⇉)
   for (const [, eachNode] of fsm.eachNodes) {
-    const safeId = sanitizeMermaidId(eachNode.id);
+    const safeId = resolveScopedId(eachNode.id);
     lines.push(
       `${indent}state "⇉ each(${eachNode.key}: ${eachNode.machine.id})" as ${safeId}`,
     );
@@ -45,7 +87,7 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
   // 2b. Render combinator badges (all / race / any)
   if (fsm.combinatorNodes) {
     for (const [, combNode] of fsm.combinatorNodes) {
-      const safeId = sanitizeMermaidId(combNode.id);
+      const safeId = resolveScopedId(combNode.id);
       const childNames = combNode.machines
         .map((m: AnyFSMDefinition) => m.id)
         .join(', ');
@@ -59,18 +101,29 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
   const hasAnyState = fsm.transitions.some((row: AnyTransitionRow) =>
     isAnyStateNode((row as unknown as readonly [unknown])[0]),
   );
+  const anyStateId = scopePrefix ? `${scopePrefix}_anyState` : 'anyState';
   if (hasAnyState) {
-    lines.push(`${indent}state "(*)" as anyState`);
+    lines.push(`${indent}state "(*)" as ${anyStateId}`);
   }
 
   // 3. Render composite sub-machine blocks
   for (const [, subRef] of fsm.subMachines) {
-    const safeSubId = sanitizeMermaidId(subRef.id);
-    lines.push(`${indent}state ${safeSubId} {`);
-    lines.push(
-      `${indent}  [*] --> ${sanitizeMermaidId(subRef.machine.initial)}`,
+    const safeSubId = resolveScopedId(subRef.id);
+    const childLines = renderMachineBody(
+      subRef.machine,
+      `${indent}  `,
+      claimedIds,
+      safeSubId,
     );
-    lines.push(...renderMachineBody(subRef.machine, `${indent}  `));
+    const childInitialSafe = sanitizeMermaidId(subRef.machine.initial);
+    const childInitialScoped = childLines.some((l) =>
+      l.includes(`as ${safeSubId}_${childInitialSafe}`),
+    )
+      ? `${safeSubId}_${childInitialSafe}`
+      : childInitialSafe;
+    lines.push(`${indent}state ${safeSubId} {`);
+    lines.push(`${indent}  [*] --> ${childInitialScoped}`);
+    lines.push(...childLines);
     lines.push(`${indent}}`);
   }
 
@@ -86,7 +139,7 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
     const fromItems = Array.isArray(from) ? from : [from];
     for (const fromItem of fromItems) {
       const fromRaw = isAnyStateNode(fromItem)
-        ? 'anyState'
+        ? anyStateId
         : isAwaitingNode(fromItem)
           ? fromItem.state
           : isSubMachineRef(fromItem) || isFSMDefinition(fromItem)
@@ -94,7 +147,9 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
             : isEachNode(fromItem) || isCombinatorNode(fromItem)
               ? fromItem.id
               : String(fromItem);
-      const fromId = sanitizeMermaidId(fromRaw);
+      const fromId = isAnyStateNode(fromItem)
+        ? anyStateId
+        : resolveScopedId(fromRaw);
       const formatViaSingle = (v: unknown): string =>
         isAfterNode(v)
           ? `after(${typeof v.ms === 'number' ? `${v.ms}ms` : 'dynamic'})`
@@ -139,7 +194,7 @@ function renderMachineBody(fsm: AnyFSMDefinition, indent = '  '): string[] {
           : isEachNode(to) || isCombinatorNode(to)
             ? to.id
             : String(to);
-      const toId = sanitizeMermaidId(toRaw);
+      const toId = resolveScopedId(toRaw);
 
       lines.push(`${indent}${fromId} --> ${toId} : ${viaLabel}${guardName}`);
     }
@@ -247,26 +302,37 @@ export function getShortestPaths(
         continue;
       }
       const targetKey = extractStateKey(to);
-      if (!targetKey || targetKey in result) {
+      if (!targetKey) {
         continue;
       }
       const isEpsilonAlways =
         isAlwaysNode(via) ||
         (Array.isArray(via) && via.some((v) => isAlwaysNode(v)));
       if (isEpsilonAlways) {
-        result[targetKey] = [...pathSoFar];
-        queue.unshift(targetKey);
+        if (
+          !(targetKey in result) ||
+          pathSoFar.length < result[targetKey].length
+        ) {
+          result[targetKey] = [...pathSoFar];
+          queue.unshift(targetKey);
+        }
       } else {
-        result[targetKey] = [
-          ...pathSoFar,
-          {
-            from: current,
-            via: formatViaKey(via),
-            to: targetKey,
-            hasGuard: Boolean(options?.guard),
-          },
-        ];
-        queue.push(targetKey);
+        const candidateLen = pathSoFar.length + 1;
+        if (
+          !(targetKey in result) ||
+          candidateLen < result[targetKey].length
+        ) {
+          result[targetKey] = [
+            ...pathSoFar,
+            {
+              from: current,
+              via: formatViaKey(via),
+              to: targetKey,
+              hasGuard: Boolean(options?.guard),
+            },
+          ];
+          queue.push(targetKey);
+        }
       }
     }
   }

@@ -83,7 +83,6 @@ export function stay(): StayNode {
 
 const ANY_STATE_INSTANCE: AnyStateNode = Object.freeze({
   __type: 'anyState' as const,
-  __kind: 'anyState' as const,
 });
 
 /**
@@ -110,6 +109,10 @@ export function finalState(outcome?: string): FinalNode<string> {
   });
 }
 
+function normalizeTimerSelectorKey(fn: (...args: any[]) => any): string {
+  return fn.toString().replace(/\s+/g, '');
+}
+
 /**
  * Declarative one-shot timer marker for Column 2 (`VIA`).
  * Automatically fires after `ms` milliseconds while in the source state (must transition out of the state; `stay()` is forbidden)
@@ -121,10 +124,9 @@ export function after<const TMs extends number, TContext = any>(
   const id =
     typeof ms === 'number'
       ? (`__after_${ms}__` as const)
-      : ('__after_fn__' as const);
+      : (`__after_fn:${normalizeTimerSelectorKey(ms)}__` as const);
   return Object.freeze({
     __type: 'after' as const,
-    __kind: 'after' as const,
     ms,
     id,
   });
@@ -141,10 +143,9 @@ export function every<TContext = any>(
   const id =
     typeof ms === 'number'
       ? (`__every_${ms}__` as const)
-      : ('__every_fn__' as const);
+      : (`__every_fn:${normalizeTimerSelectorKey(ms)}__` as const);
   return Object.freeze({
     __type: 'every' as const,
-    __kind: 'every' as const,
     ms,
     id,
   });
@@ -152,7 +153,6 @@ export function every<TContext = any>(
 
 const ALWAYS_INSTANCE: AlwaysNode = Object.freeze({
   __type: 'always' as const,
-  __kind: 'always' as const,
   id: '__always__' as const,
 });
 
@@ -294,7 +294,6 @@ function createCombinator<
     .join(',');
   return Object.freeze({
     __type: kind,
-    __kind: kind,
     id: `${kind}:${joinedIds}` as `${TKind}:${JoinMachineIds<TMachines>}`,
     machines: Object.freeze([...machines]) as unknown as UnwrapSubMachineTuple<TMachines>,
   });
@@ -392,8 +391,7 @@ export function isAnyStateNode(value: unknown): value is AnyStateNode {
   return (
     typeof value === 'object' &&
     value !== null &&
-    ((value as AnyStateNode).__kind === 'anyState' ||
-      (value as AnyStateNode).__type === 'anyState')
+    (value as AnyStateNode).__type === 'anyState'
   );
 }
 
@@ -409,8 +407,7 @@ export function isAfterNode(value: unknown): value is AfterNode<number, any> {
   return (
     typeof value === 'object' &&
     value !== null &&
-    ((value as AfterNode).__type === 'after' ||
-      (value as AfterNode).__kind === 'after')
+    (value as AfterNode).__type === 'after'
   );
 }
 
@@ -418,8 +415,7 @@ export function isEveryNode(value: unknown): value is EveryNode<any> {
   return (
     typeof value === 'object' &&
     value !== null &&
-    ((value as EveryNode).__type === 'every' ||
-      (value as EveryNode).__kind === 'every')
+    (value as EveryNode).__type === 'every'
   );
 }
 
@@ -427,8 +423,7 @@ export function isAlwaysNode(value: unknown): value is AlwaysNode {
   return (
     typeof value === 'object' &&
     value !== null &&
-    ((value as AlwaysNode).__type === 'always' ||
-      (value as AlwaysNode).__kind === 'always')
+    (value as AlwaysNode).__type === 'always'
   );
 }
 

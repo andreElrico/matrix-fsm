@@ -5,17 +5,13 @@
  * while keeping `@matrix-fsm/angular` completely free of `effect` types and bundle weight.
  */
 
-import type { DeepSignalOf, WritableStateSource } from '@ngrx/signals';
 import type {
-  DebugLogger,
   EmptyObject,
-  InspectCallback,
   OutcomeNode,
   ResolveContext,
   TransitionRow,
-  ValidateTransitionRows,
 } from '@matrix-fsm/core';
-import { Cause, Effect, Exit, Fiber } from 'effect';
+import { Cause, Effect, Exit, Fiber, Option } from 'effect';
 import {
   buildMachineFeatureRuntime,
   type CustomTaskAdapter,
@@ -24,10 +20,10 @@ import {
   type FeatureMethods,
   type FeatureOutputs,
   type FeatureStates,
-  type HasDeclaredVoidOutput,
+  type MachineFeatureConfig,
   type MachineFeatureContract,
   type MachineFeatureDefinition,
-  type SyncContextMap,
+  type ResolveValidatedMethods,
 } from '../lib/with-state-machine.js';
 
 type EffectTaggedErrorOutcome<E> = E extends {
@@ -45,13 +41,16 @@ export type NormalizeEffectMethodReturn<R> =
     ? Promise<A | EffectErrorOutcome<E>>
     : R;
 
-export type NormalizeEffectMethods<TMethods> = {
-  readonly [K in keyof TMethods]: TMethods[K] extends (
-    ...args: infer Args
-  ) => infer R
-    ? (...args: Args) => NormalizeEffectMethodReturn<R>
-    : TMethods[K];
-};
+export type NormalizeEffectMethods<TMethods> =
+  [0] extends [1 & TMethods]
+    ? any
+    : {
+        readonly [K in keyof TMethods]: TMethods[K] extends (
+          ...args: infer Args
+        ) => infer R
+          ? (...args: Args) => NormalizeEffectMethodReturn<R>
+          : TMethods[K];
+      };
 
 export interface EffectRuntimeLike<R = never> {
   readonly runFork: <A, E>(
@@ -88,11 +87,30 @@ function createEffectExecutorAdapter(
         if (Exit.isSuccess(exit)) {
           callbacks.onSuccess(exit.value);
         } else {
-          if (Cause.hasInterruptsOnly(exit.cause)) {
+          const failureOpt = Cause.findErrorOption(exit.cause);
+          if (Option.isSome(failureOpt)) {
+            callbacks.onFailure(failureOpt.value);
             return;
           }
-          const squashedError = Cause.squash(exit.cause);
-          callbacks.onFailure(squashedError);
+          const squashedDefect = Cause.squash(exit.cause);
+          if (
+            typeof squashedDefect === 'object' &&
+            squashedDefect !== null &&
+            ('_tag' in squashedDefect ||
+              ('name' in squashedDefect &&
+                (squashedDefect as { name: unknown }).name !== 'Error'))
+          ) {
+            const wrappedDefect = new Error(
+              String(
+                (squashedDefect as { message?: unknown }).message ??
+                  'Effect defect',
+              ),
+              { cause: squashedDefect },
+            );
+            callbacks.onFailure(wrappedDefect);
+            return;
+          }
+          callbacks.onFailure(squashedDefect);
         }
       });
 
@@ -122,62 +140,23 @@ export type EffectMachineFeatureConfig<
     TDeclaredStates,
     any,
     TOutputs,
-    HasDeclaredVoidOutput<TOutputs> extends false ? TInputs & TState : any
+    TInputs & TState
   >[],
-> = {
-  readonly id: TId;
-  readonly initial: TInitial;
+> = MachineFeatureConfig<
+  TId,
+  TInitial,
+  TInputs,
+  TState,
+  TEvents,
+  TOutputs,
+  TDeclaredStates,
+  TMethods,
+  TTransitions,
+  NormalizeEffectMethods<ResolveValidatedMethods<NoInfer<TMethods>>>
+> & {
   readonly runtime?:
     | EffectRuntimeLike<never>
     | (() => EffectRuntimeLike<never>);
-  readonly transitions: TTransitions &
-    ValidateTransitionRows<
-      TTransitions,
-      NoInfer<TInputs & TState>,
-      Extract<keyof TEvents, string>,
-      NormalizeEffectMethods<NoInfer<TMethods>>,
-      TOutputs,
-      TEvents
-    >;
-  readonly state?: TState;
-  readonly syncContext?:
-    | (() => SyncContextMap<NoInfer<TInputs & TState>>)
-    | SyncContextMap<NoInfer<TInputs & TState>>;
-  readonly methods?:
-    | ((
-        store: WritableStateSource<NoInfer<TInputs & TState>> &
-          DeepSignalOf<NoInfer<TInputs & TState>> &
-          Record<string, any>,
-      ) => TMethods)
-    | TMethods;
-  readonly debug?: DebugLogger;
-  readonly inspect?: InspectCallback<any>;
-  readonly onEnter?:
-    | (() => Partial<
-        Record<
-          TDeclaredStates,
-          (ctx: Readonly<NoInfer<TInputs & TState>>) => void
-        >
-      >)
-    | Partial<
-        Record<
-          TDeclaredStates,
-          (ctx: Readonly<NoInfer<TInputs & TState>>) => void
-        >
-      >;
-  readonly onExit?:
-    | (() => Partial<
-        Record<
-          TDeclaredStates,
-          (ctx: Readonly<NoInfer<TInputs & TState>>) => void
-        >
-      >)
-    | Partial<
-        Record<
-          TDeclaredStates,
-          (ctx: Readonly<NoInfer<TInputs & TState>>) => void
-        >
-      >;
 };
 
 /**
@@ -197,9 +176,7 @@ export function createEffectMachineFeature<
     FeatureStates<TContract>,
     NormalizeEffectMethods<FeatureMethods<TContract>>,
     FeatureOutputs<TContract>,
-    HasDeclaredVoidOutput<FeatureOutputs<TContract>> extends false
-      ? FeatureInputs<TContract> & TState
-      : any
+    FeatureInputs<TContract> & TState
   >[],
   TState extends object = EmptyObject,
   TMethods extends Record<string, any> = FeatureMethods<TContract>,
