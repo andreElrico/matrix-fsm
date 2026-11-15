@@ -42,6 +42,7 @@ import type {
   ValidateTransitionRows,
 } from './types.js';
 
+/** @internal */
 export function toSubMachineRef(
   value: unknown,
 ): SubMachineRef<AnyFSMDefinition, string> | null {
@@ -58,6 +59,7 @@ export function toSubMachineRef(
   return null;
 }
 
+/** @internal */
 export function sourceIncludesAnyState(source: unknown): boolean {
   if (Array.isArray(source)) {
     return source.some((el) => sourceIncludesAnyState(el));
@@ -65,6 +67,7 @@ export function sourceIncludesAnyState(source: unknown): boolean {
   return isAnyStateNode(source);
 }
 
+/** @internal */
 export function resolveSourceId(source: unknown): string {
   if (typeof source === 'string') {
     return source;
@@ -84,6 +87,7 @@ export function resolveSourceId(source: unknown): string {
   return String(source);
 }
 
+/** @internal */
 export function resolveSourceIds(source: unknown): string[] {
   if (Array.isArray(source)) {
     return source.flatMap((el) => resolveSourceIds(el));
@@ -94,6 +98,7 @@ export function resolveSourceIds(source: unknown): string[] {
   return [resolveSourceId(source)];
 }
 
+/** @internal */
 export function resolveViaId(via: unknown): string {
   if (isAfterNode(via) || isEveryNode(via) || isAlwaysNode(via)) {
     return via.id;
@@ -101,6 +106,7 @@ export function resolveViaId(via: unknown): string {
   return String(via);
 }
 
+/** @internal */
 export function resolveViaMatches(via: unknown, event: string): boolean {
   if (Array.isArray(via)) {
     return via.some((v) => resolveViaId(v) === event);
@@ -108,6 +114,7 @@ export function resolveViaMatches(via: unknown, event: string): boolean {
   return resolveViaId(via) === event;
 }
 
+/** @internal */
 export function resolveTargetId(
   target: unknown,
   currentState: string,
@@ -540,10 +547,45 @@ function buildFSM<
 }
 
 /**
- * Curried FSM creator with Named `FSMContract` (Single Canonical API):
- * Zero dummy JSON objects (`events: {} as ...` or `context: { ... }` are not needed).
- * Any machine created with `createFSM` can be mounted as a root machine or used
- * directly as a hierarchical sub-machine in a parent matrix.
+ * Canonical curried FSM builder with a pure TypeScript {@link FSMContract} (`0%` Angular, `0%` JSON dummy objects).
+ *
+ * @group Machine Builders
+ * @typeParam TContract - Optional {@link FSMContract} declaring `inputs`, `events`, `outputs`, `states`, `context`, and `methods`.
+ * @returns A curried builder function accepting the machine `{ id, initial, transitions, context? }` config.
+ *
+ * @remarks
+ * Every machine in `@matrix-fsm` is created uniformly with `createFSM` (or `createMachineFeature` in Angular).
+ * Whether a machine acts as a root machine or a hierarchical sub-actor is determined purely by composition:
+ * placing a machine directly in Column 1 (`FROM`), Column 3 (`TO`), or inside `each()` / `all()` / `race()` / `any()`
+ * automatically aggregates its context, methods, states, and outputs at compile time.
+ *
+ * @example
+ * ```ts
+ * import { awaiting, createFSM, createMachineInstance, finalState, stay } from '@matrix-fsm/core';
+ *
+ * export interface OrderContract {
+ *   events: { SELECT_DRINK: { name: string }; PLACE_ORDER: void };
+ *   states: 'browsing' | 'checkingLoyalty' | 'confirmed';
+ *   context: { selectedDrink: string | null; error: string | null };
+ *   methods: {
+ *     _selectDrink: (payload: { name: string }) => void;
+ *     _checkLoyalty: (_p: void, signal: AbortSignal) => Promise<boolean>;
+ *     _setMissingDrinkError: () => void;
+ *   };
+ * }
+ *
+ * export const orderFSM = createFSM<OrderContract>()({
+ *   id: 'order',
+ *   initial: 'browsing',
+ *   transitions: [
+ *     ['browsing',        'SELECT_DRINK', stay(),                      { call: (m) => m._selectDrink }],
+ *     ['browsing',        'PLACE_ORDER',  awaiting('checkingLoyalty'), { guard: (c) => c.selectedDrink !== null, call: (m) => m._checkLoyalty }],
+ *     ['browsing',        'PLACE_ORDER',  stay(),                      { call: (m) => m._setMissingDrinkError }],
+ *     ['checkingLoyalty', 'DONE',         finalState()],
+ *     ['checkingLoyalty', 'ERROR',        'browsing'],
+ *   ],
+ * });
+ * ```
  */
 export function createFSM<
   TContract extends FSMContract = EmptyObject,

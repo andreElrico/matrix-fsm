@@ -216,8 +216,36 @@ function renderMachineBody(
 }
 
 /**
- * Generates a static Mermaid `stateDiagram-v2` diagram from a pure FSM definition.
- * Renders `awaiting()` nodes with `⚡` badges and nested sub-machines as composite blocks.
+ * Generates a static Mermaid `stateDiagram-v2` diagram from a pure {@link FSMDefinition} or
+ * `createMachineFeature` definition.
+ *
+ * @group Analysis & Visualization
+ * @param fsmOrFeature - Compiled FSM definition or wrapper `{ fsm }` object.
+ * @returns A Mermaid `stateDiagram-v2` string ready to paste into Markdown or render via Mermaid.
+ *
+ * @remarks
+ * Renders `awaiting()` states with `⚡` badges, parallel combinators (`each`, `all`, `race`, `any`)
+ * with `⇉` badges, and nested sub-machines as composite blocks.
+ *
+ * @example
+ * ```ts
+ * import { createFSM, toMermaid } from '@matrix-fsm/core';
+ *
+ * const toggleFSM = createFSM<{ events: { TOGGLE: void }; states: 'off' | 'on' }>()({
+ *   id: 'toggle',
+ *   initial: 'off',
+ *   transitions: [
+ *     ['off', 'TOGGLE', 'on'],
+ *     ['on',  'TOGGLE', 'off'],
+ *   ],
+ * });
+ *
+ * const diagram = toMermaid(toggleFSM);
+ * // stateDiagram-v2
+ * //   [*] --> off
+ * //   off --> on : TOGGLE
+ * //   on --> off : TOGGLE
+ * ```
  */
 export function toMermaid(
   fsmOrFeature: AnyFSMDefinition | { readonly fsm: AnyFSMDefinition },
@@ -234,22 +262,37 @@ export function toMermaid(
   return lines.join('\n');
 }
 
+/**
+ * Single transition step inside a shortest-path sequence returned by {@link getShortestPaths}.
+ *
+ * @group Analysis & Visualization
+ */
 export interface ShortestPathStep<TVia extends string = string> {
+  /** Source state name. */
   readonly from: string;
+  /** Triggering event name or timer/always marker ID. */
   readonly via: TVia;
+  /** Target state or actor ID. */
   readonly to: string;
+  /** Whether the underlying transition row specifies a `guard`. */
   readonly hasGuard: boolean;
+  /** Present and `true` when `includeMetadata` is enabled and this edge originates from a child actor output. */
   readonly isChildOutput?: boolean;
 }
 
+/**
+ * Configuration options for {@link getShortestPaths}.
+ *
+ * @group Analysis & Visualization
+ */
 export interface GetShortestPathsOptions {
   /**
-   * When true, skips child-actor output edges (`subMachine`, `all`/`race`/`any`, `each`)
+   * When `true`, skips child-actor output edges (`subMachine`, `all`/`race`/`any`, `each`)
    * that cannot be driven directly via external `send(step.via)` calls.
    */
   readonly externalOnly?: boolean;
   /**
-   * When true, attaches optional metadata such as `isChildOutput: true` onto steps.
+   * When `true`, attaches optional metadata such as `isChildOutput: true` onto steps.
    */
   readonly includeMetadata?: boolean;
 }
@@ -267,6 +310,31 @@ type ShortestPathViaFor<T> = [AllowedSendEvents<UnwrapMachineDef<T>>] extends [n
 /**
  * Computes the deterministic shortest sequence of transitions from `fsm.initial`
  * to every reachable state in the transition matrix using Breadth-First Search (BFS).
+ *
+ * @group Analysis & Visualization
+ * @param fsmOrFeature - Compiled FSM definition or `{ fsm }` wrapper.
+ * @param pathOptions - Optional filtering and metadata flags.
+ * @returns Map of reachable state names to their shortest step arrays.
+ *
+ * @example
+ * ```ts
+ * import { createFSM, getShortestPaths } from '@matrix-fsm/core';
+ *
+ * const wizardFSM = createFSM<{
+ *   events: { NEXT: void; FINISH: void };
+ *   states: 'step1' | 'step2' | 'done';
+ * }>()({
+ *   id: 'wizard',
+ *   initial: 'step1',
+ *   transitions: [
+ *     ['step1', 'NEXT',   'step2'],
+ *     ['step2', 'FINISH', 'done'],
+ *   ],
+ * });
+ *
+ * const paths = getShortestPaths(wizardFSM);
+ * // paths.done -> [{ from: 'step1', via: 'NEXT', to: 'step2', hasGuard: false }, ...]
+ * ```
  */
 export function getShortestPaths<
   TFSM extends AnyFSMDefinition | { readonly fsm: AnyFSMDefinition },

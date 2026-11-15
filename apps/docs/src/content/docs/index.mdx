@@ -1,0 +1,54 @@
+---
+title: "@matrix-fsm"
+description: Flat 2D Matrix Finite State Machines for TypeScript, Angular SignalStore, and Effect-TS.
+template: splash
+hero:
+  tagline: Type-safe, zero-JSON-hell 2D Matrix Finite State Machines backed by compile-time graph validation and 14 canonical AST/graph ESLint rules.
+  actions:
+    - text: Getting Started
+      link: /matrix-fsm/guides/getting-started/
+      icon: right-arrow
+    - text: Best Practices & Agent Rules
+      link: /matrix-fsm/guides/best-practices/
+      variant: secondary
+    - text: llms-full.txt (AI Agents)
+      link: /matrix-fsm/llms-full.txt
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Why 2D Matrix State Machines?
+
+Instead of deeply nested JSON statecharts, every `@matrix-fsm` machine is a **visual, column-aligned 2D transition table**:
+
+```ts
+/* FROM                 VIA               TO                            OPTIONS */
+['customerBrowsing',    'SELECT_DRINK',   stay(),                       { call: (m) => m._selectDrink }],
+['customerBrowsing',    'PLACE_ORDER',    awaiting('checkingLoyalty'),  { guard: hasSelectedDrink, call: (m) => m._checkLoyalty }],
+['customerBrowsing',    'PLACE_ORDER',    stay(),                       { call: (m) => m._setMissingDrinkError }],
+```
+
+<CardGrid>
+  <Card title="Zero-JSON-Hell 2D DSL" icon="approve-check-circle">
+    Read and review entire state machines top-to-bottom like a truth table. Guarded rows use deterministic **First-Match-Wins** semantics.
+  </Card>
+  <Card title="Compile-Time Graph & Type Safety" icon="seti:typescript">
+    Pure TypeScript `FSMContract` interfaces infer events, payloads, outputs, context, and nested actor states with zero dummy runtime objects.
+  </Card>
+  <Card title="Angular SignalStore & Effect-TS" icon="rocket">
+    Mount machines with `withStateMachine` & `createMachineFeature` (`Promise`, `AbortSignal`, RxJS, `ResourceRef`) or use `@matrix-fsm/angular/effect` for Effect fibers.
+  </Card>
+  <Card title="14 AST/Graph ESLint Rules + llms-full.txt" icon="setting">
+    Auto-align 2D columns with `eslint --fix`, catch unreachable states statically, and pass `/matrix-fsm/llms-full.txt` directly to AI coding agents.
+  </Card>
+</CardGrid>
+
+## Packages
+
+| Package | Purpose | API Reference |
+| :--- | :--- | :--- |
+| **`@matrix-fsm/core`** | Pure TypeScript (`0%` Angular) 4-column tuple DSL, FIFO Run-to-Completion runner (`createMachineInstance`), `toMermaid`, `getShortestPaths`, and compile-time extractors. | [Core API](/matrix-fsm/api/core/) |
+| **`@matrix-fsm/angular`** | First-class `@ngrx/signals` integration (`createMachineFeature`, `withStateMachine`, `provideStateMachine`, `createFeatureTester`) with `Promise` + `AbortSignal`, RxJS `Observable`, and `ResourceRef`. | [Angular API](/matrix-fsm/api/angular/) |
+| **`@matrix-fsm/angular/effect`** | Optional Effect-TS entrypoint (`createEffectMachineFeature`, `createEffectExecutorAdapter`, `runEffect`) with fiber interruption and `Data.TaggedError` (`_tag`) routing. | [Effect-TS API](/matrix-fsm/api/angular-effect/) |
+| **`@matrix-fsm/eslint-plugin`** | 14 canonical static AST & graph-conservation ESLint rules (`configs.recommended`) including `--fix` auto-alignment for 2D transition tables. | [ESLint Plugin API](/matrix-fsm/api/eslint-plugin/) |

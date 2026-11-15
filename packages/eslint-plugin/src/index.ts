@@ -14,6 +14,12 @@ import { requireFallbackTransition } from './lib/rules/require-fallback-transiti
 import { validAnyStateTarget } from './lib/rules/valid-any-state-target.js';
 import { validTimerTransitions } from './lib/rules/valid-timer-transitions.js';
 
+/**
+ * Dictionary of all 14 canonical `@matrix-fsm/eslint-plugin` rules plus the deprecated
+ * `no-shadowed-transitions` alias.
+ *
+ * @group Plugin & Configs
+ */
 export const rules = {
   'align-matrix-columns': alignMatrixColumns,
   'group-contiguous-transitions': groupContiguousTransitions,
@@ -32,6 +38,20 @@ export const rules = {
   'valid-timer-transitions': validTimerTransitions,
 };
 
+/**
+ * ESLint 9+ flat plugin object containing `meta`, `rules`, and `configs.recommended`.
+ *
+ * @group Plugin & Configs
+ * @example
+ * ```js
+ * // eslint.config.mjs
+ * import matrixFsm from '@matrix-fsm/eslint-plugin';
+ *
+ * export default [
+ *   matrixFsm.configs.recommended,
+ * ];
+ * ```
+ */
 export const plugin: {
   meta: { name: string; version: string };
   rules: typeof rules;
@@ -50,6 +70,14 @@ export const plugin: {
   configs: null as any,
 };
 
+/**
+ * Preconfigured ESLint flat-config presets for `@matrix-fsm`.
+ *
+ * @group Plugin & Configs
+ * @remarks
+ * `configs.recommended` enables all 14 canonical static AST and graph-conservation rules at `'error'`
+ * severity for TypeScript files (`.ts`, `.tsx`, `.mts`, and `.cts`).
+ */
 export const configs = {
   recommended: {
     files: ['**/*.ts', '**/*.tsx', '**/*.mts', '**/*.cts'],
@@ -80,19 +108,34 @@ plugin.configs = configs;
 export default plugin;
 
 export {
+  /** Enforces single-line `[FROM, VIA, TO]` and vertical column alignment across the matrix (`--fix`). @group Rules */
   alignMatrixColumns,
+  /** Enforces `-ing` suffix naming for every `awaiting('...ing')` state. @group Rules */
   awaitingNamingConvention,
+  /** Ensures extracted `transitions([...])` groups have > 3 rows and do not split `[FROM, VIA]` groups. @group Rules */
   completeExtractedGroups,
+  /** Enforces contiguous grouping of identical `[FROM, VIA]` rows and expands array shorthands (`--fix`). @group Rules */
   groupContiguousTransitions,
+  /** Forbids combining named `finalState('NAME')` with `options.output` or `stay()` on terminal child outputs. @group Rules */
   noConflictingFinalOutput,
+  /** Forbids duplicate actor references inside `all()`, `race()`, or `any()` without `subMachine(fsm, 'alias')`. @group Rules */
   noDuplicateCombinatorActors,
+  /** @deprecated Use {@link noUnreachableTransitions} (`@matrix-fsm/no-unreachable-transitions`) instead. @group Rules */
   noShadowedTransitions,
+  /** Ensures every state or actor in Column 1 (`FROM`) is `initial` or reachable via Column 3 (`TO`). @group Rules */
   noUnreachableStates,
+  /** Forbids unreachable rows placed after an unguarded row with the same `[FROM, VIA]` or unguarded `anyState()`. @group Rules */
   noUnreachableTransitions,
+  /** Forbids Angular/service imports or `inject()` inside `*.machine.ts` / `transitions` arrays and enforces `(m) => m._method`. @group Rules */
   pureMachineDefinition,
+  /** Ensures every `awaiting()` state specifies `{ call }` and handles both `'DONE'`/`outcome()` and `'ERROR'`. @group Rules */
   requireAwaitingHandlers,
+  /** Ensures every active target (`awaiting`, sub-machine, combinator) in `TO` has at least one non-`stay()` exit in `FROM`. @group Rules */
   requireExitForTargets,
+  /** Requires every guarded `[FROM, VIA]` group to terminate with an unguarded fallback row. @group Rules */
   requireFallbackTransition,
+  /** Restricts `anyState()` targets to `stay()`, `finalState()`, `initial`, or `VIA === 'ERROR'`. @group Rules */
   validAnyStateTarget,
+  /** Enforces that `after(ms)` leaves the state and `every(ms)` targets `stay()`. @group Rules */
   validTimerTransitions,
 };

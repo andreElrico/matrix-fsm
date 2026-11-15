@@ -28,114 +28,237 @@ import type {
   TransitionCallSelector,
 } from './types.js';
 
+/**
+ * Serialized progress state of an active combinator (`all`, `race`, `any`, or `each`)
+ * captured inside a {@link MachineSnapshot}.
+ *
+ * @group Runner & Inspection
+ */
 export interface CombinatorSnapshotProgress {
+  /** Zero-based indices of child actors that completed successfully. */
   readonly settledIndices: readonly number[];
+  /** Map of actor IDs/aliases to their terminal payloads. */
   readonly completedOutputs: Readonly<Record<string, unknown>>;
+  /** Ordered terminal payloads matching child index order. */
   readonly orderedOutputs: readonly unknown[];
+  /** Zero-based indices of child actors that terminated with an error. */
   readonly failedIndices: readonly number[];
+  /** Captured error values for failed child actors. */
   readonly failedErrors: readonly unknown[];
 }
 
+/**
+ * Serializable snapshot of a running {@link MachineInstance} and its active child hierarchy,
+ * produced by `getSnapshot()` and restored via `restoreSnapshot()`.
+ *
+ * @group Runner & Inspection
+ */
 export interface MachineSnapshot<TFSM extends AnyFSMDefinition = AnyFSMDefinition> {
+  /** Current active state name. */
   readonly state: ExtractStates<TFSM>;
+  /** Shallow-cloned context snapshot. */
   readonly context: Readonly<ExtractContext<TFSM>>;
+  /** Monotonic transition counter incremented on non-`stay()` state changes. */
   readonly stateEpoch: number;
+  /** Terminal outcome name if the machine reached `finalState()`. */
   readonly doneOutcome?: string | null;
+  /** Terminal output payload captured at `finalState()`. */
   readonly finalPayload?: unknown;
+  /** Whether the terminal transition carried an explicit output selector. */
   readonly hasFinalPayloadSelector?: boolean;
+  /** Recursive snapshots of active child actors keyed by actor ID or `each` item ID. */
   readonly children?: Readonly<Record<string, MachineSnapshot<any>>>;
+  /** Progress metadata for active `all`, `race`, `any`, or `each` combinators. */
   readonly combinatorProgress?: CombinatorSnapshotProgress;
 }
 
+/**
+ * Live status entry for a child machine spawned inside `each()`, `all()`, `race()`, or `any()`.
+ *
+ * @group Runner & Inspection
+ */
 export interface ChildMachineEntry<TContext = Record<string, unknown>> {
+  /** Item or actor identifier within the pool/combinator. */
   readonly id: string;
+  /** Current active state of the child actor. */
   readonly state: string;
+  /** Nested sub-state if the child itself delegates to a sub-machine. */
   readonly subState?: string | null;
+  /** Current read-only context of the child actor. */
   readonly context: Readonly<TContext>;
+  /** `true` while the child actor is in an `awaiting()` state. */
   readonly isPending: boolean;
+  /** `true` once the child actor reaches `finalState()`. */
   readonly isDone: boolean;
+  /** Terminal outcome name or `null` while running. */
   readonly finalOutcome: string | null;
 }
 
+/**
+ * Telemetry payload emitted to {@link InspectCallback} whenever a transition executes.
+ *
+ * @group Runner & Inspection
+ */
 export interface InspectEvent<TFSM extends AnyFSMDefinition = AnyFSMDefinition> {
+  /** Machine identifier (`fsm.id`). */
   readonly machineId: string;
+  /** Source state name before the transition. */
   readonly from: string;
+  /** Event name or timer/always marker ID that triggered the transition. */
   readonly via: string;
+  /** Target state or actor ID after the transition. */
   readonly to: string;
+  /** Event payload passed to `send()` or resolved from async completion. */
   readonly payload: unknown;
+  /** Context snapshot immediately after the transition's synchronous `call`. */
   readonly nextContext: Readonly<ExtractContext<TFSM>>;
+  /** Epoch timestamp in milliseconds (`Date.now()`). */
   readonly timestamp: number;
 }
 
+/**
+ * Callback invoked on every executed transition for debugging, tracing, or devtools integration.
+ *
+ * @group Runner & Inspection
+ */
 export type InspectCallback<TFSM extends AnyFSMDefinition = AnyFSMDefinition> = (
   event: InspectEvent<TFSM>,
 ) => void;
 
+/**
+ * Lifecycle callbacks passed by the runner to a {@link CustomTaskAdapter}.
+ *
+ * @group Runner & Inspection
+ */
 export interface TaskExecutionCallbacks {
+  /** Invoke with the resolved value when the custom task succeeds. */
   readonly onSuccess: (output: unknown) => void;
+  /** Invoke with the error/cause when the custom task fails. */
   readonly onFailure: (error: unknown) => void;
+  /** Returns `true` if the `awaiting()` state was already exited or aborted. */
   readonly isCancelled: () => boolean;
+  /** `AbortSignal` aborted automatically when leaving the `awaiting()` state. */
   readonly signal: AbortSignal;
 }
 
 /**
- * Pluggable async task execution adapter (e.g., Effect-TS Fibers, custom streams).
+ * Pluggable async task execution adapter (for example, Effect-TS Fibers or custom streams)
+ * registered via {@link MachineInstanceHooks.taskAdapter}.
+ *
+ * @group Runner & Inspection
  */
 export interface CustomTaskAdapter {
+  /** Optional predicate determining whether this adapter handles `result`. */
   canHandle?(result: unknown): boolean;
+  /** Executes `result`, forwarding completion via `callbacks` and optionally returning a cleanup teardown function. */
   execute(
     result: unknown,
     callbacks: TaskExecutionCallbacks,
   ): (() => void) | void;
 }
 
+/**
+ * Observer object accepted by `MachineInstance.subscribe()`.
+ *
+ * @group Runner & Inspection
+ */
 export interface MachineObserver<TFSM extends AnyFSMDefinition = AnyFSMDefinition> {
+  /** Invoked synchronously with the initial snapshot and after every state/context update. */
   readonly next?: (snapshot: MachineSnapshot<TFSM>) => void;
+  /** Invoked if an unhandled error occurs outside transition routing. */
   readonly error?: (err: unknown) => void;
+  /** Invoked when the machine reaches `finalState()` or is destroyed. */
   readonly complete?: () => void;
 }
 
+/**
+ * Listener function or {@link MachineObserver} accepted by `MachineInstance.subscribe()`.
+ *
+ * @group Runner & Inspection
+ */
 export type SnapshotListener<TFSM extends AnyFSMDefinition = AnyFSMDefinition> =
   | ((snapshot: MachineSnapshot<TFSM>) => void)
   | MachineObserver<TFSM>;
 
+/**
+ * Callable teardown handle returned by `MachineInstance.subscribe()`, compatible with both
+ * callback cleanup (`unsubscribe()`) and RxJS-style `{ unsubscribe() }` interfaces.
+ *
+ * @group Runner & Inspection
+ */
 export type MachineSubscription = (() => void) & {
   unsubscribe(): void;
 };
 
+/**
+ * Standalone, framework-agnostic FIFO Run-to-Completion machine instance created by
+ * {@link createMachineInstance}.
+ *
+ * @group Runner & Inspection
+ */
 export interface MachineInstance<TFSM extends AnyFSMDefinition = AnyFSMDefinition> {
+  /** Machine identifier (`fsm.id`). */
   readonly id: string;
+  /** Returns the current active state name. */
   readonly state: () => ExtractStates<TFSM>;
+  /** Alias for {@link MachineInstance.state}. */
   readonly getState: () => ExtractStates<TFSM>;
+  /** Current monotonic state transition epoch. */
   readonly epoch: number;
+  /** Returns the current monotonic state transition epoch (`stateEpoch`). */
   readonly stateEpoch: () => number;
+  /** Active child state name if currently inside a sub-machine, otherwise `null`. */
   readonly subState: () => string | null;
+  /** Active child context if currently inside a sub-machine, otherwise `null`. */
   readonly subContext: () => Readonly<Record<string, unknown>> | null;
+  /** Returns the current read-only machine context. */
   readonly context: () => Readonly<ExtractContext<TFSM>>;
+  /** Returns `true` when the machine (or an active child actor) is in an `awaiting()` state. */
   readonly isPending: () => boolean;
+  /** Returns `true` once the machine has reached `finalState()`. */
   readonly isDone: () => boolean;
+  /** Terminal outcome name once `isDone()` is `true`, otherwise `null`. */
   readonly finalOutcome: () => string | null;
+  /** Terminal output payload captured at `finalState()`, or `undefined`. */
   readonly finalPayload: () => unknown;
+  /** @internal */
   readonly hasFinalPayloadSelector?: () => boolean;
+  /** @internal */
   readonly hasActiveTransition?: (event: string) => boolean;
+  /** Returns live snapshots of active child pools keyed by `each()` key or combinator ID. */
   readonly childMachines: () => Readonly<
     Record<string, ReadonlyArray<ChildMachineEntry>>
   >;
+  /** Purely checks whether `event` (with optional `payload`) would trigger a transition right now. */
   readonly can: CanFn<TFSM, BuiltInLifecycleEvent>;
+  /** Enqueues a strongly-typed event into the Run-to-Completion FIFO event queue. */
   readonly send: SendFn<TFSM, BuiltInLifecycleEvent>;
+  /** Dispatches an event directly to a specific child instance inside an active `each()` pool. */
   readonly sendToChild: SendToChildFn<TFSM, BuiltInLifecycleEvent>;
+  /** Partially updates context and re-evaluates dynamic `every()` timers and `always()` edges. */
   readonly patchContext: (patch: Partial<ExtractContext<TFSM>>) => void;
+  /** Subscribes to live {@link MachineSnapshot} updates (immediately emits current snapshot). */
   readonly subscribe: (listener: SnapshotListener<TFSM>) => MachineSubscription;
+  /** Captures a serializable {@link MachineSnapshot} of the full machine hierarchy. */
   readonly getSnapshot: () => MachineSnapshot<TFSM>;
+  /** Restores state, context, and child actors from a {@link MachineSnapshot} and re-arms timers. */
   readonly restoreSnapshot: (snapshot: MachineSnapshot<TFSM>) => void;
+  /** Aborts active tasks/timers and resets the machine back to `initial` with initial context. */
   readonly reset: (initialOverride?: Partial<ExtractContext<TFSM>>) => void;
+  /** Disposes all active timers, tasks, and child actors. */
   readonly destroy: () => void;
 }
 
+/**
+ * Debug logging option (`true` for `console.debug` or a custom log formatter).
+ *
+ * @group Runner & Inspection
+ */
 export type DebugLogger =
   | boolean
   | ((message: string, details?: unknown) => void);
 
+/** @internal */
 export function resolveDebugLogger(
   debug?: DebugLogger,
 ): ((message: string, details?: unknown) => void) | null {
@@ -154,62 +277,90 @@ export function resolveDebugLogger(
   return null;
 }
 
+/**
+ * Metadata emitted to {@link MachineInstanceHooks.onStateChange} after each transition.
+ *
+ * @group Runner & Inspection
+ */
 export interface MachineStateChangeInfo {
-  stayed: boolean;
-  isPending: boolean;
-  isDone: boolean;
-  finalOutcome: string | null;
-  finalPayload?: unknown;
-  hasFinalPayloadSelector?: boolean;
-  emittedOutput?: { readonly type: string; readonly payload: unknown } | null;
-  enteredSubMachine: SubMachineRef<any, any> | null;
-  exitedSubMachine: SubMachineRef<any, any> | null;
+  /** `true` if the transition targeted `stay()`. */
+  readonly stayed: boolean;
+  /** `true` if the resulting state is an `awaiting()` state or active child is pending. */
+  readonly isPending: boolean;
+  /** `true` if the machine reached `finalState()`. */
+  readonly isDone: boolean;
+  /** Terminal outcome name if `isDone` is `true`, otherwise `null`. */
+  readonly finalOutcome: string | null;
+  /** Terminal payload if emitted at `finalState()`. */
+  readonly finalPayload?: unknown;
+  /** @internal */
+  readonly hasFinalPayloadSelector?: boolean;
+  /** Intermediate or terminal `{ type, payload }` emitted via `options.output`. */
+  readonly emittedOutput?: { readonly type: string; readonly payload: unknown } | null;
+  /** Sub-machine reference entered by this transition, or `null`. */
+  readonly enteredSubMachine: SubMachineRef<any, any> | null;
+  /** Sub-machine reference exited by this transition, or `null`. */
+  readonly exitedSubMachine: SubMachineRef<any, any> | null;
 }
 
+/**
+ * Lifecycle, method, context, and adapter hooks accepted by {@link createMachineInstance}.
+ *
+ * @group Runner & Inspection
+ */
 export interface MachineInstanceHooks<TFSM extends AnyFSMDefinition> {
+  /** Optional partial context merged over `fsm.context` at startup and on `reset()`. */
   readonly initialContext?: Partial<ExtractContext<TFSM>>;
+  /** Alias for `initialContext` merged before `initialContext`. */
   readonly context?: Partial<ExtractContext<TFSM>>;
+  /** Enables structured transition logs (`true` or custom logger callback). */
   readonly debug?: DebugLogger;
+  /** Transition telemetry callback invoked on every matched transition. */
   readonly inspect?: InspectCallback<TFSM>;
   /**
-   * Optional method map or store reference used to resolve `{ call: (m) => m.methodName }`
-   * during transitions.
+   * Method map or store reference used to resolve `{ call: (m) => m._methodName }`
+   * during synchronous and `awaiting()` transitions.
    */
   readonly methods?: Partial<ExtractMethods<TFSM>> &
     Record<string, (...args: any[]) => any>;
   /**
-   * Optional dynamic context provider (e.g., SignalStore's live state getter).
+   * Dynamic context provider (used by SignalStore integration to read live signal state).
    */
   readonly getContext?: () => ExtractContext<TFSM>;
   /**
-   * Optional pluggable async task runner adapter.
+   * Pluggable async task runner adapter (e.g., for Effect-TS fibers).
    */
   readonly taskAdapter?: CustomTaskAdapter;
   /**
-   * Optional callback invoked with a settlement promise whenever an async awaiting task starts.
+   * Callback invoked with a settlement promise whenever an async `awaiting()` task starts.
    */
   readonly onTaskTrack?: (promise: Promise<unknown>) => void;
   /**
-   * Optional callback invoked when an awaiting() task rejects and no local ERROR transition matches.
+   * Fallback callback invoked when an `awaiting()` task rejects and no `'ERROR'` transition matches.
    */
   readonly onError?: (error: unknown, state: string) => void;
   /**
+   * @internal
    * Internal flag used during snapshot restoration so initial timers/tasks/always() do not fire prematurely.
    */
   readonly skipInitialEffects?: boolean;
+  /** Callback invoked after every matched transition with updated state, context, and metadata. */
   readonly onStateChange?: (
     state: ExtractStates<TFSM>,
     context: Readonly<ExtractContext<TFSM>>,
     info: MachineStateChangeInfo,
   ) => void;
+  /** State entry hooks keyed by state name. */
   readonly onEnter?: Partial<
     Record<string, (ctx: Readonly<ExtractContext<TFSM>>) => void>
   >;
+  /** State exit hooks keyed by state name. */
   readonly onExit?: Partial<
     Record<string, (ctx: Readonly<ExtractContext<TFSM>>) => void>
   >;
 }
 
+/** @internal */
 export function invokeCallSelector<TContext>(
   callSelector: TransitionCallSelector<any, any, TContext> | null,
   methodsTarget: Record<string, any> | undefined,
@@ -228,6 +379,7 @@ export function invokeCallSelector<TContext>(
   }
 }
 
+/** @internal */
 export function extractEachItemId(
   item: unknown,
   index: number,
@@ -253,7 +405,47 @@ export function extractEachItemId(
 }
 
 /**
- * Creates a standalone, framework-agnostic state machine instance from a pure `FSMDefinition`.
+ * Creates a standalone, framework-agnostic FIFO Run-to-Completion {@link MachineInstance}
+ * from a pure {@link FSMDefinition} (`0%` Angular required).
+ *
+ * @group Runner & Inspection
+ * @param fsm - Pure FSM definition created by {@link createFSM}.
+ * @param hooks - Optional methods, initial context overrides, lifecycle hooks, and task adapters.
+ * @returns A running {@link MachineInstance} ready to receive events via `send()`.
+ *
+ * @remarks
+ * Ideal for Node.js scripts, backend workflows, CLI tools, or framework-independent domain services.
+ * Guarantees Run-to-Completion FIFO queuing: re-entrant `send()` calls inside `call` or `onEnter`
+ * are queued and processed strictly in order rather than mutating mid-transition.
+ *
+ * @example
+ * ```ts
+ * import { awaiting, createFSM, createMachineInstance, finalState } from '@matrix-fsm/core';
+ *
+ * const uploadFSM = createFSM<{
+ *   events: { START: { fileName: string } };
+ *   states: 'idle' | 'uploading' | 'failed';
+ *   methods: { _upload: (p: { fileName: string }, signal: AbortSignal) => Promise<string> };
+ * }>()({
+ *   id: 'upload',
+ *   initial: 'idle',
+ *   transitions: [
+ *     ['idle',      'START', awaiting('uploading'), { call: (m) => m._upload }],
+ *     ['uploading', 'DONE',  finalState()],
+ *     ['uploading', 'ERROR', 'failed'],
+ *   ],
+ * });
+ *
+ * const instance = createMachineInstance(uploadFSM, {
+ *   methods: {
+ *     _upload: async ({ fileName }) => `https://cdn.example.com/${fileName}`,
+ *   },
+ * });
+ *
+ * const sub = instance.subscribe((snap) => console.log(snap.state));
+ * instance.send('START', { fileName: 'menu.pdf' });
+ * sub.unsubscribe();
+ * ```
  */
 export function createMachineInstance<TFSM extends AnyFSMDefinition>(
   fsm: TFSM,

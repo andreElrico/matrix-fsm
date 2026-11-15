@@ -1,0 +1,104 @@
+---
+title: Best Practices & Agent Rules
+description: Authoritative design, formatting, and architecture rules for @matrix-fsm machines, SignalStores, and AI coding agents.
+---
+
+This guide defines the canonical design, formatting, and architecture conventions for all state machines (`*.machine.ts`, `*.feature.ts`), domain contracts (`*.domain.ts`), and stores (`*.store.ts`) in `@matrix-fsm`. Every developer and AI coding agent should follow these rules when authoring or refactoring machines.
+
+:::tip[Single-File Agent Context]
+Pass [`/matrix-fsm/llms-full.txt`](/matrix-fsm/llms-full.txt) to AI coding assistants so they receive these rules alongside the complete API reference in one fetch.
+:::
+
+---
+
+## 1. Zero JSON Dummy Objects & Named `FSMContract`
+
+1. **No Dummy Objects (`events: {} as ...` or `context: { ... }` placeholders)**:
+   Define `inputs`, `events`, `outputs`, `states`, `context`, and `methods` as pure TypeScript types and pass them via the **curried** signature `createFSM<TContract>()({ ... })` or `createMachineFeature<TContract>()({ ... })`.
+2. **Interface Segregation Principle (ISP)**:
+   Each machine declares only the contract facets it directly needs.
+3. **Unified `createFSM` & Decoupled Sub-Machines**:
+   Sub-machines (`barista.feature.ts`, `barista.domain.ts`) must **never** import types from parent machines (`coffee-shop.*`). Parent machines compose children directly in Column 1 (`FROM`), Column 3 (`TO`), or `each()` / `all()` / `race()` / `any()`.
+
+```ts
+export const baristaFSM = createFSM<{
+  events: BaristaEvents;
+  states: BaristaStates;
+  context: BaristaContext;
+  methods: BaristaMethods;
+}>()({
+  id: 'barista',
+  initial: 'ticketQueued',
+  // prettier-ignore
+  transitions: [
+    /* FROM                 VIA               TO                            OPTIONS */
+    ['ticketQueued',        'START_BREWING',  awaiting('brewingCoffee'),    { call: (m) => m._brewCoffee }],
+    ['brewingCoffee',       'DONE',           finalState('COFFEE_READY')],
+    ['brewingCoffee',       'ERROR',          'machineMaintenance',         { call: (m) => m._setBrewError }],
+    ['machineMaintenance',  'RETRY_BREW',     awaiting('brewingCoffee'),    { call: (m) => m._brewCoffee }],
+  ],
+});
+```
+
+---
+
+## 2. First-Class `SignalStore` Alignment (`withState`, `withMethods`, `call`)
+
+1. **Single Source of Truth for State**:
+   Do not duplicate initial state in both `*.machine.ts` and Angular stores. Either encapsulate `state` inside `createMachineFeature`, or provide it via `withState<MyContext>(initial)` / `withStateMachine(fsm, { state, methods })`.
+2. **Private `_method` References via `{ call: (m) => m._methodName }`**:
+   - Define store mutations in `methods` using leading underscores (`_selectDrink`, `_markPaid`). `@ngrx/signals` keeps `_`-prefixed methods private externally while `withStateMachine` enforces them at compile time across the machine hierarchy.
+   - **Forbidden Anti-Pattern**: Never invoke multiple methods inside one selector (`{ call: (m) => { m._a(); m._b(); } }`) and never hide HTTP/async side effects on normal/sync transitions. Async side effects belong exclusively on transitions entering `awaiting('...ing')`.
+
+---
+
+## 3. Decoupled Task Runners (`Promise`, RxJS, Optional Effect-TS)
+
+- **`@matrix-fsm/angular` (`0%` Effect-TS dependency)**:
+  Supports native `Promise` (with `AbortSignal`), RxJS `Observable` (auto-unsubscribed on exit), Angular `ResourceRef`, and `Error.name` / `_tag` routing in Column 2 (`VIA`).
+- **`@matrix-fsm/angular/effect` (Optional Secondary Entrypoint)**:
+  Provides `createEffectMachineFeature`, `createEffectExecutorAdapter`, and `runEffect` for teams using Effect-TS fibers and `Data.TaggedError`.
+
+---
+
+## 4. Mandatory 2D Matrix Column Alignment
+
+The defining trait of `@matrix-fsm` is the **visual 2D transition table** — never a vertically wrapped list of arrays:
+
+1. **Columns 1–3 (`FROM`, `VIA`, `TO`) MUST stay on a single line** and align vertically across the entire `transitions` array.
+2. **Column 4 (`OPTIONS`: `{ guard, call, input, output }`)** stays aligned on the same line for concise `{ call: (m) => m._... }` rows, or wraps cleanly onto the line directly below when multi-option blocks are needed.
+3. **Formatter Protection**:
+   - Ignore `**/*.machine.ts` in `.prettierignore` and place `// prettier-ignore` + `/* FROM  VIA  TO  OPTIONS */` above `transitions: [`.
+   - Run `eslint --fix` with `@matrix-fsm/align-matrix-columns` to align columns automatically.
+
+---
+
+## 5. When to Extract `transitions<...>([...])` (`> 3` Rows Rule)
+
+- **Minimum Threshold (`minRows: 4`)**: Extract a `[FROM, VIA]` group into `const myRows = transitions<TContract>()([...])` **only** when it contains **more than 3 rows** (at least 4 branches).
+- Groups of 2 or 3 rows (for example, a single `guard` + `stay()` fallback) **must remain inline** in the main matrix (`@matrix-fsm/complete-extracted-groups`).
+- Never split one `[FROM, VIA]` group across extracted variables and inline rows.
+
+---
+
+## 6. Sandwich Pattern, Unified Tuple Outputs & Modern Primitives
+
+1. **Sandwich Pattern (`createMachineFeature`)**:
+   Co-locate public contract (`inputs`, `events`, `outputs`, `states`), pure transition matrix (`0%` DI), and encapsulated runtime (`state`, `syncContext`, `methods`, `onEnter`, `onExit`) in one unit — usable both as a root store feature and as an isolated sub-actor (`store.actors.<id>()`).
+2. **Unified Tuple Outputs (`finalState()` + `{ output: ['EVENT', selector] }`)**:
+   Use `{ output: ['COFFEE_READY', (ctx, ev) => payload] }` (or `'HEARTBEAT'` for `void` outputs) for both intermediate (`stay()`/state) and terminal (`finalState()`) emissions. Never combine named `finalState('NAME')` with `options.output` (`@matrix-fsm/no-conflicting-final-output`).
+3. **Global Events (`anyState()`) & Declarative Timers (`after(ms)`, `every(ms)`)**:
+   - `anyState()` handles global fallbacks (`stay()`, `finalState()`, `initial` reset, or `VIA === 'ERROR'`).
+   - `after(ms)` must leave the state; `every(ms)` must target `stay()`. Both clean up deterministically on state exit.
+4. **Actor Combinators & Reactive `syncContext`**:
+   - Use `subMachine(fsm, 'alias')` to mount multiple isolated instances of the same child machine.
+   - Use `all()`, `race()`, `any()`, and `each()` for parallel actor orchestration.
+   - Use `syncContext: () => ({ prop: externalSignal })` for one-way reactive signal mirroring.
+5. **Fast Unit Tests Without `TestBed` (`createFeatureTester`)**:
+   Test `createMachineFeature` definitions in pure Vitest in `< 5ms` with `tester.flushTasks()`, `tester.emittedOutputs()`, and `tester.finalPayload()`.
+
+---
+
+## 7. Static Verification Checklist (14 Canonical ESLint Rules)
+
+Always enable `matrixFsm.configs.recommended` from `@matrix-fsm/eslint-plugin`. See the [ESLint Rules Reference](/matrix-fsm/guides/eslint-rules/) for Good/Bad examples of all 14 rules.

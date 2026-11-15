@@ -1,0 +1,183 @@
+---
+title: Angular SignalStore & Testing
+description: Integrate @matrix-fsm/angular with NgRx SignalStore using the Sandwich Pattern, reactive syncContext, DI overrides, and <5ms TestBed-free unit tests.
+---
+
+## The Sandwich Pattern (`createMachineFeature`)
+
+`createMachineFeature` co-locates all three layers of a reactive state machine in a single cohesive definition:
+
+1. **Top — Public Contract**: Pure TypeScript `inputs`, `events`, `outputs`, and `states`.
+2. **Middle — Pure 2D Transition Matrix**: `id`, `initial`, `transitions` (`0%` Angular DI inside `transitions`!).
+3. **Bottom — Encapsulated Runtime**: Private `state`, `syncContext`, `methods` (with `inject()`), `onEnter`, and `onExit`.
+
+```ts
+// barista.feature.ts
+import { inject } from '@angular/core';
+import { patchState } from '@ngrx/signals';
+import { awaiting, createMachineFeature, finalState } from '@matrix-fsm/angular';
+import { CoffeeShopApiService } from './coffee-shop-api.service';
+
+export interface CoffeeDrink {
+  readonly id: string;
+  readonly name: string;
+  readonly price: number;
+}
+
+export interface BrewResult {
+  readonly baristaNote: string;
+  readonly temperatureCelsius: number;
+}
+
+export const baristaFSM = createMachineFeature<{
+  inputs: { selectedDrink: CoffeeDrink };
+  events: { START_BREWING: void; RETRY_BREW: void };
+  outputs: { COFFEE_READY: { drinkName: string; result: BrewResult } };
+  states: 'ticketQueued' | 'brewingCoffee' | 'maintenance';
+}>()({
+  id: 'barista',
+  initial: 'ticketQueued',
+
+  // prettier-ignore
+  transitions: [
+    /* FROM            VIA               TO                         OPTIONS */
+    ['ticketQueued',   'START_BREWING',  awaiting('brewingCoffee'), { call: (m) => m._brewCoffee }],
+    ['brewingCoffee',  'DONE',           finalState(),              {
+                                                                      call: (m) => m._saveBrewResult,
+                                                                      output: ['COFFEE_READY', (ctx, result) => ({
+                                                                        drinkName: ctx.selectedDrink.name,
+                                                                        result,
+                                                                      })],
+                                                                    }],
+    ['brewingCoffee',  'ERROR',          'maintenance',             { call: (m) => m._setBrewError }],
+    ['maintenance',    'RETRY_BREW',     awaiting('brewingCoffee'), { call: (m) => m._brewCoffee }],
+  ],
+
+  state: {
+    baristaResult: null as BrewResult | null,
+    brewError: null as string | null,
+  },
+
+  methods: (store, api = inject(CoffeeShopApiService)) => ({
+    _brewCoffee: (_payload: void, signal: AbortSignal, ctx) =>
+      api.brewCoffee(ctx.selectedDrink, signal),
+    _saveBrewResult: (baristaResult: BrewResult) =>
+      patchState(store, { baristaResult, brewError: null }),
+    _setBrewError: (err: Error) =>
+      patchState(store, { brewError: err.message }),
+  }),
+});
+```
+
+## Mounting in `SignalStore` (`withStateMachine`)
+
+Mount any `createMachineFeature` or `createFSM` onto an `@ngrx/signals` `signalStore`:
+
+```ts
+import { Injectable } from '@angular/core';
+import { signalStore } from '@ngrx/signals';
+import { withStateMachine } from '@matrix-fsm/angular';
+import { coffeeShopFSM } from './coffee-shop.machine';
+
+@Injectable()
+export class CoffeeShopStore extends signalStore(
+  withStateMachine(coffeeShopFSM),
+) {}
+```
+
+### Reactive Members Exposed on the Store
+
+| Member | Type | Description |
+| :--- | :--- | :--- |
+| `state` / `fsmState` | `Signal<States>` | Current active state name. |
+| `stateEpoch` | `Signal<number>` | Incremented on every non-`stay()` transition. |
+| `fsmContext` | `DeepSignalOf<Context>` | Deep signal of the machine's context. |
+| `actors` | `{ [idOrAlias]: Signal<ActorState \| null> }` | Live context of active 1:1 sub-machines & combinators (`null` when inactive). |
+| `childMachines` | `Signal<Record<string, readonly ChildMachineSnapshot[]>>` | Live snapshots of active `each()` pools and combinators. |
+| `isPending` | `Signal<boolean>` | `true` whenever an `awaiting()` state is active. |
+| `isDone` | `Signal<boolean>` | `true` when the machine reaches `finalState()`. |
+| `finalOutcome` / `finalPayload` | `Signal<string \| null>` / `Signal<unknown>` | Terminal outcome name and payload. |
+| `send(event, payload?)` | `SendFn` | Dispatches a strongly-typed event into the FIFO queue. |
+| `can(event, payload?)` | `CanFn` | Purely checks whether an event is currently enabled (evaluating guards). |
+| `sendToChild(key, itemId, event, payload?)` | `SendToChildFn` | Sends an event to a specific instance inside an `each()` pool. |
+| `patchContext(patch)` | `(Partial<Context>) => void` | Updates context and re-evaluates `always()` / dynamic `every()`. |
+| `getSnapshot()` / `restoreSnapshot(snap)` | Snapshot API | Serializes and restores the full machine & child actor hierarchy. |
+| `reset(override?)` / `destroy()` | Lifecycle | Aborts tasks/timers and resets or tears down (auto-wired to `DestroyRef`). |
+
+## Reactive Signal Mirroring (`syncContext`)
+
+Mirror external Angular Signals (such as global auth or filter stores) one-way into FSM context without tight coupling:
+
+```ts
+syncContext: () => ({
+  currentUserId: inject(SessionStore).userId,
+}),
+```
+
+Whenever the external signal updates, `syncContext` patches the machine context and re-evaluates `always()` edges, dynamic `every()` timers, and `each()` pools.
+
+## Async Return Types Supported Natively
+
+Inside `awaiting()` methods, `@matrix-fsm/angular` supports:
+
+- **`Promise<T>`** with automatic `AbortSignal` cancellation (`(payload, signal, ctx) => ...`)
+- **RxJS `Observable<T>`** with automatic `unsubscribe()` on state exit
+- **Angular `ResourceRef<T>`** tracking status and value reactively
+- **`CustomTaskAdapter`** (used by [`@matrix-fsm/angular/effect`](/matrix-fsm/guides/effect-ts/))
+
+## Dependency Injection Overrides (`provideStateMachine`)
+
+Override or mock any child actor cleanly in component `providers` or `TestBed` without touching parent machine code:
+
+```ts
+providers: [
+  provideStateMachine(baristaFSM, {
+    methods: {
+      _brewCoffee: async () => ({ baristaNote: 'Mocked crema', temperatureCelsius: 92 }),
+    },
+  }),
+]
+```
+
+## Sub-5ms Unit Testing Without `TestBed` (`createFeatureTester`)
+
+Test any `createMachineFeature` or `createFSM` directly in Vitest/Node with zero Angular `TestBed` overhead:
+
+```ts
+import { describe, expect, it } from 'vitest';
+import { createFeatureTester } from '@matrix-fsm/angular';
+import { baristaFSM } from './barista.feature';
+
+describe('baristaFSM', () => {
+  it('brews coffee and emits typed COFFEE_READY output', async () => {
+    const tester = createFeatureTester(baristaFSM, {
+      inputs: {
+        selectedDrink: { id: 'espresso', name: 'Double Espresso', price: 3.5 },
+      },
+      methods: {
+        _brewCoffee: async () => ({
+          baristaNote: 'Rich crema',
+          temperatureCelsius: 92,
+        }),
+      },
+    });
+
+    expect(tester.state()).toBe('ticketQueued');
+    tester.send('START_BREWING');
+    expect(tester.isPending()).toBe(true);
+
+    await tester.flushTasks();
+
+    expect(tester.isDone()).toBe(true);
+    expect(tester.emittedOutputs()).toEqual([
+      {
+        type: 'COFFEE_READY',
+        payload: {
+          drinkName: 'Double Espresso',
+          result: { baristaNote: 'Rich crema', temperatureCelsius: 92 },
+        },
+      },
+    ]);
+  });
+});
+```

@@ -1,0 +1,41 @@
+{
+  "name": "docs",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "sourceRoot": "apps/docs/src",
+  "tags": ["type:feature", "scope:docs"],
+  "implicitDependencies": [
+    "@matrix-fsm/core",
+    "@matrix-fsm/angular",
+    "@matrix-fsm/eslint-plugin"
+  ],
+  "targets": {
+    "dev": {
+      "continuous": true,
+      "executor": "nx:run-commands",
+      "dependsOn": ["^build"],
+      "options": {
+        "cwd": "apps/docs",
+        "command": "./node_modules/.bin/astro dev"
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["^build"],
+      "outputs": ["{workspaceRoot}/dist/apps/docs"],
+      "options": {
+        "cwd": "apps/docs",
+        "command": "./node_modules/.bin/astro build"
+      }
+    },
+    "preview": {
+      "continuous": true,
+      "executor": "nx:run-commands",
+      "dependsOn": ["build"],
+      "options": {
+        "cwd": "apps/docs",
+        "command": "./node_modules/.bin/astro preview"
+      }
+    }
+  }
+}

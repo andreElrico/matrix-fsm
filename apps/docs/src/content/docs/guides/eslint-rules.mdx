@@ -1,0 +1,206 @@
+---
+title: ESLint Rules Reference
+description: All 14 canonical static AST and graph-conservation rules in @matrix-fsm/eslint-plugin with Good/Bad examples and auto-fix formatting.
+---
+
+`@matrix-fsm/eslint-plugin` enforces matrix readability, purity, reachability, and graph invariants statically at lint time.
+
+## Setup (ESLint 9+ Flat Config)
+
+```js
+// eslint.config.mjs
+import matrixFsm from '@matrix-fsm/eslint-plugin';
+
+export default [
+  matrixFsm.configs.recommended,
+];
+```
+
+Run `eslint --fix` to automatically format 2D matrix columns and expand array shorthands.
+
+---
+
+## Canonical Rules Overview
+
+| # | Rule | Auto-Fix | Category |
+| :---: | :--- | :---: | :--- |
+| 1 | `align-matrix-columns` | `whitespace` | 2D Formatting |
+| 2 | `group-contiguous-transitions` | `code` | Matrix Grouping |
+| 3 | `require-fallback-transition` | — | Guard Completeness |
+| 4 | `no-unreachable-transitions` | — | Dead Code / Shadowing |
+| 5 | `require-awaiting-handlers` | — | Async Safety |
+| 6 | `awaiting-naming-convention` | — | Naming Convention |
+| 7 | `complete-extracted-groups` | — | Extraction Threshold |
+| 8 | `pure-machine-definition` | — | Purity & DI Boundary |
+| 9 | `no-conflicting-final-output` | — | Output Semantics |
+| 10 | `require-exit-for-targets` | — | Graph Conservation (`deg⁺ >= 1`) |
+| 11 | `no-unreachable-states` | — | Graph Conservation (`deg⁻ >= 1`) |
+| 12 | `no-duplicate-combinator-actors` | — | Actor Identity |
+| 13 | `valid-any-state-target` | — | Wildcard Safety |
+| 14 | `valid-timer-transitions` | — | Timer Semantics |
+
+:::note[Deprecated Alias]
+`no-shadowed-transitions` is a deprecated alias for `no-unreachable-transitions`. Migrate configs to `@matrix-fsm/no-unreachable-transitions`.
+:::
+
+---
+
+## Rule Details & Good / Bad Examples
+
+### 1. `@matrix-fsm/align-matrix-columns` (`--fix`)
+Enforces that `[FROM, VIA, TO]` sit on a single line and are vertically column-aligned across the matrix (including single-line `OPTIONS`).
+
+```ts
+// Bad
+['idle', 'SUBMIT', awaiting('submitting'), { call: (m) => m._submit }],
+['submitting', 'DONE', 'completed'],
+
+// Good (auto-aligned by eslint --fix)
+['idle',       'SUBMIT', awaiting('submitting'), { call: (m) => m._submit }],
+['submitting', 'DONE',   'completed'],
+```
+
+### 2. `@matrix-fsm/group-contiguous-transitions` (`--fix`)
+Requires identical `[FROM, VIA]` rows to appear contiguously next to each other and expands Column 1 (`FROM`) array shorthands via `--fix`.
+
+```ts
+// Bad: 'idle' + 'SUBMIT' split by another group
+['idle',    'SUBMIT', 'step2', { guard: isReady }],
+['loading', 'CANCEL', 'idle'],
+['idle',    'SUBMIT', stay()],
+
+// Good: contiguous [FROM, VIA] group
+['idle',    'SUBMIT', 'step2', { guard: isReady }],
+['idle',    'SUBMIT', stay()],
+['loading', 'CANCEL', 'idle'],
+```
+
+### 3. `@matrix-fsm/require-fallback-transition`
+Every guarded (`guard`) `[FROM, VIA]` group must end with an unguarded fallback row (e.g., `stay()` or a default target).
+
+```ts
+// Bad: guarded transition without an unguarded fallback
+['browsing', 'PLACE_ORDER', awaiting('checkingLoyalty'), { guard: hasSelectedDrink, call: (m) => m._checkLoyalty }],
+
+// Good
+['browsing', 'PLACE_ORDER', awaiting('checkingLoyalty'), { guard: hasSelectedDrink, call: (m) => m._checkLoyalty }],
+['browsing', 'PLACE_ORDER', stay(),                      { call: (m) => m._setMissingDrinkError }],
+```
+
+### 4. `@matrix-fsm/no-unreachable-transitions`
+Forbids placing any row after an unguarded row with the same `[FROM, VIA]` (or after an unguarded `[anyState(), EVENT, ...]`).
+
+```ts
+// Bad: second row can never execute because first row has no guard
+['browsing', 'PAY', 'paid'],
+['browsing', 'PAY', 'vipPaid', { guard: isVip }],
+
+// Good: guarded cases first, unguarded fallback last
+['browsing', 'PAY', 'vipPaid', { guard: isVip }],
+['browsing', 'PAY', 'paid'],
+```
+
+### 5. `@matrix-fsm/require-awaiting-handlers`
+Every `awaiting('...ing')` target must specify `{ call }` when entered and handle both `'DONE'` (or a domain `outcome()`) and `'ERROR'` exits.
+
+```ts
+// Bad: missing { call } and missing 'ERROR' transition
+['idle',    'LOAD', awaiting('loading')],
+['loading', 'DONE', 'loaded'],
+
+// Good
+['idle',    'LOAD',  awaiting('loading'), { call: (m) => m._load }],
+['loading', 'DONE',  'loaded'],
+['loading', 'ERROR', 'errorState'],
+```
+
+### 6. `@matrix-fsm/awaiting-naming-convention`
+Requires every state passed to `awaiting('...')` to end with `-ing` (e.g. `'checkingLoyalty'`, `'brewingCoffee'`).
+
+```ts
+// Bad
+awaiting('loadUser')
+
+// Good
+awaiting('loadingUser')
+```
+
+### 7. `@matrix-fsm/complete-extracted-groups`
+Prevents splitting a `[FROM, VIA]` group across `transitions([...])` and requires **more than 3 rows** (`minRows: 4` by default) before extracting into a helper variable.
+
+```ts
+// Bad: only 2 rows extracted — keep inline!
+const smallGroup = transitions<MyContract>()([
+  ['browsing', 'PAY', 'vipPaid', { guard: isVip }],
+  ['browsing', 'PAY', 'paid'],
+]);
+
+// Good: >= 4 rows extracted cleanly as a complete [FROM, VIA] group
+const couponRows = transitions<MyContract>()([
+  ['cart', 'APPLY_COUPON', stay(), { guard: isVip,     call: (m) => m._applyVip }],
+  ['cart', 'APPLY_COUPON', stay(), { guard: isStudent, call: (m) => m._applyStudent }],
+  ['cart', 'APPLY_COUPON', stay(), { guard: isWelcome, call: (m) => m._applyWelcome }],
+  ['cart', 'APPLY_COUPON', stay(), { call: (m) => m._rejectCoupon }],
+]);
+```
+
+### 8. `@matrix-fsm/pure-machine-definition`
+Keeps transition matrices pure and side-effect free:
+- Forbids `@angular/*`, `*.service`, `*.store`, or `inject()` inside `*.machine.ts` files.
+- Forbids `inject()` inside `transitions: [...]` of `createMachineFeature`.
+- Enforces single-method selectors `call: (m) => m._method` (no multi-statement bodies).
+
+```ts
+// Bad
+['idle', 'SAVE', 'saved', { call: (m) => { m._validate(); m._save(); } }]
+
+// Good
+['idle', 'SAVE', 'saved', { call: (m) => m._save }]
+```
+
+### 9. `@matrix-fsm/no-conflicting-final-output`
+Forbids combining a named `finalState('NAME')` with `options.output` on the same row, and forbids reacting to a terminal child output with `stay()`.
+
+```ts
+// Bad
+['brewing', 'DONE', finalState('COFFEE_READY'), { output: ['COFFEE_READY', () => ({ ok: true })] }]
+
+// Good: bare finalState() with options.output OR named void finalState('CANCELLED')
+['brewing', 'DONE',   finalState(), { output: ['COFFEE_READY', () => ({ ok: true })] }]
+['brewing', 'CANCEL', finalState('CANCELLED')]
+```
+
+### 10. `@matrix-fsm/require-exit-for-targets`
+Enforces out-degree (`deg⁺(v) >= 1`) for every active target node (`awaiting(...)`, sub-machine, `all`, `race`, `any`, `each`) in Column 3 (`TO`): it must have at least one non-`stay()` exit in Column 1 (`FROM`).
+
+### 11. `@matrix-fsm/no-unreachable-states`
+Enforces in-degree (`deg⁻(v) >= 1`) for every state or actor in Column 1 (`FROM`, except `anyState()`): it must be `initial` or appear as a target in Column 3 (`TO`, including inside combinators).
+
+### 12. `@matrix-fsm/no-duplicate-combinator-actors`
+Forbids mounting the same child machine twice inside `all()`, `race()`, or `any()` without unique aliases via `subMachine(fsm, 'alias')`.
+
+```ts
+// Bad
+all(workerFSM, workerFSM)
+
+// Good
+all(subMachine(workerFSM, 'primary'), subMachine(workerFSM, 'backup'))
+```
+
+### 13. `@matrix-fsm/valid-any-state-target`
+Restricts `[anyState(), VIA, TO]` targets to `stay()`, `finalState()`, the machine's `initial` state (global reset), or any target when `VIA` is `'ERROR'`.
+
+### 14. `@matrix-fsm/valid-timer-transitions`
+Enforces timer semantics (including inside `VIA` arrays):
+- `after(ms)` must **leave** the current state (`stay()` is forbidden).
+- `every(ms)` must **stay** in the current state (`TO` must be `stay()`).
+
+```ts
+// Bad
+['polling', every(5000), 'nextState']
+['toast',   after(3000), stay()]
+
+// Good
+['polling', every(5000), stay(),   { call: (m) => m._poll }]
+['toast',   after(3000), 'hidden']
+```

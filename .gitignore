@@ -49,3 +49,5 @@ vitest.config.*.timestamp*
 .vitest
 
 .angular
+.astro
+apps/docs/src/content/docs/api

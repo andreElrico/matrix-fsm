@@ -1,0 +1,137 @@
+---
+title: Getting Started
+description: Install @matrix-fsm, enable the recommended ESLint rules, and build your first 2D matrix state machine.
+---
+
+## Installation
+
+Choose the packages matching your runtime:
+
+```sh
+# Pure TypeScript (Node, CLI, framework-agnostic)
+pnpm add @matrix-fsm/core
+
+# Angular + @ngrx/signals SignalStore
+pnpm add @matrix-fsm/core @matrix-fsm/angular
+
+# Optional: Effect-TS fiber integration
+pnpm add effect
+
+# Recommended static AST & graph ESLint rules
+pnpm add -D @matrix-fsm/eslint-plugin
+```
+
+## Enable ESLint Flat Config
+
+Add `configs.recommended` in `eslint.config.mjs` to enforce all 14 canonical rules and auto-align 2D matrix columns with `eslint --fix`:
+
+```js
+// eslint.config.mjs
+import matrixFsm from '@matrix-fsm/eslint-plugin';
+
+export default [
+  matrixFsm.configs.recommended,
+];
+```
+
+:::tip[Prettier Protection]
+Add `**/*.machine.ts` and `**/*.feature.ts` to `.prettierignore` (or place `// prettier-ignore` above `transitions: [`) so Prettier never collapses your aligned 2D matrix columns.
+:::
+
+## Quickstart: Pure TypeScript (`@matrix-fsm/core`)
+
+Run a framework-agnostic FIFO Run-to-Completion machine anywhere with `createFSM` and `createMachineInstance`:
+
+```ts
+import {
+  awaiting,
+  createFSM,
+  createMachineInstance,
+  finalState,
+  stay,
+} from '@matrix-fsm/core';
+
+export const orderFSM = createFSM<{
+  events: { SELECT_DRINK: { name: string }; PLACE_ORDER: void };
+  states: 'browsing' | 'checkingLoyalty' | 'confirmed';
+  context: { drink: string | null; error: string | null };
+  methods: {
+    _selectDrink: (p: { name: string }) => void;
+    _checkLoyalty: (_p: void, signal: AbortSignal) => Promise<boolean>;
+    _setMissingDrinkError: () => void;
+  };
+}>()({
+  id: 'order',
+  initial: 'browsing',
+  context: { drink: null, error: null },
+  // prettier-ignore
+  transitions: [
+    /* FROM              VIA             TO                            OPTIONS */
+    ['browsing',        'SELECT_DRINK', stay(),                       { call: (m) => m._selectDrink }],
+    ['browsing',        'PLACE_ORDER',  awaiting('checkingLoyalty'),  { guard: (c) => c.drink !== null, call: (m) => m._checkLoyalty }],
+    ['browsing',        'PLACE_ORDER',  stay(),                       { call: (m) => m._setMissingDrinkError }],
+    ['checkingLoyalty', 'DONE',         finalState()],
+    ['checkingLoyalty', 'ERROR',        'browsing'],
+  ],
+});
+
+const instance = createMachineInstance(orderFSM, {
+  methods: {
+    _selectDrink: ({ name }) => instance.patchContext({ drink: name, error: null }),
+    _checkLoyalty: async () => true,
+    _setMissingDrinkError: () => instance.patchContext({ error: 'Select a drink first!' }),
+  },
+});
+
+instance.send('SELECT_DRINK', { name: 'Flat White' });
+instance.send('PLACE_ORDER');
+```
+
+## Quickstart: Angular `SignalStore` (`@matrix-fsm/angular`)
+
+Use `createMachineFeature` + `withStateMachine` for zero-boilerplate Angular integration:
+
+```ts
+import { Injectable } from '@angular/core';
+import { patchState, signalStore } from '@ngrx/signals';
+import {
+  awaiting,
+  createMachineFeature,
+  finalState,
+  stay,
+  withStateMachine,
+} from '@matrix-fsm/angular';
+
+export const authFeature = createMachineFeature<{
+  events: { LOGIN: { email: string }; LOGOUT: void };
+  states: 'loggedOut' | 'authenticating' | 'authenticated';
+}>()({
+  id: 'auth',
+  initial: 'loggedOut',
+  // prettier-ignore
+  transitions: [
+    /* FROM             VIA       TO                          OPTIONS */
+    ['loggedOut',      'LOGIN',  awaiting('authenticating'), { call: (m) => m._login }],
+    ['authenticating', 'DONE',   'authenticated'],
+    ['authenticating', 'ERROR',  'loggedOut',                { call: (m) => m._setError }],
+    ['authenticated',  'LOGOUT', finalState()],
+  ],
+  state: { userEmail: null as string | null, error: null as string | null },
+  methods: (store) => ({
+    _login: async ({ email }: { email: string }) => {
+      patchState(store, { userEmail: email, error: null });
+    },
+    _setError: (err: Error) => patchState(store, { error: err.message }),
+  }),
+});
+
+@Injectable()
+export class AuthStore extends signalStore(withStateMachine(authFeature)) {}
+```
+
+## AI-Agent One-File Documentation
+
+Give AI coding assistants the complete specification, best practices, and API reference in a single file:
+
+- **Index**: [`/matrix-fsm/llms.txt`](/matrix-fsm/llms.txt)
+- **Full One-File Reference**: [`/matrix-fsm/llms-full.txt`](/matrix-fsm/llms-full.txt)

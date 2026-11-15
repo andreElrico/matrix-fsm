@@ -15,16 +15,42 @@ export type UnionToIntersection<U> = (
 
 /**
  * Canonical named type contract for `createFSM<TContract>()({ ... })`.
- * Every facet is optional so a machine only declares what it directly uses (ISP).
+ *
+ * @group Contracts & Config
+ * @remarks
+ * Every facet is optional so a machine only declares what it directly needs (Interface Segregation
+ * Principle). Declare `inputs`, `events`, `outputs`, `states`, `context`, and `methods` as pure
+ * TypeScript types — never dummy runtime objects.
+ *
+ * @example
+ * ```ts
+ * import { createFSM, type FSMContract } from '@matrix-fsm/core';
+ *
+ * export interface PaymentContract extends FSMContract {
+ *   inputs: { orderId: string; amount: number };
+ *   events: { SUBMIT: void; RETRY: void };
+ *   outputs: { PAID: { txId: string } };
+ *   states: 'ready' | 'charging' | 'failed';
+ *   methods: { _charge: (_p: void, signal: AbortSignal) => Promise<{ txId: string }> };
+ * }
+ * ```
  */
 export interface FSMContract {
+  /** Required input properties passed from a parent machine or `each()` mapper. */
   readonly inputs?: Record<string, any>;
+  /** Event payload map (`{ EVENT_NAME: PayloadType | void }`). */
   readonly events?: Record<string, any>;
+  /** Named output events emitted to parent machines (`{ OUTPUT_NAME: PayloadType | void }`). */
   readonly outputs?: Record<string, any>;
+  /** Union of allowed state string literals for this machine. */
   readonly states?: string;
+  /** Internal context state owned by this machine. */
   readonly context?: object;
+  /** Synchronous and asynchronous store/feature method signatures referenced via `{ call }`. */
   readonly methods?: object;
+  /** @deprecated Prefer `inputs`. */
   readonly input?: object;
+  /** @deprecated Prefer `outputs`. */
   readonly output?: any;
 }
 
@@ -99,11 +125,21 @@ export type ContractMethods<T extends FSMContract> =
       : M
     : EmptyObject;
 
+/**
+ * Marker node produced by {@link awaiting} representing an asynchronous `-ing` state.
+ *
+ * @group DSL Node Types
+ */
 export interface AwaitingNode<TState extends string = string> {
   readonly __type: 'awaiting';
   readonly state: TState;
 }
 
+/**
+ * Marker node produced by {@link outcome} to route an `awaiting()` completion to a named domain event.
+ *
+ * @group DSL Node Types
+ */
 export interface OutcomeNode<
   TEvent extends string = string,
   TPayload = void,
@@ -113,6 +149,11 @@ export interface OutcomeNode<
   readonly payload: TPayload;
 }
 
+/**
+ * Structural interface matching RxJS `Observable<T>` without requiring `rxjs` as a dependency of `@matrix-fsm/core`.
+ *
+ * @group Contracts & Config
+ */
 export interface SubscribableLike<T = any> {
   subscribe(observer?: {
     next?: (value: T) => void;
@@ -121,6 +162,11 @@ export interface SubscribableLike<T = any> {
   }): { unsubscribe(): void } | (() => void) | any;
 }
 
+/**
+ * Structural interface matching Angular `ResourceRef<T>` without requiring `@angular/core` in `@matrix-fsm/core`.
+ *
+ * @group Contracts & Config
+ */
 export interface ResourceRefLike<T = any> {
   readonly value: () => T;
   readonly status: () => any;
@@ -448,6 +494,11 @@ export type TransitionOutputTuple<
             (ctx: ReadonlyContext<TContext>, eventPayload: TPayload) => any,
           ];
 
+/**
+ * Column 4 (`OPTIONS`) configuration object for a 2D transition tuple `[FROM, VIA, TO, OPTIONS?]`.
+ *
+ * @group Contracts & Config
+ */
 export interface TransitionOptions<
   TContext = any,
   TPayload = any,
@@ -456,29 +507,41 @@ export interface TransitionOptions<
   TOutputs = EmptyObject,
   TOutputContext = TContext,
 > {
+  /**
+   * Pure synchronous predicate (`0%` DI). Evaluated top-to-bottom within a `[FROM, VIA]` group;
+   * the first row whose `guard` returns `true` wins.
+   */
   readonly guard?: (
     ctx: ReadonlyContext<TContext>,
     eventPayload: TPayload,
   ) => boolean;
   /**
-   * Store method selector invoked synchronously when this transition fires.
-   * Example: `{ call: (m) => m._selectDrink }`
+   * Single store/feature method selector: `{ call: (m) => m._methodName }`.
+   *
+   * @remarks
+   * - On normal or `stay()` rows: runs synchronously with `(eventPayload, ctx)`.
+   * - On `awaiting('...ing')` rows: starts an async task with `(eventPayload, signal: AbortSignal, ctx)`.
    */
   readonly call?: TransitionCallSelector<TMethods, TPayload, TContext>;
   /**
-   * Explicit input mapper when transitioning into a sub-machine or `each()` pool.
-   * Example: `{ input: (ctx) => ({ selectedDrink: ctx.selectedDrink }) }`
+   * Maps parent `(ctx, eventPayload)` to strongly-typed child `inputs` when entering a sub-machine,
+   * `each()`, or combinator actor.
    */
   readonly input?: (
     ctx: ReadonlyContext<TContext>,
     eventPayload: TPayload,
   ) => TInput;
   /**
-   * Emits an output event (intermediate or terminal) to the parent machine.
-   * Examples:
-   * - `{ output: 'HEARTBEAT' }`
-   * - `{ output: ['HEARTBEAT'] }`
-   * - `{ output: ['COFFEE_READY', (ctx, eventPayload) => ({ drinkName: ctx.selectedDrink.name })] }`
+   * Emits a strongly-typed intermediate or terminal output event to the parent machine.
+   *
+   * @example
+   * ```ts
+   * // Void output shorthand
+   * { output: 'HEARTBEAT' }
+   *
+   * // Typed payload selector
+   * { output: ['COFFEE_READY', (ctx, brewResult) => ({ drink: ctx.selectedDrink, brewResult })] }
+   * ```
    */
   readonly output?: TransitionOutputTuple<TOutputs, TOutputContext, TPayload>;
 }
@@ -800,6 +863,11 @@ export interface TransitionEvaluation<
   readonly enteredCombinator?: CombinatorNode<any, any> | null;
 }
 
+/**
+ * Compiled, frozen state machine definition produced by {@link createFSM}.
+ *
+ * @group Contracts & Config
+ */
 export interface FSMDefinition<
   TId extends string = string,
   TInitial extends string = string,
@@ -2172,6 +2240,11 @@ export type ExtractAllActorEntries<TFSM> = CollectActorEntriesRecursive<
   ExtractDirectActorEntries<TFSM>
 >;
 
+/**
+ * Extracts only the states declared directly in `TFSM`'s own transition matrix (excluding child sub-machines).
+ *
+ * @group Type Extractors
+ */
 export type ExtractOwnStates<TFSM> =
   TFSM extends FSMDefinition<
     any,
@@ -2186,10 +2259,25 @@ export type ExtractOwnStates<TFSM> =
     ? ExtractStatesFromConfig<TInitial, TTransitions>
     : never;
 
+/**
+ * Recursively extracts all reachable state names from `TFSM` and all nested sub-machines.
+ *
+ * @group Type Extractors
+ * @example
+ * ```ts
+ * import type { ExtractStates } from '@matrix-fsm/core';
+ * type ShopState = ExtractStates<typeof coffeeShopFSM>;
+ * ```
+ */
 export type ExtractStates<TFSM> =
   | ExtractOwnStates<TFSM>
   | ExtractOwnStates<ExtractAllSubMachines<TFSM>>;
 
+/**
+ * Extracts the raw own context type of `TFSM`.
+ *
+ * @group Type Extractors
+ */
 export type ExtractOwnContext<TFSM> =
   TFSM extends FSMDefinition<any, any, infer TContext, any, any, any, any, any>
     ? TContext
@@ -2197,6 +2285,8 @@ export type ExtractOwnContext<TFSM> =
 
 /**
  * Extracts the machine's own encapsulated context (Scope Invariant: child contexts do NOT leak into parent!).
+ *
+ * @group Type Extractors
  */
 export type ExtractContext<TFSM> =
   TFSM extends FSMDefinition<any, any, infer TContext, any, any, any, any, any>
@@ -2207,6 +2297,11 @@ export type ExtractContext<TFSM> =
         : TContext
     : EmptyObject;
 
+/**
+ * Recursively merges the context types of `TFSM` and all nested sub-machines.
+ *
+ * @group Type Extractors
+ */
 export type ExtractAllContext<TFSM> =
   TFSM extends FSMDefinition<any, any, infer TContext, any, any, any, any, any>
     ? [0] extends [1 & TContext]
@@ -2217,6 +2312,11 @@ export type ExtractAllContext<TFSM> =
         >
     : EmptyObject;
 
+/**
+ * Extracts the raw methods declared directly on `TFSM`.
+ *
+ * @group Type Extractors
+ */
 export type ExtractOwnMethods<TFSM> =
   TFSM extends FSMDefinition<any, any, any, any, any, infer TMethods, any, any>
     ? TMethods
@@ -2224,12 +2324,19 @@ export type ExtractOwnMethods<TFSM> =
 
 /**
  * Extracts the machine's own methods (Scope Invariant: child private methods do NOT leak into parent!).
+ *
+ * @group Type Extractors
  */
 export type ExtractMethods<TFSM> = MergeExtractedObjects<
   ExtractOwnMethods<TFSM>,
   EmptyObject
 >;
 
+/**
+ * Recursively merges the method contracts of `TFSM` and all nested sub-machines.
+ *
+ * @group Type Extractors
+ */
 export type ExtractAllMethods<TFSM> = MergeExtractedObjects<
   ExtractOwnMethods<TFSM> | ExtractOwnMethods<ExtractAllSubMachines<TFSM>>,
   EmptyObject
@@ -2248,13 +2355,28 @@ type ExtractNonEmptyInput<TFSM> =
           ? ExtractNonEmptyInput<TActors[number]>
           : never;
 
+/**
+ * Extracts the strongly-typed `inputs` contract required when spawning `TFSM` as a sub-machine or combinator.
+ *
+ * @group Type Extractors
+ */
 export type ExtractInput<TFSM> =
   [ExtractNonEmptyInput<TFSM>] extends [never]
     ? EmptyObject
     : UnionToIntersection<ExtractNonEmptyInput<TFSM>>;
 
+/**
+ * Alias for {@link ExtractInput}.
+ *
+ * @group Type Extractors
+ */
 export type ExtractInputs<TFSM> = ExtractInput<TFSM>;
 
+/**
+ * Extracts the `outputs` map declared on `TFSM`.
+ *
+ * @group Type Extractors
+ */
 export type ExtractOutput<TFSM> =
   TFSM extends FSMDefinition<any, any, any, any, any, any, any, infer TOutput>
     ? TOutput
@@ -2262,6 +2384,11 @@ export type ExtractOutput<TFSM> =
       ? ExtractOutput<Inner>
       : unknown;
 
+/**
+ * Extracts the event payload dictionary (`{ EVENT: Payload }`) declared on `TFSM`.
+ *
+ * @group Type Extractors
+ */
 export type ExtractEventsMap<TFSM> =
   TFSM extends FSMDefinition<any, any, any, infer TEvents, any, any, any, any>
     ? TEvents
@@ -2298,6 +2425,11 @@ export type ExtractEmittedOutputsFromTransitions<
   TTransitions extends readonly AnyTransitionRow<any, any>[],
 > = TTransitions[number] extends infer Row ? ExtractRowOutputName<Row> : never;
 
+/**
+ * Extracts all named output events emitted via `{ output: ... }` anywhere in `TFSM`.
+ *
+ * @group Type Extractors
+ */
 export type ExtractEmittedOutputs<TFSM> =
   TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any, any, any>
     ? ExtractEmittedOutputsFromTransitions<TTransitions>
@@ -2307,6 +2439,8 @@ export type ExtractEmittedOutputs<TFSM> =
 
 /**
  * Extracts all terminal `finalState('OUTCOME_NAME')` or `finalState()` + `output` string literals from an FSM definition.
+ *
+ * @group Type Extractors
  */
 export type ExtractFinalOutcomes<TFSM> =
   TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any, any, any>
@@ -2315,8 +2449,18 @@ export type ExtractFinalOutcomes<TFSM> =
       ? ExtractFinalOutcomes<Inner>
       : never;
 
+/**
+ * Alias for {@link ExtractFinalOutcomes}.
+ *
+ * @group Type Extractors
+ */
 export type ExtractTerminalOutputs<TFSM> = ExtractFinalOutcomes<TFSM>;
 
+/**
+ * Concise alias for {@link ExtractFinalOutcomes}.
+ *
+ * @group Type Extractors
+ */
 export type OutcomesOf<TFSM> = ExtractFinalOutcomes<TFSM>;
 
 type ExtractRowEvent<Row> =
@@ -2367,6 +2511,11 @@ type ExtractShallowEvents<TFSM> =
           >
     : never;
 
+/**
+ * Extracts all external event names handled by `TFSM` and its nested sub-machines.
+ *
+ * @group Type Extractors
+ */
 export type ExtractEvents<TFSM> =
   | ExtractShallowEvents<TFSM>
   | ExtractShallowEvents<ExtractAllSubMachines<TFSM>>;
@@ -2382,6 +2531,11 @@ type OwnDeclaredEventPayload<TFSM, TEvent extends string> =
       ? OwnDeclaredEventPayload<Inner, TEvent>
       : never;
 
+/**
+ * Extracts the payload type expected when dispatching `TEvent` to `TFSM`.
+ *
+ * @group Type Extractors
+ */
 export type ExtractEventPayload<
   TFSM,
   TEvent extends string,
@@ -2394,6 +2548,11 @@ export type ExtractEventPayload<
     : TCollected
   : unknown;
 
+/**
+ * Union of event names accepted by `send()` and `can()` for `TFSM`.
+ *
+ * @group Runner & Dispatch Types
+ */
 export type AllowedSendEvents<
   TFSM extends AnyFSMDefinition,
   TExtraEvents extends string = never,
@@ -2405,6 +2564,11 @@ export type AllowedSendEvents<
       ? string
       : ExtractEvents<TFSM> | TExtraEvents;
 
+/**
+ * Strongly-typed argument tuple `(event, payload?)` inferred for `send()` and `can()`.
+ *
+ * @group Runner & Dispatch Types
+ */
 export type EventDispatchArgs<
   TFSM extends AnyFSMDefinition,
   TEvent extends string,
@@ -2416,6 +2580,11 @@ export type EventDispatchArgs<
       ? [event: TEvent, payload?: unknown]
       : [event: TEvent, payload: ExtractEventPayload<TFSM, TEvent>];
 
+/**
+ * Strongly-typed `send(event, payload?)` function exposed on stores and {@link MachineInstance}.
+ *
+ * @group Runner & Dispatch Types
+ */
 export type SendFn<
   TFSM extends AnyFSMDefinition,
   TExtraEvents extends string = never,
@@ -2423,6 +2592,11 @@ export type SendFn<
   ...args: EventDispatchArgs<TFSM, TEvent>
 ) => void;
 
+/**
+ * Strongly-typed `can(event, payload?)` guard evaluator exposed on stores and {@link MachineInstance}.
+ *
+ * @group Runner & Dispatch Types
+ */
 export type CanFn<
   TFSM extends AnyFSMDefinition,
   TExtraEvents extends string = never,

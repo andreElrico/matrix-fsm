@@ -265,23 +265,39 @@ export {
 
 /**
  * Structural interface matching RxJS `Observable<T>` without requiring `rxjs` at runtime.
+ *
+ * @group Contracts & Config
  */
 export type Subscribable<T = unknown> = SubscribableLike<T>;
 
+/** @internal */
 export type SubMachineAwaitingNodes<TFSM extends AnyFSMDefinition> =
   ExtractAwaitingNodes<ExtractAllSubMachines<TFSM>>;
 
+/** @internal */
 export type OwnAwaitingNodes<TFSM extends AnyFSMDefinition> =
   ExtractOwnAwaitingNodes<TFSM>;
 
+/**
+ * Signal-mirroring map passed to `syncContext` inside {@link withStateMachine} or
+ * {@link createMachineFeature} to keep external Angular Signals synchronized with FSM context.
+ *
+ * @group SignalStore Integration
+ */
 export type SyncContextMap<TContext extends object> = {
   readonly [K in keyof TContext]?: Signal<TContext[K]> | TContext[K];
 };
 
+/**
+ * State entry/exit hook dictionary keyed by state name.
+ *
+ * @group SignalStore Integration
+ */
 export type StateLifecycleHooks<TFSM extends AnyFSMDefinition> = Partial<
   Record<ExtractStates<TFSM>, (ctx: Readonly<ExtractContext<TFSM>>) => void>
 >;
 
+/** @group Internal Type Helpers */
 export type RequiredStoreMethods<
   TFSM extends AnyFSMDefinition,
   TExplicitMethods = EmptyObject,
@@ -298,12 +314,22 @@ export type RequiredStoreMethods<
         : (...args: any[]) => any;
     };
 
+/**
+ * Typed store handle passed into `methods: (store) => ({ ... })` for {@link withStateMachine}.
+ *
+ * @group SignalStore Integration
+ */
 export type InlineStoreFor<TFSM extends AnyFSMDefinition> =
   WritableStateSource<ExtractContext<TFSM>> &
     DeepSignalOf<ExtractContext<TFSM>> &
     StateMachineStoreMembers<TFSM> &
     Record<string, any>;
 
+/**
+ * Runtime configuration accepted by {@link withStateMachine} and {@link provideStateMachine}.
+ *
+ * @group SignalStore Integration
+ */
 export type StateMachineFeatureConfig<
   TFSM extends AnyFSMDefinition,
   TExplicitMethods extends Record<string, (...args: any[]) => any> = EmptyObject,
@@ -313,7 +339,7 @@ export type StateMachineFeatureConfig<
    */
   readonly state?: ExtractContext<TFSM> | (() => ExtractContext<TFSM>);
   /**
-   * Reactive Context Mirroring: syncs external Angular Signals (e.g. from Layer 1 global stores)
+   * Reactive Context Mirroring: syncs external Angular Signals (e.g. from global stores)
    * into the FSM context without tight coupling.
    */
   readonly syncContext?:
@@ -328,7 +354,7 @@ export type StateMachineFeatureConfig<
       ) => TExplicitMethods & Partial<ExtractMethods<TFSM>>)
     | (TExplicitMethods & Partial<ExtractMethods<TFSM>>);
   /**
-   * Optional pluggable task runner adapter (e.g. used internally by `createEffectMachineFeature`).
+   * Optional pluggable task runner adapter (used for example by `createEffectMachineFeature`).
    */
   readonly taskAdapter?: CustomTaskAdapter;
   /**
@@ -353,50 +379,97 @@ export type StateMachineFeatureConfig<
     | StateLifecycleHooks<TFSM>;
 };
 
+/**
+ * Reactive snapshot entry exposed per active child actor in `store.childMachines()`.
+ *
+ * @group SignalStore Integration
+ */
 export interface ChildMachineSnapshot<TContext = any> {
+  /** Child item ID (for `each()`) or actor ID/alias (for `all`/`race`/`any`). */
   readonly id: string;
+  /** Current active state of the child actor. */
   readonly state: string;
+  /** Nested sub-state if the child delegates to a deeper sub-machine. */
   readonly subState?: string | null;
+  /** Live read-only context of the child actor. */
   readonly context: Readonly<TContext>;
+  /** `true` while the child actor is in an `awaiting()` state. */
   readonly isPending: boolean;
+  /** `true` once the child actor reaches `finalState()`. */
   readonly isDone: boolean;
+  /** Terminal outcome name or `null`. */
   readonly finalOutcome: string | null;
 }
 
 type CleanObject<T> = [keyof T] extends [never] ? EmptyObject : T;
 
+/**
+ * Combined read-only state (`inputs & context`) of an active child actor exposed via `store.actors.<id>()`.
+ *
+ * @group SignalStore Integration
+ */
 export type ActorStateOf<TSub extends AnyFSMDefinition> = Readonly<
   CleanObject<ExtractInput<TSub>> & CleanObject<ExtractContext<TSub>>
 >;
 
+/**
+ * Strongly-typed map of `Signal<ActorState | null>` keyed by sub-machine ID or `subMachine(fsm, 'alias')`.
+ *
+ * @group SignalStore Integration
+ */
 export type ActorsMapFor<TFSM extends AnyFSMDefinition> = {
   readonly [E in ExtractAllActorEntries<TFSM> as E['id']]: Signal<
     ActorStateOf<E['machine']> | null
   >;
 } & Readonly<Record<string, Signal<Readonly<Record<string, any>> | null>>>;
 
+/**
+ * Signals and imperative control methods exposed on any NgRx `SignalStore` enhanced with {@link withStateMachine}.
+ *
+ * @group SignalStore Integration
+ */
 export interface StateMachineStoreMembers<TFSM extends AnyFSMDefinition> {
+  /** Current active state name of the machine. */
   readonly state: Signal<ExtractStates<TFSM>>;
+  /** Alias for {@link StateMachineStoreMembers.state} (handy if the store also defines a `state` property). */
   readonly fsmState: Signal<ExtractStates<TFSM>>;
+  /** Monotonically incrementing counter bumped on every non-`stay()` transition. */
   readonly stateEpoch: Signal<number>;
+  /** Active child state when inside a sub-machine, otherwise `null`. */
   readonly fsmSubState: Signal<string | null>;
+  /** Active child context when inside a sub-machine, otherwise `null`. */
   readonly fsmSubContext: Signal<Readonly<Record<string, any>> | null>;
+  /** DeepSignal view of the machine's encapsulated context state. */
   readonly fsmContext: DeepSignalOf<ExtractContext<TFSM>>;
+  /** Keyed reactive signals for every 1:1 sub-machine and `all`/`race`/`any` combinator actor (`null` when inactive). */
   readonly actors: ActorsMapFor<TFSM>;
+  /** `true` whenever the machine (or an active child actor) is inside an `awaiting()` state. */
   readonly isPending: Signal<boolean>;
+  /** `true` when the machine has reached `finalState()`. */
   readonly isDone: Signal<boolean>;
+  /** Terminal outcome name once `isDone()` is `true`, otherwise `null`. */
   readonly finalOutcome: Signal<string | null>;
+  /** Terminal output payload captured when reaching `finalState()`, or `undefined`. */
   readonly finalPayload: Signal<unknown>;
+  /** Live snapshots of active 1:N `each()` pools and combinator children. */
   readonly childMachines: Signal<
     Record<string, ReadonlyArray<ChildMachineSnapshot>>
   >;
+  /** Purely evaluates whether `event` (with optional `payload`) would trigger a transition right now. */
   readonly can: CanFn<TFSM>;
+  /** Enqueues a strongly-typed event into the Run-to-Completion FIFO event queue. */
   readonly send: SendFn<TFSM>;
+  /** Sends an event directly to a specific child instance inside an active `each()` pool by item ID. */
   readonly sendToChild: SendToChildFn<TFSM>;
+  /** Partially updates context and re-evaluates dynamic `every()` timers and `always()` branches. */
   readonly patchContext: (patch: Partial<ExtractContext<TFSM>>) => void;
+  /** Captures a serializable snapshot of the machine and all active child actors. */
   readonly getSnapshot: () => MachineSnapshot<TFSM>;
+  /** Restores state, context, and child actors from a snapshot and re-arms timers. */
   readonly restoreSnapshot: (snapshot: MachineSnapshot<TFSM>) => void;
+  /** Aborts active tasks/timers and resets the machine to `initial` with initial context. */
   readonly reset: (initialOverride?: Partial<ExtractContext<TFSM>>) => void;
+  /** Cleans up all active timers, tasks, watchers, and child actors (auto-wired to `DestroyRef`). */
   readonly destroy: () => void;
 }
 
@@ -488,6 +561,10 @@ const resolvedMethodsBySend = new WeakMap<
 
 /**
  * Returns the unique Angular `InjectionToken` associated with a pure `FSMDefinition`.
+ *
+ * @group Dependency Injection
+ * @param fsm - Pure FSM or machine feature definition.
+ * @returns Cached Angular `InjectionToken` resolving its spawn factory.
  */
 export function getMachineToken<TFSM extends AnyFSMDefinition>(
   fsm: TFSM,
@@ -516,6 +593,8 @@ export function getMachineToken<TFSM extends AnyFSMDefinition>(
 
 /**
  * Registers a default spawn factory on an `FSMDefinition` when its store or feature is evaluated.
+ *
+ * @internal
  */
 export function bindDefaultMachineFactory<TFSM extends AnyFSMDefinition>(
   fsm: TFSM,
@@ -525,8 +604,30 @@ export function bindDefaultMachineFactory<TFSM extends AnyFSMDefinition>(
 }
 
 /**
- * Helper to patch context/state cleanly inside both full SignalStore instances
+ * Patches context state cleanly inside both full `@ngrx/signals` `SignalStore` instances
  * and scoped sub-machine runners (`methods: (store) => ({ ... })`).
+ *
+ * @group SignalStore Integration
+ * @param store - SignalStore instance or scoped sub-actor `FeatureInlineStore`.
+ * @param updaters - Partial state objects or functional updaters.
+ *
+ * @example
+ * ```ts
+ * import { createMachineFeature, patchMachineState } from '@matrix-fsm/angular';
+ *
+ * const counterFSM = createMachineFeature<{
+ *   events: { INC: void };
+ *   states: 'ready';
+ * }>()({
+ *   id: 'counter',
+ *   initial: 'ready',
+ *   transitions: [['ready', 'INC', 'ready', { call: (m) => m._inc }]],
+ *   state: { count: 0 },
+ *   methods: (store) => ({
+ *     _inc: () => patchMachineState(store, (s) => ({ count: s.count + 1 })),
+ *   }),
+ * });
+ * ```
  */
 export function patchMachineState<TState extends object>(
   store: any,
@@ -550,9 +651,28 @@ export function patchMachineState<TState extends object>(
 }
 
 /**
- * Explicitly binds a pure `FSMDefinition` to an Angular SignalStore class or inline configuration
- * inside Angular Dependency Injection (`providers: [provideStateMachine(baristaFSM, BaristaStore)]`).
- * Enables zero-leakage hierarchical tree composition and effortless test mocking!
+ * Explicitly binds or overrides a pure `FSMDefinition` with an Angular `SignalStore` class or inline
+ * configuration inside Angular Dependency Injection.
+ *
+ * @group Dependency Injection
+ * @param fsm - Pure FSM definition to bind or mock.
+ * @param storeClassOrConfig - `SignalStore` class or inline `StateMachineFeatureConfig` override.
+ * @returns Combined Angular `EnvironmentProviders & Provider` usable in component or test `providers`.
+ *
+ * @example
+ * ```ts
+ * import { provideStateMachine } from '@matrix-fsm/angular';
+ * import { baristaFSM } from './barista.feature';
+ *
+ * // Override a sub-actor in component or TestBed providers:
+ * providers: [
+ *   provideStateMachine(baristaFSM, {
+ *     methods: {
+ *       _brewCoffee: async () => ({ baristaNote: 'Mocked espresso', temperatureCelsius: 92 }),
+ *     },
+ *   }),
+ * ]
+ * ```
  */
 export function provideStateMachine<TFSM extends AnyFSMDefinition>(
   fsm: TFSM,
@@ -3316,12 +3436,30 @@ function createScopedMachineRunner<TFSM extends AnyFSMDefinition>(
 }
 
 /**
- * Custom `@ngrx/signals` feature that binds a `@matrix-fsm/core` state machine
- * directly to SignalStore's `withState` and `withMethods`, with native Promise,
- * RxJS Observable, and pluggable task runner support.
+ * `@ngrx/signals` `signalStoreFeature` that mounts a {@link createMachineFeature} or
+ * {@link createFSM} definition directly onto an Angular `SignalStore`.
  *
- * Also supports standalone encapsulated sub-machine stores via `{ state, methods }`
- * and automatically registers the machine's default spawn factory for hierarchical tree composition.
+ * @group SignalStore Integration
+ * @param fsm - Machine definition (`createMachineFeature`, `createEffectMachineFeature`, or `createFSM`).
+ * @param configArgs - Optional runtime overrides (`state`, `syncContext`, `methods`, `debug`, `inspect`, `onEnter`, `onExit`).
+ * @returns An `@ngrx/signals` `SignalStoreFeature` adding state signals, `StateMachineStoreMembers`, and lifecycle cleanup.
+ *
+ * @remarks
+ * Automatically wires Angular `DestroyRef` cleanup so timers, `AbortSignal`s, RxJS subscriptions,
+ * Effect fibers, and child actors terminate cleanly when the host component or service is destroyed.
+ *
+ * @example
+ * ```ts
+ * import { Injectable } from '@angular/core';
+ * import { signalStore } from '@ngrx/signals';
+ * import { withStateMachine } from '@matrix-fsm/angular';
+ * import { coffeeShopFSM } from './coffee-shop.machine';
+ *
+ * @Injectable()
+ * export class CoffeeShopStore extends signalStore(
+ *   withStateMachine(coffeeShopFSM),
+ * ) {}
+ * ```
  */
 export function withStateMachine<
   TFSM extends AnyFSMDefinition,
@@ -3523,11 +3661,21 @@ export function withStateMachine<
 // Cohesive Sub-Machine Actor Feature (`createMachineFeature`)
 // ============================================================================
 
+/**
+ * Named type contract for {@link createMachineFeature} and `createEffectMachineFeature`.
+ *
+ * @group Machine Builders
+ */
 export interface MachineFeatureContract {
+  /** Strongly-typed inputs passed from a parent machine or `each()` item mapper. */
   readonly inputs?: Record<string, any>;
+  /** Event payload map (`{ EVENT_NAME: PayloadType | void }`). */
   readonly events?: Record<string, any>;
+  /** Named intermediate or terminal outputs emitted to parent machines. */
   readonly outputs?: Record<string, any>;
+  /** Union of allowed state string literals. */
   readonly states?: string;
+  /** Optional method interface contract enforced on `methods`. */
   readonly methods?: Record<string, any>;
 }
 
@@ -3703,6 +3851,11 @@ export interface MachineFeatureDefinition<
   readonly methods?: ((store: any) => TMethods) | TMethods;
 }
 
+/**
+ * Internal runtime builder shared by {@link createMachineFeature} and `createEffectMachineFeature`.
+ *
+ * @internal
+ */
 export function buildMachineFeatureRuntime(
   config: any,
   taskAdapter?: CustomTaskAdapter,
@@ -3761,10 +3914,43 @@ export function buildMachineFeatureRuntime(
 }
 
 /**
- * Cohesive Sub-Machine Actor Creator ("Sandwich-Pattern"):
- * Combines Public Contract (`inputs`, `events`, `outputs`, `states`) at the top,
- * the visual Transition Matrix in the middle, and isolated Runtime Implementation
- * (`state`, `methods`) at the bottom — with zero `provideStateMachine` boilerplate!
+ * Canonical "Sandwich Pattern" machine builder combining:
+ * 1. **Public Contract** (`inputs`, `events`, `outputs`, `states`) at the top,
+ * 2. **Pure 2D Transition Matrix** (`id`, `initial`, `transitions`) in the middle (`0%` DI), and
+ * 3. **Encapsulated Runtime** (`state`, `syncContext`, `methods`, `onEnter`, `onExit`) at the bottom.
+ *
+ * @group Machine Builders
+ * @typeParam TContract - Optional {@link MachineFeatureContract} declaring public inputs, events, outputs, and states.
+ * @returns Curried builder returning a {@link MachineFeatureDefinition} usable both as a root SignalStore feature and as an isolated sub-actor.
+ *
+ * @example
+ * ```ts
+ * import { inject } from '@angular/core';
+ * import { patchState } from '@ngrx/signals';
+ * import { awaiting, createMachineFeature, finalState } from '@matrix-fsm/angular';
+ * import { CoffeeShopApiService } from './coffee-shop-api.service';
+ *
+ * export const baristaFSM = createMachineFeature<{
+ *   inputs: { selectedDrink: { id: string; name: string } };
+ *   events: { START_BREWING: void; RETRY_BREW: void };
+ *   outputs: { COFFEE_READY: { drinkName: string } };
+ *   states: 'ticketQueued' | 'brewingCoffee' | 'maintenance';
+ * }>()({
+ *   id: 'barista',
+ *   initial: 'ticketQueued',
+ *   transitions: [
+ *     ['ticketQueued',  'START_BREWING', awaiting('brewingCoffee'), { call: (m) => m._brewCoffee }],
+ *     ['brewingCoffee', 'DONE',          finalState(),              { output: ['COFFEE_READY', (ctx) => ({ drinkName: ctx.selectedDrink.name })] }],
+ *     ['brewingCoffee', 'ERROR',         'maintenance',             { call: (m) => m._setBrewError }],
+ *     ['maintenance',   'RETRY_BREW',    awaiting('brewingCoffee'), { call: (m) => m._brewCoffee }],
+ *   ],
+ *   state: { brewError: null as string | null },
+ *   methods: (store, api = inject(CoffeeShopApiService)) => ({
+ *     _brewCoffee: (_p: void, signal: AbortSignal, ctx) => api.brewCoffee(ctx.selectedDrink, signal),
+ *     _setBrewError: (err: Error) => patchState(store, { brewError: err.message }),
+ *   }),
+ * });
+ * ```
  */
 export function createMachineFeature<
   TContract extends MachineFeatureContract = EmptyObject,
@@ -3811,18 +3997,31 @@ export function createMachineFeature<
 // Lightweight Unit-Test Harness for Sandwich Features (`createFeatureTester`)
 // ============================================================================
 
+/**
+ * Configuration options for {@link createFeatureTester}.
+ *
+ * @group Testing
+ */
 export interface FeatureTesterOptions<TFSM extends AnyFSMDefinition> {
+  /** Mocked `inputs` passed into the machine feature. */
   readonly inputs?: Partial<ExtractInput<TFSM>> & Record<string, any>;
+  /** Partial initial `state` overrides merged after `inputs` and `syncedContext`. */
   readonly stateOverride?: Partial<ExtractContext<TFSM>> & Record<string, any>;
+  /** Initial values simulating `syncContext` external signal inputs. */
   readonly syncedContext?: Partial<ExtractContext<TFSM>> & Record<string, any>;
+  /** Optional Angular `Injector` when testing features that invoke `inject()` in `methods`. */
   readonly injector?: Injector;
+  /** Optional debug logger override. */
   readonly debug?: DebugLogger;
+  /** Optional transition inspection callback. */
   readonly inspect?: InspectCallback<TFSM>;
+  /** Partial method overrides (for example, mocking async API calls in unit tests). */
   readonly methods?:
     | ((
         store: InlineStoreFor<TFSM>,
       ) => Partial<ExtractMethods<TFSM>> & Record<string, (...args: any[]) => any>)
     | (Partial<ExtractMethods<TFSM>> & Record<string, (...args: any[]) => any>);
+  /** Optional method overrides keyed by child actor ID or alias. */
   readonly actorMethods?: Record<
     string,
     | ((store: any) => Record<string, (...args: any[]) => any>)
@@ -3831,44 +4030,91 @@ export interface FeatureTesterOptions<TFSM extends AnyFSMDefinition> {
   >;
 }
 
+/**
+ * Lightweight unit-test harness returned by {@link createFeatureTester}.
+ *
+ * @group Testing
+ */
 export interface FeatureTester<TFSM extends AnyFSMDefinition> {
+  /** Current active state name. */
   readonly state: () => ExtractStates<TFSM>;
+  /** Active child state name if inside a sub-machine, otherwise `null`. */
   readonly subState: () => string | null;
+  /** Active child context if inside a sub-machine, otherwise `null`. */
   readonly subContext: () => Readonly<Record<string, any>> | null;
+  /** Current read-only machine context. */
   readonly context: () => Readonly<ExtractContext<TFSM>>;
+  /** Live child actor signals keyed by actor ID or alias. */
   readonly actors: ActorsMapFor<TFSM>;
+  /** Live snapshots of active `each()` and combinator child pools. */
   readonly childMachines: () => Record<
     string,
     ReadonlyArray<ChildMachineSnapshot>
   >;
+  /** Purely checks whether `event` would match a transition in the current state. */
   readonly can: CanFn<TFSM>;
+  /** Dispatches an event into the Run-to-Completion FIFO queue. */
   readonly send: SendFn<TFSM>;
+  /** Sends an event directly to a child instance inside an active `each()` pool. */
   readonly sendToChild: SendToChildFn<TFSM>;
+  /** `true` while inside an `awaiting()` state or active pending child actor. */
   readonly isPending: () => boolean;
+  /** Alias for {@link FeatureTester.isDone}. */
   readonly isCompleted: () => boolean;
+  /** `true` once the machine reaches `finalState()`. */
   readonly isDone: () => boolean;
+  /** Terminal outcome name or `null`. */
   readonly finalOutcome: () => string | null;
+  /** Terminal payload captured at `finalState()`. */
   readonly finalPayload: () => unknown;
+  /** Chronological array of all intermediate and terminal `{ type, payload }` outputs emitted so far. */
   readonly emittedOutputs: () => ReadonlyArray<{
     readonly type: string;
     readonly payload: unknown;
   }>;
+  /** Awaits all currently tracked in-flight `awaiting()` promises, Observables, and Effect fibers. */
   readonly flushTasks: () => Promise<void>;
+  /** Partially updates context during tests (also simulating `syncContext` updates). */
   readonly patchContext: (patch: Partial<ExtractContext<TFSM>>) => void;
+  /** Captures a serializable snapshot. */
   readonly getSnapshot: () => MachineSnapshot<TFSM>;
+  /** Restores a previously captured snapshot. */
   readonly restoreSnapshot: (snapshot: MachineSnapshot<TFSM>) => void;
+  /** Subscribes to snapshot updates. */
   readonly subscribe: (
     listenerOrObserver:
       | ((snapshot: MachineSnapshot<TFSM>) => void)
       | MachineObserver<TFSM>,
   ) => MachineSubscription;
+  /** Resets the tester back to `initial`. */
   readonly reset: (initialOverride?: Partial<ExtractContext<TFSM>>) => void;
+  /** Tears down all active timers, tasks, and child actors. */
   readonly destroy: () => void;
 }
 
 /**
- * Instantiates a `createMachineFeature` (or `createFSM`) in pure Vitest/Node unit tests
- * without Angular `TestBed` or `EnvironmentInjector`, mocking `inputs` and `methods` directly.
+ * Instantiates a {@link createMachineFeature}, `createEffectMachineFeature`, or `createFSM`
+ * in pure Vitest/Node unit tests (`< 5ms`, zero Angular `TestBed`), mocking `inputs` and `methods` directly.
+ *
+ * @group Testing
+ * @param feature - Machine feature or pure FSM definition under test.
+ * @param options - Optional mocked `inputs`, `methods`, `stateOverride`, and `actorMethods`.
+ * @returns A {@link FeatureTester} with `send()`, `flushTasks()`, `emittedOutputs()`, and `finalPayload()`.
+ *
+ * @example
+ * ```ts
+ * import { createFeatureTester } from '@matrix-fsm/angular';
+ * import { baristaFSM } from './barista.feature';
+ *
+ * const tester = createFeatureTester(baristaFSM, {
+ *   inputs: { selectedDrink: { id: 'espresso', name: 'Double Espresso' } },
+ *   methods: { _brewCoffee: async () => 'crema' },
+ * });
+ *
+ * tester.send('START_BREWING');
+ * await tester.flushTasks();
+ * console.log(tester.isDone(), tester.emittedOutputs());
+ * ```
  */
 export function createFeatureTester<TFSM extends AnyFSMDefinition>(
   feature: TFSM,

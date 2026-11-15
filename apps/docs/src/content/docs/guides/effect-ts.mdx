@@ -1,0 +1,87 @@
+---
+title: Effect-TS Integration
+description: Use @matrix-fsm/angular/effect for Effect.Effect<A, E, R> fibers, automatic fiber interruption, ManagedRuntime services, and Data.TaggedError routing.
+---
+
+## Dedicated Entrypoint (`@matrix-fsm/angular/effect`)
+
+`@matrix-fsm/angular` carries **0% Effect-TS bundle weight or type dependencies**. Teams using [Effect](https://effect.website) opt in via the dedicated secondary entrypoint:
+
+```ts
+import {
+  createEffectMachineFeature,
+  createEffectExecutorAdapter,
+  runEffect,
+} from '@matrix-fsm/angular/effect';
+```
+
+## `createEffectMachineFeature`
+
+`createEffectMachineFeature<TContract, TRuntimeEnv>()(config)` mirrors `createMachineFeature`, except `awaiting()` methods can return `Effect.Effect<A, E, TRuntimeEnv>`:
+
+- **Automatic Fiber Fork & Interruption**: Entering an `awaiting()` state forks the Effect; leaving the state (via `CANCEL`, `after()` timeout, or store destruction) interrupts the fiber automatically.
+- **Typed `Data.TaggedError` Routing**: Typed errors `E` carrying a `_tag` property route directly to matching `_tag` columns in `VIA` (with fallback to `'ERROR'`).
+- **Compile-Time Service Validation (`ValidateEffectMethodsEnv`)**: If an Effect requires services `R` (`TRuntimeEnv != never`), TypeScript enforces passing `runtime: ManagedRuntime<TRuntimeEnv, any>` (or an `EffectRuntimeLike<TRuntimeEnv>`).
+
+```ts
+import { Context, Data, Effect, Layer, ManagedRuntime } from 'effect';
+import { patchState } from '@ngrx/signals';
+import { awaiting, finalState } from '@matrix-fsm/angular';
+import { createEffectMachineFeature } from '@matrix-fsm/angular/effect';
+
+class PaymentDeclinedError extends Data.TaggedError('PaymentDeclinedError')<{
+  readonly reason: string;
+}> {}
+
+class PaymentGateway extends Context.Tag('PaymentGateway')<
+  PaymentGateway,
+  { readonly charge: (orderId: string, amount: number) => Effect.Effect<string, PaymentDeclinedError> }
+>() {}
+
+const appLayer = Layer.succeed(PaymentGateway, {
+  charge: (orderId, amount) =>
+    amount > 0
+      ? Effect.succeed(`rcpt_${orderId}`)
+      : Effect.fail(new PaymentDeclinedError({ reason: 'Amount must be positive' })),
+});
+
+const appRuntime = ManagedRuntime.make(appLayer);
+
+export const checkoutEffectFSM = createEffectMachineFeature<
+  {
+    inputs: { orderId: string; amount: number };
+    events: { PAY: void; CANCEL: void };
+    outputs: { PAID: { receiptId: string } };
+    states: 'ready' | 'charging' | 'declined' | 'failed';
+  },
+  PaymentGateway
+>()({
+  id: 'checkoutEffect',
+  initial: 'ready',
+  runtime: appRuntime,
+  // prettier-ignore
+  transitions: [
+    /* FROM       VIA                    TO                    OPTIONS */
+    ['ready',    'PAY',                  awaiting('charging'), { call: (m) => m._charge }],
+    ['charging', 'DONE',                 finalState(),         { output: ['PAID', (_c, receiptId) => ({ receiptId })] }],
+    ['charging', 'PaymentDeclinedError', 'declined',           { call: (m) => m._saveDeclineReason }],
+    ['charging', 'CANCEL',               'ready'],
+    ['charging', 'ERROR',                'failed'],
+  ],
+  state: { declineReason: null as string | null },
+  methods: (store) => ({
+    _charge: (_p: void, _signal: AbortSignal, ctx) =>
+      Effect.gen(function* () {
+        const gateway = yield* PaymentGateway;
+        return yield* gateway.charge(ctx.orderId, ctx.amount);
+      }),
+    _saveDeclineReason: (err: PaymentDeclinedError) =>
+      patchState(store, { declineReason: err.reason }),
+  }),
+});
+```
+
+## Standalone Adapter & Bridge Helpers
+
+- **`createEffectExecutorAdapter(runtime?)`** (alias: `createEffectTaskAdapter`): Returns a `CustomTaskAdapter` that can be passed directly into `createMachineInstance(fsm, { taskAdapter })` for pure Node/TypeScript Effect machines without Angular.
+- **`runEffect(effect, signal?, runtime?)`**: Bridges any `Effect.Effect<A, E, R>` into an `AbortSignal`-aware `Promise<A>` that interrupts the underlying fiber when `signal` aborts.

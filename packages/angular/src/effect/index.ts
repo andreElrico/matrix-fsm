@@ -39,11 +39,24 @@ type EffectErrorOutcome<E> = [E] extends [never]
   ? never
   : OutcomeNode<'ERROR', E> | EffectTaggedErrorOutcome<E>;
 
+/**
+ * Normalizes an Effect-returning method signature `(...args) => Effect<A, E, R>` into its
+ * runtime `Promise<A | EffectErrorOutcome<E>>` equivalent so the transition matrix infers
+ * `'DONE'` payload `A` and `Data.TaggedError` `_tag` events from `E`.
+ *
+ * @group Effect-TS
+ */
 export type NormalizeEffectMethodReturn<R> =
   R extends Effect.Effect<infer A, infer E, any>
     ? Promise<A | EffectErrorOutcome<E>>
     : R;
 
+/**
+ * Maps a `methods` dictionary containing Effect-returning async methods into normalized signatures
+ * for compile-time transition row inference.
+ *
+ * @group Effect-TS
+ */
 export type NormalizeEffectMethods<TMethods> =
   [0] extends [1 & TMethods]
     ? any
@@ -72,6 +85,12 @@ type MissingEffectEnvInMethods<TMethods, TRuntimeEnv> =
         }[keyof TMethods]
       : never;
 
+/**
+ * Compile-time validator ensuring every `Effect.Effect<A, E, R>` returned by `methods` only
+ * requires Effect services `R` satisfied by `TRuntimeEnv` (provided via `runtime`).
+ *
+ * @group Effect-TS
+ */
 export type ValidateEffectMethodsEnv<TMethods, TRuntimeEnv> = [
   MissingEffectEnvInMethods<TMethods, TRuntimeEnv>,
 ] extends [never]
@@ -81,7 +100,14 @@ export type ValidateEffectMethodsEnv<TMethods, TRuntimeEnv> = [
       readonly missingServices: MissingEffectEnvInMethods<TMethods, TRuntimeEnv>;
     };
 
+/**
+ * Minimal runtime interface (satisfied by Effect's `ManagedRuntime` and `Runtime`) required
+ * when `Effect` methods depend on Effect services `R`.
+ *
+ * @group Effect-TS
+ */
 export interface EffectRuntimeLike<R = never> {
+  /** Forks an Effect inside the provided runtime environment and returns its `Fiber`. */
   readonly runFork: <A, E>(
     effect: Effect.Effect<A, E, R>,
   ) => Fiber.Fiber<A, any>;
@@ -110,6 +136,25 @@ function unwrapExitFailure(cause: Cause.Cause<unknown>): unknown {
   return squashedDefect;
 }
 
+/**
+ * Creates a {@link CustomTaskAdapter} that executes `Effect.Effect<A, E, R>` values returned from
+ * `awaiting()` methods using `Effect.runFork` (or an optional `ManagedRuntime` / {@link EffectRuntimeLike}).
+ *
+ * @group Effect-TS
+ * @param runtimeOption - Optional Effect runtime or lazy factory supplying service environment `R`.
+ * @returns A {@link CustomTaskAdapter} handling Effect values and interrupting fibers on cancellation.
+ *
+ * @example
+ * ```ts
+ * import { createMachineInstance } from '@matrix-fsm/core';
+ * import { createEffectExecutorAdapter } from '@matrix-fsm/angular/effect';
+ *
+ * const instance = createMachineInstance(myFSM, {
+ *   taskAdapter: createEffectExecutorAdapter(),
+ *   methods: { ... },
+ * });
+ * ```
+ */
 export function createEffectExecutorAdapter<R = never>(
   runtimeOption?: EffectRuntimeLike<R> | (() => EffectRuntimeLike<R>),
 ): CustomTaskAdapter {
@@ -164,6 +209,11 @@ export function createEffectExecutorAdapter<R = never>(
   };
 }
 
+/**
+ * Alias for {@link createEffectExecutorAdapter}.
+ *
+ * @group Effect-TS
+ */
 export const createEffectTaskAdapter = createEffectExecutorAdapter;
 
 type RuntimeConfigField<TRuntimeEnv> = [TRuntimeEnv] extends [never]
@@ -178,6 +228,12 @@ type RuntimeConfigField<TRuntimeEnv> = [TRuntimeEnv] extends [never]
         | (() => EffectRuntimeLike<TRuntimeEnv>);
     };
 
+/**
+ * Configuration object accepted by {@link createEffectMachineFeature}, extending
+ * `MachineFeatureConfig` with Effect runtime validation.
+ *
+ * @group Effect-TS
+ */
 export type EffectMachineFeatureConfig<
   TId extends string,
   TInitial extends InitialStateTarget<TDeclaredStates>,
@@ -212,11 +268,51 @@ export type EffectMachineFeatureConfig<
   ValidateEffectMethodsEnv<NoInfer<TMethods>, TRuntimeEnv>;
 
 /**
- * Effect-TS Sub-Machine Actor Creator ("Sandwich-Pattern" for Effect-TS):
- * Executes `Effect.Effect<A, E, TRuntimeEnv>` returned from `{ call: (m) => m._method }` on `awaiting()`
- * via `Effect.runFork` (or custom `runtime.runFork`), automatically interrupts the fiber on state exit,
- * enforces `[R] extends [TRuntimeEnv]` at compile time, and infers `A` for `'DONE'`
- * and `E` for `'ERROR'` / TaggedError `_tag` transitions.
+ * Effect-TS Sandwich-Pattern machine builder (`@matrix-fsm/angular/effect`).
+ *
+ * @group Effect-TS
+ * @typeParam TContract - Public `MachineFeatureContract` (`inputs`, `events`, `outputs`, `states`).
+ * @typeParam TRuntimeEnv - Effect service environment `R` required by `Effect.Effect<A, E, R>` methods.
+ * @returns Curried builder creating a `MachineFeatureDefinition` powered by Effect fibers.
+ *
+ * @remarks
+ * Executes `Effect.Effect<A, E, TRuntimeEnv>` values returned from `{ call: (m) => m._method }`
+ * on `awaiting()` states via `Effect.runFork` (or custom `runtime.runFork`). Automatically
+ * interrupts the active fiber on state exit or store destruction, enforces `[R] extends [TRuntimeEnv]`
+ * at compile time, and routes `Data.TaggedError` failures directly to matching `_tag` columns in `VIA`.
+ *
+ * @example
+ * ```ts
+ * import { Data, Effect } from 'effect';
+ * import { awaiting, finalState } from '@matrix-fsm/angular';
+ * import { createEffectMachineFeature } from '@matrix-fsm/angular/effect';
+ *
+ * class PaymentDeclinedError extends Data.TaggedError('PaymentDeclinedError')<{
+ *   readonly reason: string;
+ * }> {}
+ *
+ * export const paymentEffectFSM = createEffectMachineFeature<{
+ *   inputs: { orderId: string; amount: number };
+ *   events: { CHARGE: void };
+ *   outputs: { PAID: { receiptId: string } };
+ *   states: 'ready' | 'charging' | 'declined' | 'failed';
+ * }>()({
+ *   id: 'paymentEffect',
+ *   initial: 'ready',
+ *   transitions: [
+ *     ['ready',    'CHARGE',               awaiting('charging'), { call: (m) => m._charge }],
+ *     ['charging', 'DONE',                 finalState(),         { output: ['PAID', (_c, receiptId) => ({ receiptId })] }],
+ *     ['charging', 'PaymentDeclinedError', 'declined'],
+ *     ['charging', 'ERROR',                'failed'],
+ *   ],
+ *   methods: () => ({
+ *     _charge: (_p: void, _signal: AbortSignal, ctx) =>
+ *       ctx.amount > 0
+ *         ? Effect.succeed(`rcpt_${ctx.orderId}`)
+ *         : Effect.fail(new PaymentDeclinedError({ reason: 'Invalid amount' })),
+ *   }),
+ * });
+ * ```
  */
 export function createEffectMachineFeature<
   TContract extends MachineFeatureContract = EmptyObject,
@@ -266,8 +362,23 @@ export function createEffectMachineFeature<
 }
 
 /**
- * Bridges an `Effect.Effect<A, E, R>` into an `AbortSignal`-aware Promise
- * that automatically interrupts the underlying Effect Fiber when `signal` aborts.
+ * Bridges an `Effect.Effect<A, E, R>` into an `AbortSignal`-aware `Promise<A>` that
+ * automatically interrupts the underlying Effect fiber if `signal` aborts.
+ *
+ * @group Effect-TS
+ * @param effect - Effect program to execute.
+ * @param signal - Optional `AbortSignal` (for example, from an `awaiting()` method signature).
+ * @param runtime - Optional Effect runtime when `R` is non-`never`.
+ * @returns Promise resolving with `A` or rejecting with the unwrapped failure / `AbortError`.
+ *
+ * @example
+ * ```ts
+ * import { Effect } from 'effect';
+ * import { runEffect } from '@matrix-fsm/angular/effect';
+ *
+ * const controller = new AbortController();
+ * const value = await runEffect(Effect.succeed(42), controller.signal);
+ * ```
  */
 export function runEffect<A, E = unknown, R = never>(
   effect: Effect.Effect<A, E, R>,
