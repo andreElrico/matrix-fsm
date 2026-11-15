@@ -2,6 +2,7 @@
   "name": "@matrix-fsm/source",
   "version": "0.0.0",
   "license": "MIT",
+  "homepage": "https://andreElrico.github.io/matrix-fsm/",
   "scripts": {
     "build": "nx run-many -t build",
     "test": "vitest run",
