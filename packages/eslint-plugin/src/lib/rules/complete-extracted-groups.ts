@@ -54,6 +54,7 @@ export const completeExtractedGroups = createRule<
   create(context, [userOptions]) {
     const minRows = userOptions?.minRows ?? 4;
     const extractedGroupsByVar = new Map<string, Set<string>>();
+    const machineNodes: TSESTree.CallExpression[] = [];
 
     return {
       VariableDeclarator(node: TSESTree.VariableDeclarator) {
@@ -91,69 +92,76 @@ export const completeExtractedGroups = createRule<
         }
       },
       CallExpression(node: TSESTree.CallExpression) {
-        const arrayNode = getMachineTransitionsArray(node);
-        if (!arrayNode) {
-          return;
+        if (getMachineTransitionsArray(node)) {
+          machineNodes.push(node);
         }
+      },
+      'Program:exit'() {
+        for (const node of machineNodes) {
+          const arrayNode = getMachineTransitionsArray(node);
+          if (!arrayNode) {
+            continue;
+          }
 
-        // Map groupKey -> varName for all spread extracted variables in this machine
-        const spreadGroupOwners = new Map<
-          string,
-          { varName: string; spreadNode: TSESTree.SpreadElement }
-        >();
+          // Map groupKey -> varName for all spread extracted variables in this machine
+          const spreadGroupOwners = new Map<
+            string,
+            { varName: string; spreadNode: TSESTree.SpreadElement }
+          >();
 
-        for (const el of arrayNode.elements) {
-          if (
-            el &&
-            el.type === AST_NODE_TYPES.SpreadElement &&
-            el.argument.type === AST_NODE_TYPES.Identifier
-          ) {
-            const varName = el.argument.name;
-            const keys = extractedGroupsByVar.get(varName);
-            if (!keys) {
-              continue;
-            }
-            for (const key of keys) {
-              const existing = spreadGroupOwners.get(key);
-              if (existing && existing.varName !== varName) {
-                const [from, via] = key.split('::');
-                context.report({
-                  node: el,
-                  messageId: 'splitExtractedGroup',
-                  data: {
-                    from,
-                    via,
-                    varName,
-                  },
-                });
-              } else {
-                spreadGroupOwners.set(key, { varName, spreadNode: el });
+          for (const el of arrayNode.elements) {
+            if (
+              el &&
+              el.type === AST_NODE_TYPES.SpreadElement &&
+              el.argument.type === AST_NODE_TYPES.Identifier
+            ) {
+              const varName = el.argument.name;
+              const keys = extractedGroupsByVar.get(varName);
+              if (!keys) {
+                continue;
+              }
+              for (const key of keys) {
+                const existing = spreadGroupOwners.get(key);
+                if (existing && existing.varName !== varName) {
+                  const [from, via] = key.split('::');
+                  context.report({
+                    node: el,
+                    messageId: 'splitExtractedGroup',
+                    data: {
+                      from,
+                      via,
+                      varName,
+                    },
+                  });
+                } else {
+                  spreadGroupOwners.set(key, { varName, spreadNode: el });
+                }
               }
             }
           }
-        }
 
-        if (spreadGroupOwners.size === 0) {
-          return;
-        }
-
-        // Check if any direct row in the parent array shares a groupKey with an extracted spread variable
-        for (const el of arrayNode.elements) {
-          const parsed = parseTransitionRow(el);
-          if (!parsed || !parsed.groupKey) {
+          if (spreadGroupOwners.size === 0) {
             continue;
           }
-          const owner = spreadGroupOwners.get(parsed.groupKey);
-          if (owner) {
-            context.report({
-              node: parsed.node,
-              messageId: 'splitExtractedGroup',
-              data: {
-                from: parsed.fromKey ?? '',
-                via: parsed.viaKey ?? '',
-                varName: owner.varName,
-              },
-            });
+
+          // Check if any direct row in the parent array shares a groupKey with an extracted spread variable
+          for (const el of arrayNode.elements) {
+            const parsed = parseTransitionRow(el);
+            if (!parsed || !parsed.groupKey) {
+              continue;
+            }
+            const owner = spreadGroupOwners.get(parsed.groupKey);
+            if (owner) {
+              context.report({
+                node: parsed.node,
+                messageId: 'splitExtractedGroup',
+                data: {
+                  from: parsed.fromKey ?? '',
+                  via: parsed.viaKey ?? '',
+                  varName: owner.varName,
+                },
+              });
+            }
           }
         }
       },

@@ -1,3 +1,4 @@
+import '@angular/compiler';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Injector, runInInjectionContext } from '@angular/core';

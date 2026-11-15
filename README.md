@@ -1,6 +1,6 @@
 # `@matrix-fsm` — Flat 2D Matrix State Machines for TypeScript & Angular SignalStore
 
-`@matrix-fsm` is a type-safe, zero-JSON-hell Finite State Machine (FSM) and Actor orchestration architecture for TypeScript and `@ngrx/signals` (`SignalStore`), backed by compile-time graph validation and 15 AST/Graph ESLint rules.
+`@matrix-fsm` is a type-safe, zero-JSON-hell Finite State Machine (FSM) and Actor orchestration architecture for TypeScript and `@ngrx/signals` (`SignalStore`), backed by compile-time graph validation and 14 canonical AST/Graph ESLint rules.
 
 Instead of deeply nested JSON statecharts, every machine is a **visual, column-aligned 2D transition table**:
 
@@ -19,9 +19,9 @@ Instead of deeply nested JSON statecharts, every machine is a **visual, column-a
 | :--- | :--- |
 | **`@matrix-fsm/core`** | Pure TypeScript (`0%` Angular) 4-column tuple DSL (`[FROM, VIA, TO, OPTIONS?]`), FIFO Run-to-Completion runner (`createMachineInstance`), Mermaid diagram exporter (`toMermaid`), BFS path analyzer (`getShortestPaths`), and recursive compile-time type extractors. |
 | **`@matrix-fsm/angular`** | First-class `@ngrx/signals` integration (`createMachineFeature`, `withStateMachine`, `provideStateMachine`, `createFeatureTester`) with native `Promise` + `AbortSignal`, RxJS `Observable`, and Angular `ResourceRef` support. |
-| **`@matrix-fsm/angular/effect`** | Optional secondary entrypoint (`createEffectMachineFeature`, `runEffect`) for Effect-TS `Effect.Effect<A, E>` fibers with automatic fiber interruption and `Data.TaggedError` (`_tag`) routing. |
+| **`@matrix-fsm/angular/effect`** | Optional secondary entrypoint (`createEffectMachineFeature`, `createEffectTaskAdapter`, `createEffectExecutorAdapter`, `runEffect`) for Effect-TS `Effect.Effect<A, E, R>` fibers with automatic fiber interruption and `Data.TaggedError` (`_tag`) routing. |
 | **`@matrix-fsm/router`** | Two-way URL synchronization (`withRouteMachine`) between SignalStore state machines and routes. |
-| **`@matrix-fsm/eslint-plugin`** | 15 static AST & graph-conservation ESLint rules (including `eslint --fix` auto-alignment for 2D transition tables). |
+| **`@matrix-fsm/eslint-plugin`** | 14 canonical static AST & graph-conservation ESLint rules in `configs.recommended` (plus deprecated `no-shadowed-transitions` alias), including `eslint --fix` auto-alignment for 2D transition tables. |
 
 ---
 
@@ -37,17 +37,17 @@ Every transition row follows the 4-column tuple signature:
 | **`stay()`** | `TO` (Col 3) | `stay(): StayNode` | Keeps the machine in its current state (`TO = FROM`), executes `call` / `output`, and **does not** trigger `onExit`/`onEnter` or cancel in-flight `awaiting()` tasks or timers. Mandatory for gatekeeper fallbacks and `every()` intervals. |
 | **`awaiting(state)`** | `TO` (Col 3) / `FROM` (Col 1) | `awaiting(state: TState): AwaitingNode<TState>` | Marks `state` (must end with `-ing` by convention) as an asynchronous state. Entering it invokes `{ call: (m) => m._asyncTask }` with `(payload, abortSignal, ctx)` and automatically dispatches `'DONE'`, `'ERROR'`, an `outcome(...)` event, or a custom `Error.name` / `_tag` event upon completion. Leaving the state aborts `abortSignal` / unsubscribes RxJS / interrupts Effect fibers immediately. |
 | **`outcome(event, payload?)`** | Task Return | `outcome(event: TEvent, payload?: TPayload): OutcomeNode<TEvent, TPayload>` | Returned from an `awaiting()` method to transition directly via a domain event name (`event`) instead of generic `'DONE'`. |
-| **`anyState()`** | `FROM` (Col 1) | `anyState(): AnyStateNode` | Global wildcard source state. Evaluated in Pass 2 if no state-specific transition matched in Pass 1 (First-Match-Wins). |
+| **`anyState()`** | `FROM` (Col 1) | `anyState(): AnyStateNode` | Global wildcard source state. Evaluated in Pass 2 if no state-specific transition matched in Pass 1 (First-Match-Wins). Legal targets: `stay()`, `finalState()`, `initial` (global reset), or any state when `VIA` includes `'ERROR'`. |
 | **`finalState(outcome?)`** | `TO` (Col 3) | `finalState(outcome?: TOutcome): FinalNode<TOutcome>` | Marks a terminal state (`'DONE'` by default, or a named void outcome like `finalState('CANCELLED')`). When a sub-machine reaches `finalState()`, it tears down and dispatches the outcome (or `{ output: ['EVENT', selector] }`) to its parent machine. |
-| **`after(ms)`** | `VIA` (Col 2) | `after(ms: number \| ((ctx) => number)): AfterNode` | Declarative one-shot timeout. Starts automatically on entering `FROM` (including `initial`), transitions to `TO` (`stay()` is forbidden) after `ms`, and cleans up via `clearTimeout` on state exit. |
-| **`every(ms)`** | `VIA` (Col 2) | `every(ms: number \| ((ctx) => number)): EveryNode` | Declarative recurring interval timer. Must target `stay()` in Column 3. Fires every `ms` while in `FROM`, dynamically adapts if `ctx` changes the duration, and clears on state exit. |
+| **`after(ms)`** | `VIA` (Col 2) | `after(ms: number \| ((ctx) => number)): AfterNode` | Declarative one-shot timeout (can also be placed inside a `VIA` array). Starts automatically on entering `FROM` (including `initial`), transitions to `TO` (`stay()` is forbidden) after `ms`, and cleans up via `clearTimeout` on state exit. |
+| **`every(ms)`** | `VIA` (Col 2) | `every(ms: number \| ((ctx) => number)): EveryNode` | Declarative recurring interval timer (can also be placed inside a `VIA` array). Must target `stay()` in Column 3. Fires every `ms` while in `FROM`, dynamically adapts if `ctx` changes the duration, and clears on state exit. |
 | **`always()`** | `VIA` (Col 2) | `always(): AlwaysNode` | Eventless (epsilon) synchronous transition evaluated immediately upon entering `FROM`. Protected against infinite loops via `MAX_SYNC_MICROSTEPS` (`100`). |
-| **`each(key, childFSM)`** | `TO` (Col 3) / `FROM` (Col 1) | `each(contextArrayKey: TKey, childFSM: TFSM): EachNode<TKey, TFSM>` | Parallel 1:N Master/Slave orchestration. Spawns an isolated `childFSM` instance for every item in `ctx[key]` (passing the item into child context). Dispatches `'ALL_DONE'` (or `'DONE'`) with the ordered array of child results when all instances reach `finalState()`. |
-| **`all(...machines)`** | `TO` (Col 3) / `FROM` (Col 1) | `all(...machines: TFSM[]): AllNode<TFSM>` | `Promise.all`-style parallel actor combinator. Spawns all child machines simultaneously, dispatches `'ALL_DONE'` with `{ [id]: payload }` when all succeed, and fail-fast aborts all remaining actors if any child terminates with `'ERROR'`. |
-| **`race(...machines)`** | `TO` (Col 3) / `FROM` (Col 1) | `race(...machines: TFSM[]): RaceNode<TFSM>` | `Promise.race`-style parallel actor combinator. Spawns all child machines simultaneously; the first child to reach `finalState()` wins and immediately aborts all losers in the same tick. |
-| **`any(...machines)`** | `TO` (Col 3) / `FROM` (Col 1) | `any(...machines: TFSM[]): AnyNode<TFSM>` | `Promise.any`-style parallel actor combinator. Resolves on the first child reaching a non-`'ERROR'` `finalState()` (aborting the rest) and only dispatches `'ERROR'` if every child fails. |
+| **`each(key, childFSM, mapper?)`** | `TO` (Col 3) / `FROM` (Col 1) | `each(contextArrayKey: TKey, childFSM: TFSM, itemInputMapper?: (item, index, ctx) => Inputs): EachNode<TKey, TFSM>` | Parallel 1:N Master/Slave orchestration. Spawns an isolated `childFSM` instance for every item in `ctx[key]` (auto-injecting `{ item, index, [singularKey]: item }`, e.g. `batchOrders -> batchOrder`, plus optional `itemInputMapper`). Dispatches `'ALL_DONE'` (or `'DONE'`) with the ordered array of child results when all instances reach `finalState()`. |
+| **`all(...machines)`** | `TO` (Col 3) / `FROM` (Col 1) | `all(...machines: TFSM[]): AllNode<TFSM>` | `Promise.all`-style parallel actor combinator (variadic or array). Spawns all child machines simultaneously, dispatches `'ALL_DONE'` with `{ [idOrAlias]: payload }` when all succeed, and fail-fast aborts all remaining actors if any child terminates with `'ERROR'`. |
+| **`race(...machines)`** | `TO` (Col 3) / `FROM` (Col 1) | `race(...machines: TFSM[]): RaceNode<TFSM>` | `Promise.race`-style parallel actor combinator (variadic or array). Spawns all child machines simultaneously; the first child to reach `finalState()` wins and immediately aborts all losers in the same tick. |
+| **`any(...machines)`** | `TO` (Col 3) / `FROM` (Col 1) | `any(...machines: TFSM[]): AnyNode<TFSM>` | `Promise.any`-style parallel actor combinator (variadic or array). Resolves on the first child reaching a non-`'ERROR'` `finalState()` (aborting the rest) and only dispatches `'ERROR'` if every child fails. |
 | **`transitions(rows)`** | Helper | `transitions<TContract>()(rows)` / `transitions(rows)` | Zero-cost identity helper (`x => x`) to extract large `[FROM, VIA]` groups (`> 3` rows, i.e. at least 4 rows) into a separate variable while preserving narrow literal types and ESLint checking. |
-| **`subMachine(fsm)`** | `TO` / `FROM` | `subMachine(configOrFSM): SubMachineRef` | Optional wrapper for sub-machines. Note: Any `createFSM` or `createMachineFeature` definition can be placed **directly** in Column 1 (`FROM`) or Column 3 (`TO`) without `subMachine()`. |
+| **`subMachine(fsm, aliasId?)`** | `TO` / `FROM` | `subMachine(configOrFSM, aliasId?): SubMachineRef` | Optional wrapper for sub-machines. Pass `aliasId` (e.g. `subMachine(baristaFSM, 'baristaVip')`) to mount multiple isolated instances of the same machine definition in a parent matrix or combinator. Otherwise, any `createFSM` or `createMachineFeature` definition can be placed **directly** in Column 1 (`FROM`) or Column 3 (`TO`). |
 
 ---
 
@@ -91,8 +91,8 @@ The canonical **"Sandwich Pattern"** builder that combines:
 
 Works seamlessly both as a **root SignalStore feature** (`signalStore(withStateMachine(myFeature))`) and as an **isolated sub-actor** (`store.actors.<id>()`) with zero parent state leakage.
 
-#### `createEffectMachineFeature<TContract>()(config)` (`@matrix-fsm/angular/effect`)
-Identical to `createMachineFeature`, except `awaiting()` methods can return `Effect.Effect<A, E, never>`. Automatically forks fibers via `Effect.runFork`, interrupts them on state exit/cancellation, infers `A` for `'DONE'`, and routes `E` via `'ERROR'` or `Data.TaggedError` `_tag` names in Column 2 (`VIA`).
+#### `createEffectMachineFeature<TContract, TRuntimeEnv = never>()(config)` (`@matrix-fsm/angular/effect`)
+Identical to `createMachineFeature`, except `awaiting()` methods can return `Effect.Effect<A, E, TRuntimeEnv>` (requiring `runtime: ManagedRuntime<TRuntimeEnv, any>` when `TRuntimeEnv` is non-`never`). Automatically forks fibers, interrupts them via the configured runtime on state exit/cancellation, infers `A` for `'DONE'`, and routes `E` via `'ERROR'` or `Data.TaggedError` `_tag` names in Column 2 (`VIA`).
 
 #### `createFSM<TContract>()(config)` (`@matrix-fsm/core`)
 Pure TypeScript (0% Angular) curried machine builder (`{ id, initial, transitions, context? }`). Can be run standalone via `createMachineInstance(fsm, hooks)` or mounted in Angular via `withStateMachine(fsm, { state, methods })`.
@@ -110,13 +110,14 @@ Custom `@ngrx/signals` `signalStoreFeature` that mounts a `createMachineFeature`
 | **`state`** / **`fsmState`** | `Signal<ExtractStates<TFSM>>` | Current active state name of the machine. |
 | **`stateEpoch`** | `Signal<number>` | Monotonically incrementing counter bumped on every non-`stay()` state transition. |
 | **`fsmContext`** | `DeepSignalOf<ExtractContext<TFSM>>` | Deep signal of the machine's context state. |
-| **`actors`** | `{ [id]: Signal<ActorState \| null> }` | Keyed signals for every sub-machine in the hierarchy. Returns the sub-actor's live context while active, or `null` when inactive. |
+| **`actors`** | `{ [idOrAlias]: Signal<ActorState \| null> }` | Keyed signals for every 1:1 sub-machine and `all`/`race`/`any` combinator actor across the entire nested hierarchy (keyed by machine `id` or `subMachine(fsm, 'alias')`). Returns the sub-actor's live context while active, or `null` when inactive. (Use `childMachines` for 1:N `each()` pools.) |
 | **`fsmSubState`** | `Signal<string \| null>` | Active child state when a sub-machine is running, or `null`. |
 | **`fsmSubContext`** | `Signal<Record<string, any> \| null>` | Active child context when a sub-machine is running, or `null`. |
-| **`childMachines`** | `Signal<Record<string, readonly ChildMachineSnapshot[]>>` | Live snapshots of active `each()` pools and `all`/`race`/`any` combinator children. |
+| **`childMachines`** | `Signal<Record<string, readonly ChildMachineSnapshot[]>>` | Live snapshots of active 1:N `each(key, childFSM)` pools (keyed by `key`) and `all`/`race`/`any` combinator children. |
 | **`isPending`** | `Signal<boolean>` | `true` whenever the machine (or an active child actor) is inside an `awaiting()` state. |
 | **`isDone`** | `Signal<boolean>` | `true` when the machine has reached `finalState()`. |
 | **`finalOutcome`** | `Signal<string \| null>` | Name of the terminal outcome once `isDone()` is `true`, otherwise `null`. |
+| **`finalPayload`** | `Signal<unknown>` | Terminal output payload captured when reaching `finalState()`, or `undefined`. |
 | **`send(event, payload?)`** | `SendFn<TFSM>` | Enqueues a strongly-typed event into the FIFO Run-to-Completion queue. Delegates to active sub-actors first if they handle the event (Cooperative Cancel), or triggers parent interrupt transitions. |
 | **`can(event, payload?)`** | `CanFn<TFSM>` | Purely evaluates (`true`/`false`) whether `event` (with optional `payload`) would match a transition from the current state (including guards). |
 | **`sendToChild(key, itemId, event, payload?)`** | `Function` | Sends an event to a specific child instance inside an active `each(key, childFSM)` pool by its item ID. |
@@ -134,11 +135,11 @@ Custom `@ngrx/signals` `signalStoreFeature` that mounts a `createMachineFeature`
 | **`provideStateMachine(fsm, storeOrConfig)`** | `@matrix-fsm/angular` | Explicitly binds or overrides a sub-machine's runtime implementation via Angular DI (`providers: [...]`). |
 | **`patchMachineState(store, ...updaters)`** | `@matrix-fsm/angular` | Safely patches state inside both full `SignalStore` instances and scoped sub-actor runners. |
 | **`getMachineToken(fsm)`** | `@matrix-fsm/angular` | Returns the Angular `InjectionToken` associated with `fsm`. |
-| **`createMachineInstance(fsm, hooks?)`** | `@matrix-fsm/core` | Framework-agnostic (0% Angular) FIFO state machine runner for Node, CLI, or backend services. |
+| **`createMachineInstance(fsm, hooks?)`** | `@matrix-fsm/core` | Framework-agnostic (0% Angular) FIFO state machine runner for Node, CLI, or backend services (includes `instance.subscribe(listenerOrObserver)` and `instance.finalPayload()`). |
 | **`toMermaid(fsmOrFeature)`** | `@matrix-fsm/core` | Generates a Mermaid `stateDiagram-v2` string with `⚡` badges for `awaiting()`, `⇉` badges for `each`/`all`/`race`/`any`, and composite blocks for sub-machines. |
-| **`getShortestPaths(fsmOrFeature)`** | `@matrix-fsm/core` | Computes deterministic shortest transition sequences from `initial` to every reachable state via BFS (used for automated path coverage tests). |
+| **`getShortestPaths(fsmOrFeature, options?)`** | `@matrix-fsm/core` | Computes deterministic shortest transition sequences from `initial` to every reachable state via BFS (`{ externalOnly?: boolean, includeMetadata?: boolean }`). |
 | **`withRouteMachine(fsm, mapping)`** | `@matrix-fsm/router` | Binds a `SignalStore` machine to URL routes (`stateToRoute`, `routeToEvent`, `onNavigate`) and exposes `store.fsmUrl()` + `store.syncFromUrl(url, params)`. |
-| **`runEffect(effect, abortSignal?)`** | `@matrix-fsm/angular/effect` | Bridges an `Effect.Effect<A, E>` into an `AbortSignal`-aware `Promise<A>` that interrupts the fiber on abort. |
+| **`runEffect(effect, abortSignal?, runtime?)`** | `@matrix-fsm/angular/effect` | Bridges an `Effect.Effect<A, E, R>` into an `AbortSignal`-aware `Promise<A>` that interrupts the fiber via `runtime` on abort (alongside `createEffectTaskAdapter` & `createEffectExecutorAdapter`). |
 
 ---
 
@@ -298,7 +299,7 @@ export const coffeeShopFSM = createMachineFeature<{
     ['customerBrowsing',            'SELECT_DRINK',   stay(),                       { call: (m) => m._selectDrink }],
     ['customerBrowsing',            'PLACE_ORDER',    awaiting('checkingLoyalty'),  { guard: hasSelectedDrink, call: (m) => m._checkLoyalty }],
     ['customerBrowsing',            'PLACE_ORDER',    stay(),                       { call: (m) => m._setMissingDrinkError }],
-    ['customerBrowsing',            'BREW_BATCH',     each('batchOrders', baristaFSM)],
+    ['customerBrowsing',            'BREW_BATCH',     each('batchOrders', baristaFSM, (drink) => ({ selectedDrink: drink }))],
 
     // Async loyalty check outcomes:
     ['checkingLoyalty',             'CANCEL',         'customerBrowsing'],
@@ -434,7 +435,7 @@ describe('baristaFSM', () => {
 
 ## Static AST & Graph Conservation Rules (`@matrix-fsm/eslint-plugin`)
 
-Enable all 15 rules with the recommended flat config preset:
+Enable all 14 canonical rules with the recommended flat config preset:
 
 ```js
 // eslint.config.mjs
@@ -447,21 +448,20 @@ export default [
 
 | # | Rule | Auto-Fix | Description |
 | :---: | :--- | :---: | :--- |
-| 1 | `@matrix-fsm/align-matrix-columns` | `eslint --fix` | Enforces that `[FROM, VIA, TO]` sit on a single line and are vertically column-aligned across the entire matrix. |
+| 1 | `@matrix-fsm/align-matrix-columns` | `eslint --fix` | Enforces that `[FROM, VIA, TO]` sit on a single line and are vertically column-aligned (along with same-line `OPTIONS`) across the entire matrix. |
 | 2 | `@matrix-fsm/group-contiguous-transitions` | `eslint --fix` | Requires identical `[FROM, VIA]` rows to be grouped contiguously and expands array shorthands in Column 1. |
 | 3 | `@matrix-fsm/require-fallback-transition` | — | Every guarded `[FROM, VIA]` group must end with an unguarded fallback row (e.g. `stay()`). |
-| 4 | `@matrix-fsm/no-unreachable-transitions` | — | Forbids rows placed after an unguarded row with the same `[FROM, VIA]` (or shadowed by an unguarded `[anyState(), EVENT]`). |
-| 5 | `@matrix-fsm/no-shadowed-transitions` | — | Detects duplicate/shadowed transitions across inline and spread `transitions([...])` groups. |
-| 6 | `@matrix-fsm/require-awaiting-handlers` | — | Every `awaiting('x')` state must handle both `'DONE'` (or `outcome()`) and `'ERROR'` exits. |
-| 7 | `@matrix-fsm/awaiting-naming-convention` | — | Enforces that every `awaiting('...ing')` state name ends with `-ing`. |
-| 8 | `@matrix-fsm/complete-extracted-groups` | — | Forbids splitting a `[FROM, VIA]` group across `transitions([...])` and requires `> 3` rows (`minRows: 4`) before extracting. |
-| 9 | `@matrix-fsm/pure-machine-definition` | — | Forbids Angular/service imports or `inject()` inside `*.machine.ts` / `transitions` arrays and enforces single-method `call: (m) => m._method` selectors. |
-| 10 | `@matrix-fsm/no-conflicting-final-output` | — | Forbids combining a named `finalState('NAME')` with `options.output` in the same row, or responding to a terminal child output with `stay()`. |
-| 11 | `@matrix-fsm/require-exit-for-targets` | — | Every active target (`awaiting`, sub-machine, `all`, `race`, `any`, `each`) in Column 3 (`TO`) must have at least one non-`stay()` exit in Column 1 (`FROM`). |
-| 12 | `@matrix-fsm/no-unreachable-states` | — | Every state or actor in Column 1 (`FROM`, except `anyState()`) must be `initial` or reachable via Column 3 (`TO`). |
-| 13 | `@matrix-fsm/no-duplicate-combinator-actors` | — | Forbids passing duplicate machine references into `all()`, `race()`, or `any()`. |
-| 14 | `@matrix-fsm/valid-any-state-target` | — | Validates legal targets and guards on `anyState()` global transitions. |
-| 15 | `@matrix-fsm/valid-timer-transitions` | — | Enforces that `after(ms)` transitions out of the state (never `stay()`) and `every(ms)` targets `stay()`. |
+| 4 | `@matrix-fsm/no-unreachable-transitions` | — | Forbids rows placed after an unguarded row with the same `[FROM, VIA]` (or shadowed by an unguarded `[anyState(), EVENT]`). *(Deprecated alias: `no-shadowed-transitions`.)* |
+| 5 | `@matrix-fsm/require-awaiting-handlers` | — | Every `awaiting('x')` state must include `{ call }` and handle both `'DONE'` (or `outcome()`) and `'ERROR'` exits. |
+| 6 | `@matrix-fsm/awaiting-naming-convention` | — | Enforces that every `awaiting('...ing')` state name ends with `-ing`. |
+| 7 | `@matrix-fsm/complete-extracted-groups` | — | Forbids splitting a `[FROM, VIA]` group across `transitions([...])` and requires `> 3` rows (`minRows: 4`) before extracting. |
+| 8 | `@matrix-fsm/pure-machine-definition` | — | Forbids Angular/service imports or `inject()` inside `*.machine.ts` / `transitions` arrays and enforces single-method `call: (m) => m._method` selectors. |
+| 9 | `@matrix-fsm/no-conflicting-final-output` | — | Forbids combining a named `finalState('NAME')` with `options.output` in the same row, or responding to a terminal child output with `stay()`. |
+| 10 | `@matrix-fsm/require-exit-for-targets` | — | Every active target (`awaiting`, sub-machine, `all`, `race`, `any`, `each`) in Column 3 (`TO`) must have at least one non-`stay()` exit in Column 1 (`FROM`). |
+| 11 | `@matrix-fsm/no-unreachable-states` | — | Every state or actor in Column 1 (`FROM`, except `anyState()`) must be `initial` or reachable via Column 3 (`TO`). |
+| 12 | `@matrix-fsm/no-duplicate-combinator-actors` | — | Forbids passing duplicate machine references into `all()`, `race()`, or `any()` unless disambiguated via `subMachine(fsm, 'alias')`. |
+| 13 | `@matrix-fsm/valid-any-state-target` | — | Restricts `anyState()` targets to `stay()`, `finalState()`, `initial` (global reset), or `VIA === 'ERROR'`. |
+| 14 | `@matrix-fsm/valid-timer-transitions` | — | Enforces that `after(ms)` transitions out of the state (never `stay()`) and `every(ms)` targets `stay()` (including inside `VIA` arrays). |
 
 ---
 

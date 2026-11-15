@@ -17,6 +17,7 @@ import type {
   EachNode,
   EmptyObject,
   EveryNode,
+  ExtractInput,
   ExtractedTransitionRow,
   FinalNode,
   FSMConfig,
@@ -28,8 +29,10 @@ import type {
   ResolveTransitionsContext,
   ResolveTransitionsMethods,
   StayNode,
+  SubMachineNodeId,
   SubMachineRef,
   TransitionRow,
+  UnwrapSubMachineRef,
   UnwrapSubMachineTuple,
 } from './types.js';
 
@@ -96,11 +99,11 @@ export function anyState(): AnyStateNode {
 /**
  * Terminal state marker for sub-machine or workflow outcomes.
  */
-export function finalState(): FinalNode<'DONE'>;
+export function finalState(): FinalNode<'DONE', true>;
 export function finalState<const TOutcome extends string>(
   outcome: TOutcome,
-): FinalNode<TOutcome>;
-export function finalState(outcome?: string): FinalNode<string> {
+): FinalNode<TOutcome, false>;
+export function finalState(outcome?: string): FinalNode<string, boolean> {
   const isBare = outcome === undefined;
   return Object.freeze({
     __type: 'finalState' as const,
@@ -108,6 +111,8 @@ export function finalState(outcome?: string): FinalNode<string> {
     isBare,
   });
 }
+
+let nextDynamicTimerId = 0;
 
 function normalizeTimerSelectorKey(fn: (...args: any[]) => any): string {
   return fn.toString().replace(/\s+/g, '');
@@ -124,7 +129,7 @@ export function after<const TMs extends number, TContext = any>(
   const id =
     typeof ms === 'number'
       ? (`__after_${ms}__` as const)
-      : (`__after_fn:${normalizeTimerSelectorKey(ms)}__` as const);
+      : (`__after_fn_${++nextDynamicTimerId}:${normalizeTimerSelectorKey(ms)}__` as const);
   return Object.freeze({
     __type: 'after' as const,
     ms,
@@ -143,7 +148,7 @@ export function every<TContext = any>(
   const id =
     typeof ms === 'number'
       ? (`__every_${ms}__` as const)
-      : (`__every_fn:${normalizeTimerSelectorKey(ms)}__` as const);
+      : (`__every_fn_${++nextDynamicTimerId}:${normalizeTimerSelectorKey(ms)}__` as const);
   return Object.freeze({
     __type: 'every' as const,
     ms,
@@ -212,10 +217,22 @@ export function transitions(rows?: unknown): unknown {
 }
 
 /**
- * Compatibility helper for wrapping a child FSM definition or config as a `SubMachineRef`.
- * Note: In Matrix-FSM V1, `createFSM` definitions can be passed directly into
- * Column 1 (`FROM`), Column 3 (`TO`), or `each()` without needing `subMachine()`.
+ * Wraps or aliases a child FSM definition, feature, or config as a `SubMachineRef`.
+ * Pass an optional `aliasId` second argument (`subMachine(dialogFSM, 'confirmDelete')`)
+ * to mount the same reusable sub-machine multiple times in a parent matrix or combinator without ID collisions.
  */
+export function subMachine<
+  TRef extends AnyFSMDefinition | SubMachineRef<any, any>,
+>(
+  fsmOrRef: TRef,
+): SubMachineRef<UnwrapSubMachineRef<TRef>, SubMachineNodeId<TRef>>;
+export function subMachine<
+  TRef extends AnyFSMDefinition | SubMachineRef<any, any>,
+  const TAliasId extends string,
+>(
+  fsmOrRef: TRef,
+  aliasId: TAliasId,
+): SubMachineRef<UnwrapSubMachineRef<TRef>, TAliasId>;
 export function subMachine<
   TId extends string,
   TInitial extends string,
@@ -225,37 +242,89 @@ export function subMachine<
     readonly AnyTransitionRow<TContext, any>[],
   TMethods = EmptyObject,
 >(
-  configOrFSM:
-    | FSMDefinition<TId, TInitial, TContext, TEvents, TTransitions, TMethods>
-    | FSMConfig<TId, TInitial, TContext, TEvents, TTransitions, string, TMethods>,
+  config: FSMConfig<
+    TId,
+    TInitial,
+    TContext,
+    TEvents,
+    TTransitions,
+    string,
+    TMethods
+  >,
 ): SubMachineRef<
   FSMDefinition<TId, TInitial, TContext, TEvents, TTransitions, TMethods>,
   TId
-> {
-  const machine = isFSMDefinition(configOrFSM)
-    ? configOrFSM
-    : createFSM<{
-        events: TEvents;
-        context: TContext;
-        methods: TMethods extends object ? TMethods : EmptyObject;
-      }>()(configOrFSM as any);
+>;
+export function subMachine<
+  TId extends string,
+  TInitial extends string,
+  const TAliasId extends string,
+  TContext extends object = EmptyObject,
+  TEvents extends Record<string, any> = Record<string, any>,
+  const TTransitions extends readonly AnyTransitionRow<TContext, any>[] =
+    readonly AnyTransitionRow<TContext, any>[],
+  TMethods = EmptyObject,
+>(
+  config: FSMConfig<
+    TId,
+    TInitial,
+    TContext,
+    TEvents,
+    TTransitions,
+    string,
+    TMethods
+  >,
+  aliasId: TAliasId,
+): SubMachineRef<
+  FSMDefinition<TId, TInitial, TContext, TEvents, TTransitions, TMethods>,
+  TAliasId
+>;
+export function subMachine(
+  configOrFSM: unknown,
+  aliasId?: string,
+): SubMachineRef<AnyFSMDefinition, string> {
+  const machine = isSubMachineRef(configOrFSM)
+    ? configOrFSM.machine
+    : isFSMDefinition(configOrFSM)
+      ? configOrFSM
+      : createFSM()(configOrFSM as any);
+  const resolvedId =
+    aliasId ??
+    (isSubMachineRef(configOrFSM) ? configOrFSM.id : machine.id);
   return Object.freeze({
     __type: 'subMachine' as const,
-    id: machine.id,
-    machine: machine as FSMDefinition<
-      TId,
-      TInitial,
-      TContext,
-      TEvents,
-      TTransitions,
-      TMethods
-    >,
+    id: resolvedId,
+    machine,
   });
 }
 
 /**
+ * Converts a plural collection key into its singular property name (`'drinks'` -> `'drink'`,
+ * `'categories'` -> `'category'`, `'addresses'` -> `'address'`), returning `null` for non-plural keys (`'status'`).
+ */
+export function singularizeEachKey(key: string): string | null {
+  if (key.length <= 1 || /(?:series|species)$/i.test(key)) {
+    return null;
+  }
+  if (key.endsWith('ies') && key.length > 3) {
+    return `${key.slice(0, -3)}y`;
+  }
+  if (/(?:ss|x|ch|sh|us)es$/.test(key)) {
+    return key.slice(0, -2);
+  }
+  if (/(?:ss|us|is)$/.test(key)) {
+    return null;
+  }
+  if (key.endsWith('s')) {
+    return key.slice(0, -1);
+  }
+  return null;
+}
+
+/**
  * Parallel Master/Slave Orchestration marker.
- * Spawns an isolated `childFSM` instance for each ID in `ctx[contextArrayKey]`.
+ * Spawns an isolated `childFSM` instance for each item in `ctx[contextArrayKey]`.
+ * Accepts an optional `itemInputMapper: (item, index, ctx) => childInputs` third parameter.
  * Automatically dispatches `'ALL_DONE'` to the parent machine when all instances are done.
  */
 export function each<
@@ -264,7 +333,33 @@ export function each<
 >(
   contextArrayKey: TKey,
   childFSM: TFSM | SubMachineRef<TFSM, any>,
-): EachNode<TKey, TFSM> {
+): EachNode<TKey, TFSM, false>;
+export function each<
+  const TKey extends string,
+  TFSM extends AnyFSMDefinition,
+  TItem = any,
+  TParentContext = any,
+>(
+  contextArrayKey: TKey,
+  childFSM: TFSM | SubMachineRef<TFSM, any>,
+  itemInputMapper: (
+    item: TItem,
+    index: number,
+    ctx: ReadonlyContext<TParentContext>,
+  ) => ExtractInput<TFSM>,
+): EachNode<TKey, TFSM, true>;
+export function each<
+  const TKey extends string,
+  TFSM extends AnyFSMDefinition,
+>(
+  contextArrayKey: TKey,
+  childFSM: TFSM | SubMachineRef<TFSM, any>,
+  itemInputMapper?: (
+    item: any,
+    index: number,
+    ctx: any,
+  ) => Record<string, unknown>,
+): EachNode<TKey, TFSM, boolean> {
   const machine = (
     isSubMachineRef(childFSM) ? childFSM.machine : childFSM
   ) as TFSM;
@@ -273,6 +368,7 @@ export function each<
     id: `each:${contextArrayKey}` as const,
     key: contextArrayKey,
     machine,
+    ...(typeof itemInputMapper === 'function' ? { itemInputMapper } : {}),
   });
 }
 
@@ -286,16 +382,24 @@ function createCombinator<
   const rawList = (
     args.length === 1 && Array.isArray(args[0]) ? args[0] : args
   ) as readonly (AnyFSMDefinition | SubMachineRef<any, any>)[];
-  const machines = rawList.map((m) =>
-    isSubMachineRef(m) ? m.machine : m,
+  const actorRefs = rawList.map((m) =>
+    isSubMachineRef(m)
+      ? m
+      : Object.freeze({
+          __type: 'subMachine' as const,
+          id: m.id,
+          machine: m,
+        }),
+  );
+  const machines = actorRefs.map(
+    (ref) => ref.machine,
   ) as unknown as UnwrapSubMachineTuple<TMachines>;
-  const joinedIds = (machines as readonly AnyFSMDefinition[])
-    .map((m) => m.id)
-    .join(',');
+  const joinedIds = actorRefs.map((ref) => ref.id).join(',');
   return Object.freeze({
     __type: kind,
     id: `${kind}:${joinedIds}` as `${TKind}:${JoinMachineIds<TMachines>}`,
     machines: Object.freeze([...machines]) as unknown as UnwrapSubMachineTuple<TMachines>,
+    actorRefs: Object.freeze(actorRefs),
   });
 }
 

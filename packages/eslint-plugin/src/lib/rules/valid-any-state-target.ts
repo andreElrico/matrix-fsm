@@ -3,6 +3,7 @@
  * Restricts `anyState()` in Column 1 (`FROM`) strictly to:
  * - `TO === stay()`
  * - `TO === finalState(...)`
+ * - `TO === initial` (global reset to the machine's initial state)
  * - `VIA === 'ERROR'`
  * Also forbids placing `anyState()` inside a Column 1 (`FROM`) state array.
  */
@@ -15,6 +16,7 @@ import {
 import {
   extractNodeKey,
   getAnyTransitionsArray,
+  getMachineInitialStateKey,
   parseTransitionRow,
 } from '../ast-utils.js';
 
@@ -30,12 +32,12 @@ export const validAnyStateTarget = createRule<[], MessageIds>({
     type: 'problem',
     docs: {
       description:
-        "Restrict anyState() in Column 1 (FROM) to stay(), finalState(), or VIA === 'ERROR', and forbid anyState() inside Column 1 state arrays.",
+        "Restrict anyState() in Column 1 (FROM) to stay(), finalState(), the machine's initial state, or VIA === 'ERROR', and forbid anyState() inside Column 1 state arrays.",
     },
     schema: [],
     messages: {
       invalidAnyStateTarget:
-        "anyState() in Column 1 (FROM) is only allowed with stay(), finalState(), or when Column 2 (VIA) is 'ERROR' (no Hope-Driven state jumps to '{{target}}').",
+        "anyState() in Column 1 (FROM) is only allowed with stay(), finalState(), the machine's initial state, or when Column 2 (VIA) is 'ERROR' (no Hope-Driven state jumps to '{{target}}').",
       anyStateInArray:
         'anyState() cannot be used inside a Column 1 (FROM) state array.',
     },
@@ -48,6 +50,7 @@ export const validAnyStateTarget = createRule<[], MessageIds>({
         if (!arrayNode) {
           return;
         }
+        const initialKey = getMachineInitialStateKey(node);
 
         for (const el of arrayNode.elements) {
           const parsed = parseTransitionRow(el);
@@ -71,9 +74,18 @@ export const validAnyStateTarget = createRule<[], MessageIds>({
           if (parsed.fromKey === 'anyState()') {
             const isStayOrFinal =
               parsed.toKey === 'stay()' || parsed.toKey === 'finalState()';
-            const isErrorVia = parsed.viaKey === 'ERROR';
+            const isInitialReset =
+              initialKey !== null &&
+              parsed.toKey === initialKey &&
+              parsed.awaitingCall === null;
+            const isErrorVia =
+              parsed.viaKey === 'ERROR' ||
+              (parsed.viaNode.type === AST_NODE_TYPES.ArrayExpression &&
+                parsed.viaNode.elements.some(
+                  (v) => extractNodeKey(v) === 'ERROR',
+                ));
 
-            if (!isStayOrFinal && !isErrorVia) {
+            if (!isStayOrFinal && !isInitialReset && !isErrorVia) {
               context.report({
                 node: parsed.toNode,
                 messageId: 'invalidAnyStateTarget',
@@ -88,4 +100,3 @@ export const validAnyStateTarget = createRule<[], MessageIds>({
     };
   },
 });
-

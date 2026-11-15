@@ -2,6 +2,8 @@ import {
   computed,
   inject,
   InjectionToken,
+  Injector,
+  runInInjectionContext,
   signal,
   ɵɵdefineInjectable,
 } from '@angular/core';
@@ -11,7 +13,7 @@ import {
   withMethods,
   withState,
 } from '@ngrx/signals';
-import { Data, Effect } from 'effect';
+import { Context, Data, Effect, Layer, ManagedRuntime } from 'effect';
 import {
   afterEach,
   beforeEach,
@@ -40,6 +42,7 @@ import {
   provideStateMachine,
   race,
   stay,
+  subMachine,
   withStateMachine,
   type Subscribable,
 } from '../index.js';
@@ -3976,7 +3979,7 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
               setTimeout(() => {
                 observer?.next?.('obs-done');
               }, 10);
-              return () => {};
+              return () => undefined;
             },
           }),
         }),
@@ -4054,6 +4057,320 @@ describe('@matrix-fsm/angular - withStateMachine', () => {
       await tester.flushTasks();
       expect(tester.state()).toBe('failed');
       expect(tester.isPending()).toBe(false);
+    });
+
+    it('Cycle 67: executes methods(store) exactly once per store instance and exposes store.send, store.state(), and input signals inside methods', () => {
+      let methodsInitCount = 0;
+      const observedFromMethod: string[] = [];
+
+      const feature = createMachineFeature<{
+        inputs: { readonly tenantId: string };
+        states: 'idle' | 'ready';
+        events: { BOOT: void; AUTO_READY: void };
+      }>()({
+        id: 'singleMethodsExec67',
+        initial: 'idle',
+        state: { count: 0 },
+        transitions: [
+          ['idle', 'BOOT', stay(), { call: (m) => m._onBoot }],
+          ['idle', 'AUTO_READY', 'ready'],
+        ],
+        methods: (store) => {
+          methodsInitCount++;
+          return {
+            _onBoot: () => {
+              observedFromMethod.push(`${store.state()}:${store.tenantId()}`);
+              patchState(store, { count: store.count() + 1 });
+              store.send('AUTO_READY');
+            },
+          };
+        },
+      });
+
+      const Store = signalStore(
+        withState({ tenantId: 'acme-corp' }),
+        withStateMachine(feature),
+      );
+      const injector = Injector.create({
+        providers: [{ provide: Store, useClass: Store, deps: [] }],
+      });
+      const store = runInInjectionContext(injector, () => injector.get(Store));
+
+      expect(methodsInitCount).toBe(1);
+      store.send('BOOT');
+      expect(methodsInitCount).toBe(1);
+      expect(observedFromMethod).toEqual(['idle:acme-corp']);
+      expect(store.count()).toBe(1);
+      expect(store.state()).toBe('ready');
+    });
+
+    it('Cycle 67: syncContext never throws NG0600 inside computed() and reactively triggers always() transitions', () => {
+      const externalScore = signal(10);
+
+      const feature = createMachineFeature<{
+        states: 'locked' | 'unlocked';
+        events: { NOOP: void };
+      }>()({
+        id: 'syncContextComputedSafe67',
+        initial: 'locked',
+        state: { score: 0 },
+        syncContext: () => ({ score: externalScore }),
+        transitions: [
+          ['locked', always(), 'unlocked', { guard: (ctx) => ctx.score >= 100 }],
+          ['locked', 'NOOP', stay()],
+        ],
+      });
+
+      const Store = signalStore(withStateMachine(feature));
+      const injector = Injector.create({
+        providers: [{ provide: Store, useClass: Store, deps: [] }],
+      });
+      const store = runInInjectionContext(injector, () => injector.get(Store));
+
+      const derivedSummary = computed(
+        () => `${store.state()}:${store.fsmContext().score}`,
+      );
+
+      expect(derivedSummary()).toBe('locked:10');
+
+      externalScore.set(50);
+      // Reading derivedSummary() inside Angular's computed phase must NOT throw NG0600!
+      expect(derivedSummary()).toBe('locked:50');
+
+      externalScore.set(120);
+      expect(store.state()).toBe('unlocked');
+      expect(derivedSummary()).toBe('unlocked:120');
+    });
+
+    it('Cycle 67: isolates provideStateMachine DI overrides per Injector tree and throws descriptive error on unmocked DI service in createFeatureTester', () => {
+      const childFSM = createMachineFeature<{
+        states: 'idle';
+        outputs: { DONE: string };
+      }>()({
+        id: 'isolatedChild67',
+        initial: 'idle',
+        state: { tag: 'default-child' },
+        transitions: [
+          ['idle', always(), finalState(), { output: ['DONE', (ctx) => ctx.tag] }],
+        ],
+      });
+
+      const parentFSM = createMachineFeature<{
+        states: 'start' | 'finished';
+        events: { GO: void };
+      }>()({
+        id: 'isolatedParent67',
+        initial: 'start',
+        state: { resultTag: '' },
+        transitions: [
+          ['start', 'GO', childFSM],
+          [childFSM, 'DONE', 'finished', { call: (m) => m._saveTag }],
+        ],
+        methods: (store) => ({
+          _saveTag: (tag: string) => patchState(store, { resultTag: tag }),
+        }),
+      });
+
+      const CustomChildStoreA = signalStore(
+        withStateMachine(childFSM, { state: { tag: 'injector-A' } }),
+      );
+      const ParentStore = signalStore(withStateMachine(parentFSM));
+
+      const injectorA = Injector.create({
+        providers: [
+          provideStateMachine(childFSM, CustomChildStoreA),
+          { provide: ParentStore, useClass: ParentStore, deps: [] },
+        ],
+      });
+      const injectorDefault = Injector.create({
+        providers: [{ provide: ParentStore, useClass: ParentStore, deps: [] }],
+      });
+
+      const storeA = runInInjectionContext(injectorA, () =>
+        injectorA.get(ParentStore),
+      );
+      const storeDefault = runInInjectionContext(injectorDefault, () =>
+        injectorDefault.get(ParentStore),
+      );
+
+      storeA.send('GO');
+      storeDefault.send('GO');
+
+      expect(storeA.resultTag()).toBe('injector-A');
+      expect(storeDefault.resultTag()).toBe('default-child');
+
+      // Descriptive error when unmocked DI dependency method is called in createFeatureTester:
+      const ApiToken = new InjectionToken<{ fetchItems: () => Promise<string[]> }>(
+        'ApiToken67',
+      );
+      const unmockedFeature = createMachineFeature<{
+        states: 'idle';
+        events: { LOAD: void };
+      }>()({
+        id: 'unmockedDi67',
+        initial: 'idle',
+        transitions: [['idle', 'LOAD', stay(), { call: (m) => m._callUnmocked }]],
+        methods: (_store, api = inject(ApiToken)) => ({
+          _callUnmocked: () => {
+            api.fetchItems();
+          },
+        }),
+      });
+
+      const tester = createFeatureTester(unmockedFeature);
+      expect(() => tester.send('LOAD')).toThrow(
+        /Unmocked Angular DI dependency 'dep\d+\.fetchItems'/,
+      );
+    });
+
+    it('Cycle 67: exposes aliased & depth-3 nested store.actors, supports flushTasks() under fake timers, and exposes finalPayload()', async () => {
+      vi.useFakeTimers();
+      try {
+        const leafActor = createMachineFeature<{
+          states: 'leafWaiting';
+          events: { COMPLETE_LEAF: void };
+        }>()({
+          id: 'leafActor67',
+          initial: 'leafWaiting',
+          state: { leafVal: 99 },
+          transitions: [['leafWaiting', 'COMPLETE_LEAF', finalState('DONE')]],
+        });
+
+        const midActor = createMachineFeature<{ states: 'midDone' }>()({
+          id: 'midActor67',
+          initial: leafActor,
+          state: { midVal: 42 },
+          transitions: [[leafActor, 'DONE', finalState('DONE')]],
+        });
+
+        const aliasedMid = subMachine(midActor, 'aliasedMid67');
+
+        const rootFeature = createMachineFeature<{
+          states: 'idle' | 'finishing' | 'done';
+          events: { ENTER_HIERARCHY: void; ASYNC_PING: void };
+          outputs: { FINISHED: { code: number } };
+        }>()({
+          id: 'rootHierarchy67',
+          initial: 'idle',
+          transitions: [
+            ['idle', 'ENTER_HIERARCHY', aliasedMid],
+            [
+              aliasedMid,
+              'DONE',
+              awaiting('finishing'),
+              { call: (m) => m._finishAsync },
+            ],
+            [
+              'finishing',
+              'DONE',
+              finalState(),
+              { output: ['FINISHED', () => ({ code: 200 })] },
+            ],
+            ['finishing', 'ERROR', 'idle'],
+          ],
+          methods: () => ({
+            _finishAsync: async () => 'ok',
+          }),
+        });
+
+        const tester = createFeatureTester(rootFeature);
+        tester.send('ENTER_HIERARCHY');
+
+        // Depth-2 (aliased) and Depth-3 actors are both exposed on actors!
+        expect(tester.actors.aliasedMid67()?.midVal).toBe(42);
+        expect(tester.actors.leafActor67()?.leafVal).toBe(99);
+
+        tester.send('COMPLETE_LEAF');
+        // Must NOT deadlock even though vi.useFakeTimers() is active!
+        await tester.flushTasks();
+
+        expect(tester.isDone()).toBe(true);
+        expect(tester.finalPayload()).toEqual({ code: 200 });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('Cycle 67: enforces TRuntimeEnv on createEffectMachineFeature and interrupts fibers via custom ManagedRuntime', async () => {
+      class PricingService extends Context.Service<
+        PricingService,
+        { readonly quote: () => Effect.Effect<number> }
+      >()('PricingService67') {}
+
+      let interrupted = false;
+      const pricingRuntime = ManagedRuntime.make(
+        Layer.succeed(PricingService, {
+          quote: () =>
+            Effect.gen(function* () {
+              return yield* Effect.never.pipe(
+                Effect.onInterrupt(() =>
+                  Effect.sync(() => {
+                    interrupted = true;
+                  }),
+                ),
+              );
+            }),
+        }),
+      );
+
+      createEffectMachineFeature<
+        {
+          states: 'idle' | 'quoting';
+          events: { QUOTE: void };
+        },
+        PricingService
+        // @ts-expect-error missing required 'runtime' property when TRuntimeEnv is PricingService
+      >()({
+        id: 'missingRuntimeEffect67',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'QUOTE', awaiting('quoting'), { call: (m) => m._quote }],
+          ['quoting', 'DONE', 'idle'],
+          ['quoting', 'ERROR', 'idle'],
+        ],
+        methods: () => ({
+          _quote: () =>
+            Effect.gen(function* () {
+              const svc = yield* PricingService;
+              return yield* svc.quote();
+            }),
+        }),
+      });
+
+      const validEffectFeature = createEffectMachineFeature<
+        {
+          states: 'idle' | 'quoting';
+          events: { QUOTE: void; CANCEL: void };
+        },
+        PricingService
+      >()({
+        id: 'validRuntimeEffect67',
+        initial: 'idle',
+        runtime: pricingRuntime,
+        transitions: [
+          ['idle', 'QUOTE', awaiting('quoting'), { call: (m) => m._quote }],
+          ['quoting', 'CANCEL', 'idle'],
+          ['quoting', 'DONE', 'idle'],
+          ['quoting', 'ERROR', 'idle'],
+        ],
+        methods: () => ({
+          _quote: () =>
+            Effect.gen(function* () {
+              const svc = yield* PricingService;
+              return yield* svc.quote();
+            }),
+        }),
+      });
+
+      const tester = createFeatureTester(validEffectFeature);
+      tester.send('QUOTE');
+      expect(tester.state()).toBe('quoting');
+
+      tester.send('CANCEL');
+      await new Promise((r) => setTimeout(r, 20));
+      expect(tester.state()).toBe('idle');
+      expect(interrupted).toBe(true);
+      await pricingRuntime.dispose();
     });
   });
 });

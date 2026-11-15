@@ -26,13 +26,21 @@ export default defineConfig(() => ({
       transformMixedEsModules: true,
     },
     lib: {
-      entry: 'src/index.ts',
+      entry: {
+        index: 'src/index.ts',
+        'effect/index': 'src/effect/index.ts',
+      },
       name: '@matrix-fsm/angular',
-      fileName: 'index',
       formats: ['es' as const],
     },
     rolldownOptions: {
-      external: ['@angular/core', '@ngrx/signals', 'effect', '@matrix-fsm/core'],
+      external: [
+        /^@angular\/core(\/.*)?$/,
+        /^@ngrx\/signals(\/.*)?$/,
+        /^effect(\/.*)?$/,
+        /^rxjs(\/.*)?$/,
+        /^@matrix-fsm\/core(\/.*)?$/,
+      ],
     },
   },
   test: {

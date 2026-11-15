@@ -2,6 +2,7 @@
  * @matrix-fsm/core - Static Mermaid stateDiagram-v2 Exporter
  */
 
+import { sourceIncludesAnyState } from './fsm.js';
 import {
   isAfterNode,
   isAlwaysNode,
@@ -16,6 +17,7 @@ import {
   isSubMachineRef,
 } from './primitives.js';
 import type {
+  AllowedSendEvents,
   AnyFSMDefinition,
   AnyTransitionRow,
   TransitionOptions,
@@ -32,6 +34,7 @@ function renderMachineBody(
     [...fsm.states].map((s) => sanitizeMermaidId(s)),
   ),
   scopePrefix = '',
+  ancestors = new Set<AnyFSMDefinition>([fsm]),
 ): string[] {
   const lines: string[] = [];
   const localIdMap = new Map<string, string>();
@@ -88,8 +91,8 @@ function renderMachineBody(
   if (fsm.combinatorNodes) {
     for (const [, combNode] of fsm.combinatorNodes) {
       const safeId = resolveScopedId(combNode.id);
-      const childNames = combNode.machines
-        .map((m: AnyFSMDefinition) => m.id)
+      const childNames = (combNode.actorRefs ?? combNode.machines)
+        .map((m: { readonly id: string }) => m.id)
         .join(', ');
       lines.push(
         `${indent}state "⇉ ${combNode.__type}(${childNames})" as ${safeId}`,
@@ -99,21 +102,30 @@ function renderMachineBody(
 
   // 2c. Render anyState() wildcard badge if used in transitions
   const hasAnyState = fsm.transitions.some((row: AnyTransitionRow) =>
-    isAnyStateNode((row as unknown as readonly [unknown])[0]),
+    sourceIncludesAnyState((row as unknown as readonly [unknown])[0]),
   );
   const anyStateId = scopePrefix ? `${scopePrefix}_anyState` : 'anyState';
   if (hasAnyState) {
     lines.push(`${indent}state "(*)" as ${anyStateId}`);
   }
 
-  // 3. Render composite sub-machine blocks
+  // 3. Render composite sub-machine blocks (with ancestor cycle guard)
   for (const [, subRef] of fsm.subMachines) {
     const safeSubId = resolveScopedId(subRef.id);
+    if (ancestors.has(subRef.machine)) {
+      lines.push(
+        `${indent}state "↻ ${subRef.id} (${subRef.machine.id})" as ${safeSubId}`,
+      );
+      continue;
+    }
+    const nextAncestors = new Set(ancestors);
+    nextAncestors.add(subRef.machine);
     const childLines = renderMachineBody(
       subRef.machine,
       `${indent}  `,
       claimedIds,
       safeSubId,
+      nextAncestors,
     );
     const childInitialSafe = sanitizeMermaidId(subRef.machine.initial);
     const childInitialScoped = childLines.some((l) =>
@@ -222,26 +234,52 @@ export function toMermaid(
   return lines.join('\n');
 }
 
-export interface ShortestPathStep {
+export interface ShortestPathStep<TVia extends string = string> {
   readonly from: string;
-  readonly via: string;
+  readonly via: TVia;
   readonly to: string;
   readonly hasGuard: boolean;
+  readonly isChildOutput?: boolean;
 }
+
+export interface GetShortestPathsOptions {
+  /**
+   * When true, skips child-actor output edges (`subMachine`, `all`/`race`/`any`, `each`)
+   * that cannot be driven directly via external `send(step.via)` calls.
+   */
+  readonly externalOnly?: boolean;
+  /**
+   * When true, attaches optional metadata such as `isChildOutput: true` onto steps.
+   */
+  readonly includeMetadata?: boolean;
+}
+
+type UnwrapMachineDef<T> = T extends { readonly fsm: infer F extends AnyFSMDefinition }
+  ? F
+  : T extends AnyFSMDefinition
+    ? T
+    : AnyFSMDefinition;
+
+type ShortestPathViaFor<T> = [AllowedSendEvents<UnwrapMachineDef<T>>] extends [never]
+  ? string
+  : AllowedSendEvents<UnwrapMachineDef<T>>;
 
 /**
  * Computes the deterministic shortest sequence of transitions from `fsm.initial`
  * to every reachable state in the transition matrix using Breadth-First Search (BFS).
  */
-export function getShortestPaths(
-  fsmOrFeature: AnyFSMDefinition | { readonly fsm: AnyFSMDefinition },
-): Readonly<Record<string, ReadonlyArray<ShortestPathStep>>> {
+export function getShortestPaths<
+  TFSM extends AnyFSMDefinition | { readonly fsm: AnyFSMDefinition },
+>(
+  fsmOrFeature: TFSM,
+  pathOptions?: GetShortestPathsOptions,
+): Readonly<Record<string, ReadonlyArray<ShortestPathStep<ShortestPathViaFor<TFSM>>>>> {
   const fsm =
     'fsm' in fsmOrFeature && isFSMDefinition(fsmOrFeature.fsm)
       ? fsmOrFeature.fsm
       : (fsmOrFeature as AnyFSMDefinition);
 
-  const result: Record<string, ReadonlyArray<ShortestPathStep>> = {
+  const result: Record<string, ReadonlyArray<ShortestPathStep<any>>> = {
     [fsm.initial]: [],
   };
   const queue: string[] = [fsm.initial];
@@ -317,6 +355,38 @@ export function getShortestPaths(
           queue.unshift(targetKey);
         }
       } else {
+        const isActorState =
+          fsm.subMachines.has(current) ||
+          Boolean(fsm.combinatorNodes?.has(current)) ||
+          fsm.eachNodes.has(current);
+        const viaStr = formatViaKey(via);
+        const isChildOut =
+          isActorState &&
+          (viaStr === 'DONE' ||
+            viaStr === 'ALL_DONE' ||
+            viaStr === 'ERROR' ||
+            (fsm.subMachines.get(current)?.machine.transitions.some((r: AnyTransitionRow) => {
+              const [, , cTo, cOpts] = r as unknown as readonly [
+                unknown,
+                unknown,
+                unknown,
+                TransitionOptions<any, any, any> | undefined,
+              ];
+              if (cOpts?.output) {
+                const outName =
+                  typeof cOpts.output === 'string'
+                    ? cOpts.output
+                    : String(cOpts.output[0]);
+                if (outName === viaStr) {
+                  return true;
+                }
+              }
+              return isFinalNode(cTo) && cTo.outcome === viaStr;
+            }) ??
+              false));
+        if (pathOptions?.externalOnly && isChildOut) {
+          continue;
+        }
         const candidateLen = pathSoFar.length + 1;
         if (
           !(targetKey in result) ||
@@ -326,9 +396,12 @@ export function getShortestPaths(
             ...pathSoFar,
             {
               from: current,
-              via: formatViaKey(via),
+              via: viaStr,
               to: targetKey,
               hasGuard: Boolean(options?.guard),
+              ...(pathOptions?.includeMetadata && isChildOut
+                ? { isChildOutput: true }
+                : {}),
             },
           ];
           queue.push(targetKey);

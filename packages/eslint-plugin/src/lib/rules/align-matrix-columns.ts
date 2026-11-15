@@ -54,6 +54,8 @@ function fixRowTriplet(
   sourceCode: { getText(node?: TSESTree.Node): string },
   col1Width: number,
   col2Width: number,
+  col3Width: number,
+  alignOptionsColumn: boolean,
   gap: number,
 ) {
   const prefix = buildAlignedTripletPrefix(
@@ -65,6 +67,21 @@ function fixRowTriplet(
   );
   if (!row.optionsNode) {
     return fixer.replaceText(row.node, `${prefix}]`);
+  }
+  if (
+    alignOptionsColumn &&
+    row.optionsNode.loc.start.line === row.toNode.loc.end.line
+  ) {
+    const col1 = normalizeSingleLineText(sourceCode.getText(row.fromNode));
+    const col2 = normalizeSingleLineText(sourceCode.getText(row.viaNode));
+    const col3 = normalizeSingleLineText(sourceCode.getText(row.toNode));
+    const col1Padded = `${col1},`.padEnd(col1Width + 1 + gap, ' ');
+    const col2Padded = `${col2},`.padEnd(col2Width + 1 + gap, ' ');
+    const col3Padded = `${col3},`.padEnd(col3Width + 1 + gap, ' ');
+    return fixer.replaceTextRange(
+      [row.node.range[0], row.optionsNode.range[0]],
+      `[${col1Padded}${col2Padded}${col3Padded}`,
+    );
   }
   return fixer.replaceTextRange(
     [row.node.range[0], row.toNode.range[1]],
@@ -146,6 +163,18 @@ export const alignMatrixColumns = createRule<
             (r) => normalizeSingleLineText(sourceCode.getText(r.viaNode)).length,
           ),
         );
+        const col3Width = Math.max(
+          2,
+          ...rows.map(
+            (r) => normalizeSingleLineText(sourceCode.getText(r.toNode)).length,
+          ),
+        );
+        const sameLineOptionRows = rows.filter(
+          (r): r is ParsedTransitionRow & { optionsNode: TSESTree.Node } =>
+            r.optionsNode !== null &&
+            r.optionsNode.loc.start.line === r.toNode.loc.end.line,
+        );
+        const alignOptionsColumn = sameLineOptionRows.length >= 2;
 
         // 1. Check that [FROM, VIA, TO] are on the same opening line of the tuple
         let hasBrokenTriplet = false;
@@ -171,7 +200,16 @@ export const alignMatrixColumns = createRule<
               },
               fix(fixer) {
                 return rows.map((r) =>
-                  fixRowTriplet(fixer, r, sourceCode, col1Width, col2Width, gap),
+                  fixRowTriplet(
+                    fixer,
+                    r,
+                    sourceCode,
+                    col1Width,
+                    col2Width,
+                    col3Width,
+                    alignOptionsColumn,
+                    gap,
+                  ),
                 );
               },
             });
@@ -182,7 +220,7 @@ export const alignMatrixColumns = createRule<
           return;
         }
 
-        // 2. Check vertical column alignment of FROM, VIA, TO across all rows
+        // 2. Check vertical column alignment of FROM, VIA, TO (and same-line OPTIONS) across all rows
         const targetFromCol = rows[0].fromNode.loc.start.column;
         const targetViaCol = rows[0].viaNode.loc.start.column;
         const targetToCol = rows[0].toNode.loc.start.column;
@@ -207,13 +245,38 @@ export const alignMatrixColumns = createRule<
           }
         }
 
+        if (isAligned && alignOptionsColumn) {
+          const targetOptionsCol =
+            sameLineOptionRows[0].optionsNode.loc.start.column;
+          for (const optRow of sameLineOptionRows) {
+            const optionsCol = optRow.optionsNode.loc.start.column;
+            const toEndCol = optRow.toNode.loc.end.column;
+            if (
+              optionsCol !== targetOptionsCol ||
+              optionsCol - (toEndCol + 1) < 1
+            ) {
+              isAligned = false;
+              break;
+            }
+          }
+        }
+
         if (!isAligned) {
           context.report({
             node: arrayNode,
             messageId: 'unalignedMatrixColumns',
             fix(fixer) {
               return rows.map((r) =>
-                fixRowTriplet(fixer, r, sourceCode, col1Width, col2Width, gap),
+                fixRowTriplet(
+                  fixer,
+                  r,
+                  sourceCode,
+                  col1Width,
+                  col2Width,
+                  col3Width,
+                  alignOptionsColumn,
+                  gap,
+                ),
               );
             },
           });

@@ -9,7 +9,7 @@ import {
   ESLintUtils,
   type TSESTree,
 } from '@typescript-eslint/utils';
-import { extractNodeKey } from '../ast-utils.js';
+import { extractNodeKey, unwrapCombinatorArgs } from '../ast-utils.js';
 
 const createRule = ESLintUtils.RuleCreator(
   (name) => `https://matrix-fsm.dev/rules/${name}`,
@@ -47,7 +47,7 @@ export const noDuplicateCombinatorActors = createRule<[], MessageIds>({
         const combinatorName = node.callee.name;
         const seen = new Set<string>();
 
-        for (const arg of node.arguments) {
+        for (const arg of unwrapCombinatorArgs(node.arguments)) {
           const key = extractNodeKey(arg);
           if (!key) {
             continue;

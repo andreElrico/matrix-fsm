@@ -41,6 +41,7 @@ export const noUnreachableStates = createRule<[], MessageIds>({
   defaultOptions: [],
   create(context) {
     const extractedVars = new Map<string, ParsedTransitionRow[]>();
+    const machineNodes: TSESTree.CallExpression[] = [];
 
     return {
       VariableDeclarator(node: TSESTree.VariableDeclarator) {
@@ -62,114 +63,121 @@ export const noUnreachableStates = createRule<[], MessageIds>({
         }
       },
       CallExpression(node: TSESTree.CallExpression) {
-        const arrayNode = getMachineTransitionsArray(node);
-        if (!arrayNode) {
-          return;
+        if (getMachineTransitionsArray(node)) {
+          machineNodes.push(node);
         }
-
-        const initialKey = getMachineInitialStateKey(node);
-        const allRows: ParsedTransitionRow[] = [];
-        let hasUnresolvedSpread = false;
-
-        for (const el of arrayNode.elements) {
-          if (!el) {
+      },
+      'Program:exit'() {
+        for (const node of machineNodes) {
+          const arrayNode = getMachineTransitionsArray(node);
+          if (!arrayNode) {
             continue;
           }
-          if (el.type === AST_NODE_TYPES.SpreadElement) {
-            if (el.argument.type === AST_NODE_TYPES.Identifier) {
-              const spreadRows = extractedVars.get(el.argument.name);
-              if (spreadRows) {
-                allRows.push(...spreadRows);
+
+          const initialKey = getMachineInitialStateKey(node);
+          const allRows: ParsedTransitionRow[] = [];
+          let hasUnresolvedSpread = false;
+
+          for (const el of arrayNode.elements) {
+            if (!el) {
+              continue;
+            }
+            if (el.type === AST_NODE_TYPES.SpreadElement) {
+              if (el.argument.type === AST_NODE_TYPES.Identifier) {
+                const spreadRows = extractedVars.get(el.argument.name);
+                if (spreadRows) {
+                  allRows.push(...spreadRows);
+                } else {
+                  hasUnresolvedSpread = true;
+                }
               } else {
                 hasUnresolvedSpread = true;
               }
-            } else {
-              hasUnresolvedSpread = true;
+              continue;
             }
+            const parsed = parseTransitionRow(el);
+            if (parsed) {
+              allRows.push(parsed);
+            }
+          }
+
+          if (hasUnresolvedSpread) {
             continue;
           }
-          const parsed = parseTransitionRow(el);
-          if (parsed) {
-            allRows.push(parsed);
-          }
-        }
 
-        if (hasUnresolvedSpread) {
-          return;
-        }
-
-        const reachableStates = new Set<string>();
-        if (initialKey) {
-          reachableStates.add(initialKey);
-          let changed = true;
-          while (changed) {
-            changed = false;
+          const reachableStates = new Set<string>();
+          if (initialKey) {
+            reachableStates.add(initialKey);
+            let changed = true;
+            while (changed) {
+              changed = false;
+              for (const row of allRows) {
+                if (
+                  !row.toKey ||
+                  row.toKey === 'stay()' ||
+                  row.toKey === 'finalState()'
+                ) {
+                  continue;
+                }
+                const canEnterFromRow = row.fromKeys.some(
+                  (fKey) => fKey === 'anyState()' || reachableStates.has(fKey),
+                );
+                if (!canEnterFromRow) {
+                  continue;
+                }
+                if (!reachableStates.has(row.toKey)) {
+                  reachableStates.add(row.toKey);
+                  changed = true;
+                }
+                for (const childKey of row.toChildKeys) {
+                  if (!reachableStates.has(childKey)) {
+                    reachableStates.add(childKey);
+                    changed = true;
+                  }
+                }
+              }
+            }
+          } else {
             for (const row of allRows) {
               if (
-                !row.toKey ||
-                row.toKey === 'stay()' ||
-                row.toKey === 'finalState()'
+                row.toKey &&
+                row.toKey !== 'stay()' &&
+                row.toKey !== 'finalState()' &&
+                row.toKey !== row.fromKey
+              ) {
+                reachableStates.add(row.toKey);
+                for (const childKey of row.toChildKeys) {
+                  if (childKey !== row.fromKey) {
+                    reachableStates.add(childKey);
+                  }
+                }
+              }
+            }
+          }
+
+          const reportedStates = new Set<string>();
+          for (const row of allRows) {
+            for (const fKey of row.fromKeys) {
+              if (
+                !fKey ||
+                fKey === 'anyState()' ||
+                reachableStates.has(fKey) ||
+                reportedStates.has(fKey)
               ) {
                 continue;
               }
-              const canEnterFromRow = row.fromKeys.some(
-                (fKey) => fKey === 'anyState()' || reachableStates.has(fKey),
-              );
-              if (!canEnterFromRow) {
-                continue;
-              }
-              if (!reachableStates.has(row.toKey)) {
-                reachableStates.add(row.toKey);
-                changed = true;
-              }
-              for (const childKey of row.toChildKeys) {
-                if (!reachableStates.has(childKey)) {
-                  reachableStates.add(childKey);
-                  changed = true;
-                }
-              }
+              reportedStates.add(fKey);
+              const displayName = fKey.startsWith('ref:')
+                ? fKey.slice(4)
+                : fKey;
+              context.report({
+                node: row.fromNode,
+                messageId: 'unreachableState',
+                data: {
+                  state: displayName,
+                },
+              });
             }
-          }
-        } else {
-          for (const row of allRows) {
-            if (
-              row.toKey &&
-              row.toKey !== 'stay()' &&
-              row.toKey !== 'finalState()' &&
-              row.toKey !== row.fromKey
-            ) {
-              reachableStates.add(row.toKey);
-              for (const childKey of row.toChildKeys) {
-                if (childKey !== row.fromKey) {
-                  reachableStates.add(childKey);
-                }
-              }
-            }
-          }
-        }
-
-        const reportedStates = new Set<string>();
-        for (const row of allRows) {
-          for (const fKey of row.fromKeys) {
-            if (
-              !fKey ||
-              fKey === 'anyState()' ||
-              reachableStates.has(fKey) ||
-              reportedStates.has(fKey)
-            ) {
-              continue;
-            }
-            reportedStates.add(fKey);
-            const displayName = fKey.startsWith('ref:')
-              ? fKey.slice(4)
-              : fKey;
-            context.report({
-              node: row.fromNode,
-              messageId: 'unreachableState',
-              data: {
-                state: displayName,
-              },
-            });
           }
         }
       },

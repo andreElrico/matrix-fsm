@@ -19,6 +19,10 @@ const jiti = createJiti(import.meta.url, {
       process.cwd(),
       'packages/core/src/index.ts',
     ),
+    '@matrix-fsm/angular/effect': path.resolve(
+      process.cwd(),
+      'packages/angular/src/effect/index.ts',
+    ),
     '@matrix-fsm/angular': path.resolve(
       process.cwd(),
       'packages/angular/src/index.ts',

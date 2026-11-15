@@ -1096,4 +1096,246 @@ describe('@matrix-fsm/eslint-plugin (8 AST Rules)', () => {
       expect(messages).toHaveLength(0);
     });
   });
+
+  describe('19. Cycle 67: Comprehensive ESLint Rule & Autofix Fixes', () => {
+    it('supports subMachine(fsm, "alias") and array-arg combinators across combinator, reachability, and exit rules', () => {
+      const validAliased = verifyRule(
+        'no-duplicate-combinator-actors',
+        `
+        createFSM()({
+          id: 'aliasedWorkers',
+          initial: 'idle',
+          transitions: [
+            ['idle', 'START', all(subMachine(workerFSM, 'w1'), subMachine(workerFSM, 'w2'))],
+            [all(subMachine(workerFSM, 'w1'), subMachine(workerFSM, 'w2')), 'ALL_DONE', 'done'],
+          ],
+        });
+        `,
+      );
+      expect(validAliased.messages).toHaveLength(0);
+
+      const dupArrayArg = verifyRule(
+        'no-duplicate-combinator-actors',
+        `
+        createFSM()({
+          id: 'dupArrayWorkers',
+          initial: 'idle',
+          transitions: [
+            ['idle', 'START', all([workerFSM, workerFSM])],
+          ],
+        });
+        `,
+      );
+      expect(dupArrayArg.messages).toHaveLength(1);
+      expect(dupArrayArg.messages[0].messageId).toBe('duplicateCombinatorActor');
+
+      const reachabilityAliased = verifyRule(
+        'no-unreachable-states',
+        `
+        createFSM()({
+          id: 'aliasedReach',
+          initial: 'idle',
+          transitions: [
+            ['idle', 'GO', subMachine(workerFSM, 'w1')],
+            ['w1', 'DONE', 'finished'],
+          ],
+        });
+        `,
+      );
+      expect(reachabilityAliased.messages).toHaveLength(0);
+
+      const exitAliased = verifyRule(
+        'require-exit-for-targets',
+        `
+        createFSM()({
+          id: 'aliasedExit',
+          initial: 'idle',
+          transitions: [
+            ['idle', 'GO', subMachine(workerFSM, 'w1')],
+            ['w1', 'DONE', 'finished'],
+          ],
+        });
+        `,
+      );
+      expect(exitAliased.messages).toHaveLength(0);
+    });
+
+    it('valid-any-state-target: allows [anyState(), EVENT, initial] global reset and VIA arrays containing ERROR', () => {
+      const valid = verifyRule(
+        'valid-any-state-target',
+        `
+        createFSM()({
+          id: 'globalReset',
+          initial: 'idle',
+          transitions: [
+            ['idle',     'START',            'working'],
+            [anyState(), 'RESET',            'idle'],
+            [anyState(), ['ERROR', 'FATAL'], 'crashScreen'],
+          ],
+        });
+        `,
+      );
+      expect(valid.messages).toHaveLength(0);
+
+      const invalidAwaitingInitial = verifyRule(
+        'valid-any-state-target',
+        `
+        createFSM()({
+          id: 'invalidAwaitingReset',
+          initial: 'loading',
+          transitions: [
+            [anyState(), 'RESET', awaiting('loading')],
+          ],
+        });
+        `,
+      );
+      expect(invalidAwaitingInitial.messages).toHaveLength(1);
+      expect(invalidAwaitingInitial.messages[0].messageId).toBe(
+        'invalidAnyStateTarget',
+      );
+    });
+
+    it('valid-timer-transitions: validates after() and every() inside VIA arrays', () => {
+      const invalid = verifyRule(
+        'valid-timer-transitions',
+        `
+        createFSM()({
+          id: 'viaArrayTimers',
+          initial: 'active',
+          transitions: [
+            ['active', ['CANCEL', after(1000)], stay()],
+            ['active', ['TICK', every(500)],    'stopped'],
+          ],
+        });
+        `,
+      );
+      expect(invalid.messages).toHaveLength(2);
+      expect(invalid.messages[0].messageId).toBe('afterCannotStay');
+      expect(invalid.messages[1].messageId).toBe('everyMustStay');
+    });
+
+    it('group-contiguous-transitions: auto-fixes Column 1 state arrays and preserves comments when sorting groups', () => {
+      const expanded = verifyRule(
+        'group-contiguous-transitions',
+        `createFSM()({
+  id: 'expandCol1',
+  initial: 'a',
+  transitions: [
+    [['a', 'b'], 'CANCEL', 'idle', { call: (m) => m._onCancel }],
+  ],
+});`,
+      );
+      expect(expanded.messages).toHaveLength(1);
+      expect(expanded.messages[0].messageId).toBe('noStateArrayInColumn1');
+      expect(expanded.fixed.fixed).toBe(true);
+      expect(expanded.fixed.output).toContain(
+        `['a', 'CANCEL', 'idle', { call: (m) => m._onCancel }],\n    ['b', 'CANCEL', 'idle', { call: (m) => m._onCancel }]`,
+      );
+
+      const withComments = verifyRule(
+        'group-contiguous-transitions',
+        `createFSM()({
+  id: 'preserveComments',
+  initial: 'a',
+  transitions: [
+    // Primary guarded login
+    ['a', 'GO', 'b', { guard: isReady }], // inline note 1
+    ['b', 'BACK', 'a'],
+    // Fallback row
+    ['a', 'GO', stay()], // inline note 2
+  ],
+});`,
+      );
+      expect(withComments.fixed.fixed).toBe(true);
+      expect(withComments.fixed.output).toContain('// Primary guarded login');
+      expect(withComments.fixed.output).toContain('// inline note 1');
+      expect(withComments.fixed.output).toContain('// Fallback row');
+      expect(withComments.fixed.output).toContain('// inline note 2');
+    });
+
+    it('align-matrix-columns: detects and auto-fixes unaligned Column 4 (OPTIONS) when multiple rows have same-line options', () => {
+      const { messages, fixed } = verifyRule(
+        'align-matrix-columns',
+        `createFSM()({
+  id: 'col4Align',
+  initial: 'idle',
+  transitions: [
+    ['idle',  'GO',  awaiting('loading'), { call: (m) => m._load }],
+    ['idle',  'GO',  stay(), { call: (m) => m._noop }],
+  ],
+});`,
+      );
+      expect(messages).toHaveLength(1);
+      expect(messages[0].messageId).toBe('unalignedMatrixColumns');
+      expect(fixed.fixed).toBe(true);
+      expect(fixed.output).toContain(
+        `  ['idle',  'GO',  awaiting('loading'),  { call: (m) => m._load }],\n    ['idle',  'GO',  stay(),               { call: (m) => m._noop }],`,
+      );
+    });
+
+    it('resolves bottom-of-file local transitions([...]) variables via Program:exit across spread-aware rules', () => {
+      const codeWithBottomSpread = `
+      export const machine = createFSM()({
+        id: 'bottomSpread',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'LOAD', awaiting('loading'), { call: (m) => m._load }],
+          ...loadingHandlers,
+        ],
+      });
+
+      const loadingHandlers = transitions([
+        ['loading', 'DONE',  'ready',     { guard: isOk }],
+        ['loading', 'DONE',  'fallback',  { guard: isFallback }],
+        ['loading', 'DONE',  'empty'],
+        ['loading', 'ERROR', 'failed'],
+      ]);
+      `;
+
+      expect(
+        verifyRule('require-awaiting-handlers', codeWithBottomSpread).messages,
+      ).toHaveLength(0);
+      expect(
+        verifyRule('no-unreachable-states', codeWithBottomSpread).messages,
+      ).toHaveLength(0);
+      expect(
+        verifyRule('require-exit-for-targets', codeWithBottomSpread).messages,
+      ).toHaveLength(0);
+      expect(
+        verifyRule('complete-extracted-groups', codeWithBottomSpread).messages,
+      ).toHaveLength(0);
+
+      // Also catches split group even when transitions([...]) is declared below createFSM!
+      const splitBottomCode = `
+      export const machine = createFSM()({
+        id: 'splitBottom',
+        initial: 'idle',
+        transitions: [
+          ...extraLoginRows,
+          ['idle', 'LOGIN', stay()],
+        ],
+      });
+
+      const extraLoginRows = transitions([
+        ['idle', 'LOGIN', 'a', { guard: g1 }],
+        ['idle', 'LOGIN', 'b', { guard: g2 }],
+        ['idle', 'LOGIN', 'c', { guard: g3 }],
+        ['idle', 'LOGIN', 'd', { guard: g4 }],
+      ]);
+      `;
+      const splitRes = verifyRule('complete-extracted-groups', splitBottomCode);
+      expect(splitRes.messages).toHaveLength(1);
+      expect(splitRes.messages[0].messageId).toBe('splitExtractedGroup');
+    });
+
+    it('marks no-shadowed-transitions as deprecated and distinct from no-unreachable-transitions', () => {
+      expect(plugin.rules['no-shadowed-transitions'].meta.deprecated).toBe(true);
+      expect(plugin.rules['no-shadowed-transitions'].meta.replacedBy).toEqual([
+        'no-unreachable-transitions',
+      ]);
+      expect(plugin.rules['no-shadowed-transitions']).not.toBe(
+        plugin.rules['no-unreachable-transitions'],
+      );
+    });
+  });
 });

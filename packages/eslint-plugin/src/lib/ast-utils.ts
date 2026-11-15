@@ -88,6 +88,23 @@ function serializeTimerExpr(
   }
 }
 
+export function unwrapCombinatorArgs(
+  args: readonly TSESTree.CallExpressionArgument[],
+): readonly TSESTree.Expression[] {
+  if (
+    args.length === 1 &&
+    args[0]?.type === AST_NODE_TYPES.ArrayExpression
+  ) {
+    return args[0].elements.filter(
+      (el): el is TSESTree.Expression =>
+        el !== null && el.type !== AST_NODE_TYPES.SpreadElement,
+    );
+  }
+  return args.filter(
+    (el): el is TSESTree.Expression => el.type !== AST_NODE_TYPES.SpreadElement,
+  );
+}
+
 export function extractNodeKey(
   node: TSESTree.Node | null | undefined,
 ): string | null {
@@ -118,6 +135,19 @@ export function extractNodeKey(
     if (calleeName === 'always' && node.arguments.length === 0) {
       return 'always()';
     }
+    if (calleeName === 'subMachine' && node.arguments.length >= 1) {
+      const firstArg = node.arguments[0];
+      if (firstArg?.type === AST_NODE_TYPES.ObjectExpression) {
+        return null;
+      }
+      if (node.arguments.length >= 2 && node.arguments[1]) {
+        const aliasKey = extractNodeKey(node.arguments[1]);
+        if (aliasKey) {
+          return aliasKey;
+        }
+      }
+      return extractNodeKey(firstArg);
+    }
     if (calleeName === 'each' && node.arguments.length >= 1) {
       const firstArg = extractNodeKey(node.arguments[0]);
       if (firstArg) {
@@ -128,7 +158,8 @@ export function extractNodeKey(
       (calleeName === 'all' || calleeName === 'race' || calleeName === 'any') &&
       node.arguments.length >= 1
     ) {
-      const argKeys = node.arguments
+      const combArgs = unwrapCombinatorArgs(node.arguments);
+      const argKeys = combArgs
         .map((a) => extractNodeKey(a))
         .filter((k): k is string => k !== null);
       if (argKeys.length > 0) {
@@ -187,10 +218,19 @@ export function extractCombinatorChildKeys(
     }
     childKeys.push(...extractCombinatorChildKeys(firstArg));
   } else if (
+    calleeName === 'subMachine' &&
+    node.arguments.length >= 1 &&
+    node.arguments[0]?.type !== AST_NODE_TYPES.ObjectExpression
+  ) {
+    const key = extractNodeKey(node);
+    if (key) {
+      childKeys.push(key);
+    }
+  } else if (
     (calleeName === 'all' || calleeName === 'race' || calleeName === 'any') &&
     node.arguments.length >= 1
   ) {
-    for (const arg of node.arguments) {
+    for (const arg of unwrapCombinatorArgs(node.arguments)) {
       const key = extractNodeKey(arg);
       if (key) {
         childKeys.push(key);
@@ -243,6 +283,22 @@ export function extractTargetInfo(node: TSESTree.Node | null | undefined): {
         toChildKeys: [],
         isTransientTarget: false,
         targetDisplayName: 'finalState()',
+      };
+    }
+    if (
+      calleeName === 'subMachine' &&
+      node.arguments.length >= 1 &&
+      node.arguments[0]?.type !== AST_NODE_TYPES.ObjectExpression
+    ) {
+      const key = extractNodeKey(node);
+      return {
+        toKey: key,
+        toChildKeys: [],
+        isTransientTarget: key !== null,
+        targetDisplayName:
+          key && !key.startsWith('ref:')
+            ? `subMachine(..., '${key}')`
+            : 'subMachine(...)',
       };
     }
     if (

@@ -7,9 +7,12 @@
 
 import type {
   EmptyObject,
+  InitialStateTarget,
   OutcomeNode,
   ResolveContext,
+  ResolveInitialStateKey,
   TransitionRow,
+  ValidateContractKeys,
 } from '@matrix-fsm/core';
 import { Cause, Effect, Exit, Fiber, Option } from 'effect';
 import {
@@ -52,14 +55,63 @@ export type NormalizeEffectMethods<TMethods> =
           : TMethods[K];
       };
 
+type MissingEffectEnvInMethods<TMethods, TRuntimeEnv> =
+  [0] extends [1 & TMethods]
+    ? never
+    : TMethods extends object
+      ? {
+          [K in keyof TMethods]: TMethods[K] extends (...args: any[]) => infer Ret
+            ? Ret extends Effect.Effect<any, any, infer Req>
+              ? [0] extends [1 & Req]
+                ? never
+                : [Req] extends [TRuntimeEnv]
+                  ? never
+                  : Exclude<Req, TRuntimeEnv>
+              : never
+            : never;
+        }[keyof TMethods]
+      : never;
+
+export type ValidateEffectMethodsEnv<TMethods, TRuntimeEnv> = [
+  MissingEffectEnvInMethods<TMethods, TRuntimeEnv>,
+] extends [never]
+  ? unknown
+  : {
+      readonly __effectEnvError: 'Effect method requires environment services not provided by feature runtime';
+      readonly missingServices: MissingEffectEnvInMethods<TMethods, TRuntimeEnv>;
+    };
+
 export interface EffectRuntimeLike<R = never> {
   readonly runFork: <A, E>(
     effect: Effect.Effect<A, E, R>,
   ) => Fiber.Fiber<A, any>;
 }
 
-function createEffectExecutorAdapter(
-  runtimeOption?: EffectRuntimeLike<never> | (() => EffectRuntimeLike<never>),
+function unwrapExitFailure(cause: Cause.Cause<unknown>): unknown {
+  const failureOpt = Cause.findErrorOption(cause);
+  if (Option.isSome(failureOpt)) {
+    return failureOpt.value;
+  }
+  const squashedDefect = Cause.squash(cause);
+  if (
+    typeof squashedDefect === 'object' &&
+    squashedDefect !== null &&
+    ('_tag' in squashedDefect ||
+      ('name' in squashedDefect &&
+        (squashedDefect as { name: unknown }).name !== 'Error'))
+  ) {
+    return new Error(
+      String(
+        (squashedDefect as { message?: unknown }).message ?? 'Effect defect',
+      ),
+      { cause: squashedDefect },
+    );
+  }
+  return squashedDefect;
+}
+
+export function createEffectExecutorAdapter<R = never>(
+  runtimeOption?: EffectRuntimeLike<R> | (() => EffectRuntimeLike<R>),
 ): CustomTaskAdapter {
   return {
     canHandle(result: unknown): boolean {
@@ -76,7 +128,7 @@ function createEffectExecutorAdapter(
       const rt =
         typeof runtimeOption === 'function' ? runtimeOption() : runtimeOption;
       const spawnedFiber: Fiber.Fiber<any, any> = rt
-        ? rt.runFork(result as Effect.Effect<unknown, any, never>)
+        ? rt.runFork(result as Effect.Effect<unknown, any, R>)
         : Effect.runFork(result as Effect.Effect<unknown, any, never>);
       let fiber: Fiber.Fiber<any, any> | null = spawnedFiber;
 
@@ -87,30 +139,7 @@ function createEffectExecutorAdapter(
         if (Exit.isSuccess(exit)) {
           callbacks.onSuccess(exit.value);
         } else {
-          const failureOpt = Cause.findErrorOption(exit.cause);
-          if (Option.isSome(failureOpt)) {
-            callbacks.onFailure(failureOpt.value);
-            return;
-          }
-          const squashedDefect = Cause.squash(exit.cause);
-          if (
-            typeof squashedDefect === 'object' &&
-            squashedDefect !== null &&
-            ('_tag' in squashedDefect ||
-              ('name' in squashedDefect &&
-                (squashedDefect as { name: unknown }).name !== 'Error'))
-          ) {
-            const wrappedDefect = new Error(
-              String(
-                (squashedDefect as { message?: unknown }).message ??
-                  'Effect defect',
-              ),
-              { cause: squashedDefect },
-            );
-            callbacks.onFailure(wrappedDefect);
-            return;
-          }
-          callbacks.onFailure(squashedDefect);
+          callbacks.onFailure(unwrapExitFailure(exit.cause));
         }
       });
 
@@ -118,16 +147,40 @@ function createEffectExecutorAdapter(
         if (fiber) {
           const fiberToInterrupt = fiber;
           fiber = null;
-          Effect.runFork(Fiber.interrupt(fiberToInterrupt));
+          if (rt) {
+            rt.runFork(
+              Fiber.interrupt(fiberToInterrupt) as Effect.Effect<
+                unknown,
+                never,
+                R
+              >,
+            );
+          } else {
+            Effect.runFork(Fiber.interrupt(fiberToInterrupt));
+          }
         }
       };
     },
   };
 }
 
+export const createEffectTaskAdapter = createEffectExecutorAdapter;
+
+type RuntimeConfigField<TRuntimeEnv> = [TRuntimeEnv] extends [never]
+  ? {
+      readonly runtime?:
+        | EffectRuntimeLike<TRuntimeEnv>
+        | (() => EffectRuntimeLike<TRuntimeEnv>);
+    }
+  : {
+      readonly runtime:
+        | EffectRuntimeLike<TRuntimeEnv>
+        | (() => EffectRuntimeLike<TRuntimeEnv>);
+    };
+
 export type EffectMachineFeatureConfig<
   TId extends string,
-  TInitial extends TDeclaredStates,
+  TInitial extends InitialStateTarget<TDeclaredStates>,
   TInputs extends object,
   TState extends object,
   TEvents extends Record<string, any>,
@@ -142,6 +195,7 @@ export type EffectMachineFeatureConfig<
     TOutputs,
     TInputs & TState
   >[],
+  TRuntimeEnv = never,
 > = MachineFeatureConfig<
   TId,
   TInitial,
@@ -153,23 +207,23 @@ export type EffectMachineFeatureConfig<
   TMethods,
   TTransitions,
   NormalizeEffectMethods<ResolveValidatedMethods<NoInfer<TMethods>>>
-> & {
-  readonly runtime?:
-    | EffectRuntimeLike<never>
-    | (() => EffectRuntimeLike<never>);
-};
+> &
+  RuntimeConfigField<TRuntimeEnv> &
+  ValidateEffectMethodsEnv<NoInfer<TMethods>, TRuntimeEnv>;
 
 /**
  * Effect-TS Sub-Machine Actor Creator ("Sandwich-Pattern" for Effect-TS):
- * Executes `Effect.Effect<A, E, never>` returned from `{ call: (m) => m._method }` on `awaiting()`
- * via `Effect.runFork`, automatically interrupts the fiber on state exit, and infers `A` for `'DONE'`
+ * Executes `Effect.Effect<A, E, TRuntimeEnv>` returned from `{ call: (m) => m._method }` on `awaiting()`
+ * via `Effect.runFork` (or custom `runtime.runFork`), automatically interrupts the fiber on state exit,
+ * enforces `[R] extends [TRuntimeEnv]` at compile time, and infers `A` for `'DONE'`
  * and `E` for `'ERROR'` / TaggedError `_tag` transitions.
  */
 export function createEffectMachineFeature<
   TContract extends MachineFeatureContract = EmptyObject,
+  TRuntimeEnv = never,
 >(): <
   const TId extends string,
-  const TInitial extends FeatureStates<TContract>,
+  const TInitial extends InitialStateTarget<FeatureStates<TContract>>,
   const TTransitions extends readonly TransitionRow<
     FeatureInputs<TContract> & TState,
     Extract<keyof FeatureEvents<TContract>, string>,
@@ -190,11 +244,13 @@ export function createEffectMachineFeature<
     FeatureOutputs<TContract>,
     FeatureStates<TContract>,
     TMethods,
-    TTransitions
-  >,
+    TTransitions,
+    TRuntimeEnv
+  > &
+    ValidateContractKeys<TContract, keyof MachineFeatureContract>,
 ) => MachineFeatureDefinition<
   TId,
-  TInitial,
+  ResolveInitialStateKey<TInitial>,
   ResolveContext<FeatureInputs<TContract> & TState, TTransitions>,
   FeatureEvents<TContract>,
   TTransitions,
@@ -236,7 +292,13 @@ export function runEffect<A, E = unknown, R = never>(
     const onAbort = () => {
       if (!settled) {
         settled = true;
-        Effect.runFork(Fiber.interrupt(fiber));
+        if (runtime) {
+          runtime.runFork(
+            Fiber.interrupt(fiber) as Effect.Effect<unknown, never, R>,
+          );
+        } else {
+          Effect.runFork(Fiber.interrupt(fiber));
+        }
         reject(createAbortError());
       }
     };
@@ -252,7 +314,7 @@ export function runEffect<A, E = unknown, R = never>(
       if (Exit.isSuccess(exit)) {
         resolve(exit.value);
       } else {
-        reject(Cause.squash(exit.cause));
+        reject(unwrapExitFailure(exit.cause));
       }
     });
   });

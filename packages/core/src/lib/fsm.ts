@@ -31,11 +31,14 @@ import type {
   FSMConfig,
   FSMContract,
   FSMDefinition,
+  InitialStateTarget,
   ResolveContext,
+  ResolveInitialStateKey,
   SubMachineRef,
   TransitionEvaluation,
   TransitionOptions,
   TransitionRow,
+  ValidateContractKeys,
   ValidateTransitionRows,
 } from './types.js';
 
@@ -197,7 +200,7 @@ export function resolveTargetId(
 
 function buildFSM<
   const TId extends string,
-  const TInitial extends string,
+  const TInitial extends InitialStateTarget<string>,
   TContext extends object,
   TEvents extends Record<string, any>,
   const TTransitions extends readonly AnyTransitionRow<TContext, any>[],
@@ -214,14 +217,16 @@ function buildFSM<
   >,
 ): FSMDefinition<
   TId,
-  TInitial,
+  ResolveInitialStateKey<TInitial>,
   ResolveContext<TContext, TTransitions>,
   TEvents,
   TTransitions,
   TMethods
 > {
   type EffectiveContext = ResolveContext<TContext, TTransitions>;
-  const states = new Set<string>([config.initial]);
+  const initialResolved = resolveTargetId(config.initial, '');
+  const initialStateKey = initialResolved.stateName;
+  const states = new Set<string>([initialStateKey]);
   const awaitingStates = new Set<string>();
   const explicitAwaitingStates = new Set<string>();
   const plainTargetStates = new Set<string>();
@@ -230,6 +235,22 @@ function buildFSM<
   const subMachines = new Map<string, SubMachineRef<any, any>>();
   const eachNodes = new Map<string, EachNode<any, any>>();
   const combinatorNodes = new Map<string, CombinatorNode<any, any>>();
+
+  if (initialResolved.isAwaiting) {
+    explicitAwaitingStates.add(initialStateKey);
+  }
+  if (initialResolved.subMachine) {
+    subMachines.set(initialResolved.subMachine.id, initialResolved.subMachine);
+  }
+  if (initialResolved.eachNode) {
+    eachNodes.set(initialResolved.eachNode.id, initialResolved.eachNode);
+  }
+  if (initialResolved.combinatorNode) {
+    combinatorNodes.set(
+      initialResolved.combinatorNode.id,
+      initialResolved.combinatorNode,
+    );
+  }
 
   for (const row of config.transitions) {
     const [from, via, to, options] = row as unknown as readonly [
@@ -297,7 +318,10 @@ function buildFSM<
     }
   }
 
-  type StateUnion = ExtractStatesFromConfig<TInitial, TTransitions>;
+  type StateUnion = ExtractStatesFromConfig<
+    ResolveInitialStateKey<TInitial>,
+    TTransitions
+  >;
 
   const hasTransitionFor = (
     state: string,
@@ -500,7 +524,7 @@ function buildFSM<
 
   return Object.freeze({
     id: config.id,
-    initial: config.initial,
+    initial: initialStateKey as ResolveInitialStateKey<TInitial>,
     context: (config.context ?? {}) as unknown as EffectiveContext,
     events: (config.events ?? {}) as TEvents,
     transitions: config.transitions,
@@ -525,7 +549,7 @@ export function createFSM<
   TContract extends FSMContract = EmptyObject,
 >(): <
   const TId extends string,
-  const TInitial extends ContractStates<TContract>,
+  const TInitial extends InitialStateTarget<ContractStates<TContract>>,
   const TTransitions extends readonly TransitionRow<
     ContractContext<TContract>,
     Extract<keyof ContractEvents<TContract>, string>,
@@ -546,14 +570,16 @@ export function createFSM<
         Extract<keyof ContractEvents<TContract>, string>,
         ContractMethods<TContract>,
         ContractOutput<TContract>,
-        ContractEvents<TContract>
+        ContractEvents<TContract>,
+        ResolveInitialStateKey<TInitial>
       >,
     ContractStates<TContract>,
     ContractMethods<TContract>
-  >,
+  > &
+    ValidateContractKeys<TContract>,
 ) => FSMDefinition<
   TId,
-  TInitial,
+  ResolveInitialStateKey<TInitial>,
   ResolveContext<ContractContext<TContract>, TTransitions>,
   ContractEvents<TContract>,
   TTransitions,

@@ -14,7 +14,9 @@ import {
   getShortestPaths,
   MatrixFsmInfiniteLoopError,
   race,
+  singularizeEachKey,
   stay,
+  subMachine,
   toMermaid,
   transitions,
   type ExtractAllContext,
@@ -27,6 +29,7 @@ import {
   type ExtractInputs,
   type ExtractMethods,
   type ExtractStates,
+  type ExtractTerminalOutputPayload,
   type ExtractTerminalOutputs,
   type RequiredTasksMap,
   type SubscribableLike,
@@ -546,7 +549,7 @@ describe('@matrix-fsm/core', () => {
       initialContext: { drink: 'Espresso', temp: 65, percent: 0 } as any,
     });
     brokenInstance.send('PAY');
-    expect(() => brokenInstance.send('START_BREWING')).toThrow(
+    expect(() => brokenInstance.send('START_BREWING' as any)).toThrow(
       "[MatrixFSM Error]: Sub-machine 'barista' emitted output 'STEAM_READY', but parent 'coffeeShop' has no matching transition. Prevented silent deadlock!",
     );
   });
@@ -3291,7 +3294,7 @@ describe('@matrix-fsm/core', () => {
 
       const inst = createMachineInstance(parentFSM, {
         methods: {
-          _saveAsync: async () => {},
+          _saveAsync: async () => undefined,
         },
       });
 
@@ -3306,6 +3309,347 @@ describe('@matrix-fsm/core', () => {
       inst.restoreSnapshot(snap);
       expect(inst.isDone()).toBe(true);
       expect(inst.finalOutcome()).toBe('FINISHED');
+    });
+  });
+
+  describe('Cycle 67: Comprehensive Audit Fixes (Types, Combinators, Depth-N Recursion & Lifecycle)', () => {
+    it('validates FSMContract keys, allows [anyState(), EVENT, initial] global reset, and supports timers inside VIA arrays', () => {
+      vi.useFakeTimers();
+      try {
+        // @ts-expect-error misspelled contract key 'evnts' must be rejected at compile time
+        createFSM<{ evnts: { GO: void } }>();
+
+        let ticks = 0;
+        const fsm = createFSM<{
+          states: 'idle' | 'working' | 'timedOut';
+          events: { START: void; RESET: void; MANUAL_TIMEOUT: void; MANUAL_TICK: void };
+          methods: { _tick: () => void };
+        }>()({
+          id: 'globalResetAndViaTimers67',
+          initial: 'idle',
+          transitions: [
+            ['idle', 'START', 'working'],
+            ['working', ['MANUAL_TICK', every(25)], stay(), { call: (m) => m._tick }],
+            ['working', ['MANUAL_TIMEOUT', after(80)], 'timedOut'],
+            [anyState(), 'RESET', 'idle'],
+          ],
+        });
+
+        createFSM<{ states: 'idle' }>()({
+          id: 'invalidViaArrayTimer67',
+          initial: 'idle',
+          transitions: [
+            // @ts-expect-error after() inside VIA array cannot target stay()
+            ['idle', ['CANCEL', after(50)], stay()],
+          ],
+        });
+
+        const inst = createMachineInstance(fsm, {
+          methods: {
+            _tick: () => {
+              ticks++;
+            },
+          },
+        });
+
+        inst.send('START');
+        expect(inst.state()).toBe('working');
+
+        vi.advanceTimersByTime(55);
+        expect(ticks).toBe(2);
+
+        inst.send('RESET');
+        expect(inst.state()).toBe('idle');
+
+        inst.send('START');
+        vi.advanceTimersByTime(85);
+        expect(inst.state()).toBe('timedOut');
+
+        inst.send('RESET');
+        expect(inst.state()).toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('supports each(key, childFSM, mapper), singularizeEachKey, and rejects unmet child inputs on each()', () => {
+      expect(singularizeEachKey('categories')).toBe('category');
+      expect(singularizeEachKey('addresses')).toBe('address');
+      expect(singularizeEachKey('batchOrders')).toBe('batchOrder');
+      expect(singularizeEachKey('status')).toBeNull();
+      expect(singularizeEachKey('series')).toBeNull();
+
+      const strictItemFSM = createFSM<{
+        inputs: { readonly selectedDrink: string };
+        states: 'queued';
+        outputs: { DONE: string };
+      }>()({
+        id: 'strictItem67',
+        initial: 'queued',
+        transitions: [
+          ['queued', always(), finalState(), { output: ['DONE', (ctx) => ctx.selectedDrink.toUpperCase()] }],
+        ],
+      });
+
+      createFSM<{
+        states: 'idle' | 'done';
+        context: { batchOrders: string[] };
+        events: { RUN: void };
+      }>()({
+        id: 'unmetEachInput67',
+        initial: 'idle',
+        transitions: [
+          // @ts-expect-error batchOrders -> batchOrder does not satisfy required 'selectedDrink' without mapper
+          ['idle', 'RUN', each('batchOrders', strictItemFSM)],
+          [each('batchOrders', strictItemFSM), 'ALL_DONE', 'done'],
+        ],
+      });
+
+      let results: string[] = [];
+      const validBatchFSM = createFSM<{
+        states: 'idle' | 'done';
+        context: { batchOrders: string[] };
+        events: { RUN: void };
+        methods: { _save: (res: string[]) => void };
+      }>()({
+        id: 'validEachMapper67',
+        initial: 'idle',
+        context: { batchOrders: ['latte', 'mocha'] },
+        transitions: [
+          ['idle', 'RUN', each('batchOrders', strictItemFSM, (drink) => ({ selectedDrink: drink }))],
+          [each('batchOrders', strictItemFSM), 'ALL_DONE', 'done', { call: (m) => m._save }],
+        ],
+      });
+
+      const inst = createMachineInstance(validBatchFSM, {
+        methods: {
+          _save: (res) => {
+            results = res;
+          },
+        },
+      });
+      inst.send('RUN');
+      expect(inst.state()).toBe('done');
+      expect(results).toEqual(['LATTE', 'MOCHA']);
+      expect(inst.childMachines()['batchOrders']?.every((c) => c.isDone)).toBe(
+        true,
+      );
+    });
+
+    it('supports subMachine(fsm, alias) inside all() and preserves mid-flight combinatorProgress across getSnapshot/restoreSnapshot', async () => {
+      let callIdx = 0;
+      let resolveSecond!: (val: string) => void;
+
+      const workerFSM = createFSM<{
+        states: 'queued' | 'working';
+        events: { RUN_WORK: void };
+        outputs: { DONE: string };
+        methods: { _doWork: () => Promise<string> };
+      }>()({
+        id: 'worker67',
+        initial: 'queued',
+        transitions: [
+          ['queued', 'RUN_WORK', awaiting('working'), { call: (m) => m._doWork }],
+          ['working', 'DONE', finalState(), { output: ['DONE', (_ctx, v) => v] }],
+          ['working', 'ERROR', 'queued'],
+        ],
+      });
+
+      const w1 = subMachine(workerFSM, 'w1');
+      const w2 = subMachine(workerFSM, 'w2');
+      let combinedOutput: Record<string, unknown> | null = null;
+
+      const parentFSM = createFSM<{
+        states: 'idle' | 'completed';
+        events: { START: void };
+        methods: { _onAllDone: (out: Record<string, unknown>) => void };
+      }>()({
+        id: 'aliasedCombinator67',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'START', all(w1, w2)],
+          [all(w1, w2), 'ALL_DONE', 'completed', { call: (m) => m._onAllDone }],
+        ],
+      });
+
+      const inst = createMachineInstance(parentFSM, {
+        methods: {
+          _doWork: () => {
+            callIdx++;
+            if (callIdx === 1) {
+              return Promise.resolve('alpha');
+            }
+            return new Promise<string>((r) => {
+              resolveSecond = r;
+            });
+          },
+          _onAllDone: (out) => {
+            combinedOutput = out;
+          },
+        },
+      });
+
+      inst.send('START');
+      expect(inst.childMachines()['all:w1,w2']).toHaveLength(2);
+
+      // Start both w1 and w2; w1 settles on microtask while w2 stays pending!
+      inst.send('RUN_WORK');
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(inst.state()).toBe('all:w1,w2');
+
+      const midSnap = inst.getSnapshot();
+      expect(midSnap.combinatorProgress?.settledIndices).toEqual([0]);
+
+      inst.reset();
+      expect(inst.state()).toBe('idle');
+
+      inst.restoreSnapshot(midSnap);
+      expect(inst.state()).toBe('all:w1,w2');
+
+      // Re-run w2 ONLY after restore -> combinator completes with both w1 and w2 outputs!
+      inst.send('RUN_WORK');
+      resolveSecond('beta');
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(inst.state()).toBe('completed');
+      expect(combinedOutput).toEqual({ w1: 'alpha', w2: 'beta' });
+    });
+
+    it('extracts types and delegates events recursively past depth 3, and boots/resets initial composite states', () => {
+      const lvl4 = createFSM<{
+        states: 'deepIdle' | 'deepLeaf';
+        events: { DEEP_PING: void; FINISH_DEEP: void };
+      }>()({
+        id: 'lvl4_67',
+        initial: 'deepIdle',
+        transitions: [
+          ['deepIdle', 'DEEP_PING', 'deepLeaf'],
+          ['deepLeaf', 'FINISH_DEEP', finalState('DONE')],
+        ],
+      });
+
+      const lvl3 = createFSM<{ states: 'done3' }>()({
+        id: 'lvl3_67',
+        initial: lvl4,
+        transitions: [[lvl4, 'DONE', finalState('DONE')]],
+      });
+
+      const lvl2 = createFSM<{ states: 'done2' }>()({
+        id: 'lvl2_67',
+        initial: lvl3,
+        transitions: [[lvl3, 'DONE', finalState('DONE')]],
+      });
+
+      const lvl1 = createFSM<{ states: 'allFinished' }>()({
+        id: 'lvl1_67',
+        initial: lvl2,
+        transitions: [[lvl2, 'DONE', 'allFinished']],
+      });
+
+      expectTypeOf<'deepLeaf'>().toExtend<ExtractStates<typeof lvl1>>();
+      expectTypeOf<'DEEP_PING'>().toExtend<ExtractEvents<typeof lvl1>>();
+
+      const inst = createMachineInstance(lvl1);
+      expect(inst.state()).toBe('lvl2_67');
+      expect(inst.can('DEEP_PING')).toBe(true);
+
+      inst.send('DEEP_PING');
+      expect(inst.can('FINISH_DEEP')).toBe(true);
+
+      inst.send('FINISH_DEEP');
+      expect(inst.state()).toBe('allFinished');
+
+      inst.reset();
+      expect(inst.state()).toBe('lvl2_67');
+      expect(inst.can('DEEP_PING')).toBe(true);
+    });
+
+    it('accurately tracks sync awaiting isPending(), subscribe(), finalPayload(), getShortestPaths({ externalOnly }), and cyclic toMermaid()', () => {
+      const bareDoneChild = createFSM<{ states: 'a'; events: { GO: void } }>()({
+        id: 'bareDone67',
+        initial: 'a',
+        transitions: [['a', 'GO', finalState('CANCELLED')]],
+      });
+      expectTypeOf<
+        ExtractTerminalOutputPayload<typeof bareDoneChild>
+      >().toEqualTypeOf<undefined>();
+
+      const payloadChild = createFSM<{
+        states: 'a' | 'computing';
+        events: { GO: void };
+        outputs: { DONE: number };
+        methods: { _computeSync: () => number };
+      }>()({
+        id: 'payloadChild67',
+        initial: 'a',
+        transitions: [
+          ['a', 'GO', awaiting('computing'), { call: (m) => m._computeSync }],
+          ['computing', 'DONE', finalState(), { output: ['DONE', (_ctx, v) => v] }],
+          ['computing', 'ERROR', 'a'],
+        ],
+      });
+      expectTypeOf<
+        ExtractTerminalOutputPayload<typeof payloadChild>
+      >().toEqualTypeOf<number>();
+
+      const observedStates: string[] = [];
+      const childInst = createMachineInstance(payloadChild, {
+        methods: {
+          _computeSync: () => 42,
+        },
+      });
+      const unsub = childInst.subscribe((snap) => {
+        observedStates.push(snap.state);
+      });
+
+      childInst.send('GO');
+      expect(childInst.isPending()).toBe(false);
+      expect(childInst.isDone()).toBe(true);
+      expect(childInst.finalPayload()).toBe(42);
+      expect(observedStates.length).toBeGreaterThan(0);
+
+      const countBeforeUnsub = observedStates.length;
+      unsub();
+      childInst.reset();
+      expect(observedStates).toHaveLength(countBeforeUnsub);
+
+      const parentForPaths = createFSM<{
+        states: 'idle' | 'afterChild';
+        events: { ENTER_CHILD: void };
+      }>()({
+        id: 'parentPaths67',
+        initial: 'idle',
+        transitions: [
+          ['idle', 'ENTER_CHILD', bareDoneChild],
+          [bareDoneChild, 'CANCELLED', 'afterChild'],
+        ],
+      });
+
+      const externalPaths = getShortestPaths(parentForPaths, {
+        externalOnly: true,
+      });
+      expect(externalPaths['bareDone67']).toBeDefined();
+      expect(externalPaths['afterChild']).toBeUndefined();
+
+      const fullMetaPaths = getShortestPaths(parentForPaths, {
+        includeMetadata: true,
+      });
+      expect(fullMetaPaths['afterChild']?.[1]?.isChildOutput).toBe(true);
+
+      // Cyclic subMachine reference must not stack-overflow toMermaid()
+      const cyclicTransitions: any[] = [];
+      const cyclicFSM = createFSM()({
+        id: 'cyclicNode67',
+        initial: 'idle',
+        transitions: cyclicTransitions,
+      });
+      cyclicTransitions.push(['idle', 'RECURSE', cyclicFSM]);
+      (cyclicFSM.subMachines as Map<string, any>).set(
+        'cyclicNode67',
+        subMachine(cyclicFSM),
+      );
+      expect(() => toMermaid(cyclicFSM)).not.toThrow();
     });
   });
 });

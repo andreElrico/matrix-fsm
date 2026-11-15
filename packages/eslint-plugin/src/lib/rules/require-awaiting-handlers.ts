@@ -39,6 +39,7 @@ export const requireAwaitingHandlers = createRule<[], MessageIds>({
   defaultOptions: [],
   create(context) {
     const extractedVars = new Map<string, ParsedTransitionRow[]>();
+    const machineNodes: TSESTree.CallExpression[] = [];
 
     return {
       VariableDeclarator(node: TSESTree.VariableDeclarator) {
@@ -60,146 +61,153 @@ export const requireAwaitingHandlers = createRule<[], MessageIds>({
         }
       },
       CallExpression(node: TSESTree.CallExpression) {
-        const arrayNode = getMachineTransitionsArray(node);
-        if (!arrayNode) {
-          return;
+        if (getMachineTransitionsArray(node)) {
+          machineNodes.push(node);
         }
-
-        const allRows: ParsedTransitionRow[] = [];
-        let hasUnresolvedSpread = false;
-        for (const el of arrayNode.elements) {
-          if (!el) {
+      },
+      'Program:exit'() {
+        for (const node of machineNodes) {
+          const arrayNode = getMachineTransitionsArray(node);
+          if (!arrayNode) {
             continue;
           }
-          if (el.type === AST_NODE_TYPES.SpreadElement) {
-            if (el.argument.type === AST_NODE_TYPES.Identifier) {
-              const spreadRows = extractedVars.get(el.argument.name);
-              if (spreadRows) {
-                allRows.push(...spreadRows);
+
+          const allRows: ParsedTransitionRow[] = [];
+          let hasUnresolvedSpread = false;
+          for (const el of arrayNode.elements) {
+            if (!el) {
+              continue;
+            }
+            if (el.type === AST_NODE_TYPES.SpreadElement) {
+              if (el.argument.type === AST_NODE_TYPES.Identifier) {
+                const spreadRows = extractedVars.get(el.argument.name);
+                if (spreadRows) {
+                  allRows.push(...spreadRows);
+                } else {
+                  hasUnresolvedSpread = true;
+                }
               } else {
                 hasUnresolvedSpread = true;
               }
-            } else {
-              hasUnresolvedSpread = true;
+              continue;
             }
-            continue;
+            const parsed = parseTransitionRow(el);
+            if (parsed) {
+              allRows.push(parsed);
+            }
           }
-          const parsed = parseTransitionRow(el);
-          if (parsed) {
-            allRows.push(parsed);
+
+          const awaitingStateNames = new Set<string>();
+          for (const row of allRows) {
+            if (row.awaitingCall) {
+              awaitingStateNames.add(row.awaitingCall.stateName);
+            }
           }
-        }
 
-        const awaitingStateNames = new Set<string>();
-        for (const row of allRows) {
-          if (row.awaitingCall) {
-            awaitingStateNames.add(row.awaitingCall.stateName);
-          }
-        }
+          const externalEvents = new Set<string>(['CANCEL', 'ERROR']);
+          const extractViaKeys = (row: ParsedTransitionRow): string[] =>
+            row.viaNode.type === AST_NODE_TYPES.ArrayExpression
+              ? row.viaNode.elements
+                  .map((el) => (el ? extractNodeKey(el) : null))
+                  .filter((k): k is string => k !== null)
+              : row.viaKey
+                ? [row.viaKey]
+                : [];
 
-        const externalEvents = new Set<string>(['CANCEL', 'ERROR']);
-        const extractViaKeys = (row: ParsedTransitionRow): string[] =>
-          row.viaNode.type === AST_NODE_TYPES.ArrayExpression
-            ? row.viaNode.elements
-                .map((el) => (el ? extractNodeKey(el) : null))
-                .filter((k): k is string => k !== null)
-            : row.viaKey
-              ? [row.viaKey]
-              : [];
-
-        for (const row of allRows) {
-          const viaKeys = extractViaKeys(row);
-          const isFromNonAwaiting = row.fromKeys.some(
-            (fKey) => fKey !== 'anyState()' && !awaitingStateNames.has(fKey),
-          );
-          if (isFromNonAwaiting) {
-            for (const v of viaKeys) {
-              if (v !== 'DONE' && v !== 'ALL_DONE') {
-                externalEvents.add(v);
+          for (const row of allRows) {
+            const viaKeys = extractViaKeys(row);
+            const isFromNonAwaiting = row.fromKeys.some(
+              (fKey) => fKey !== 'anyState()' && !awaitingStateNames.has(fKey),
+            );
+            if (isFromNonAwaiting) {
+              for (const v of viaKeys) {
+                if (v !== 'DONE' && v !== 'ALL_DONE') {
+                  externalEvents.add(v);
+                }
               }
             }
           }
-        }
 
-        const doneStates = new Set<string>();
-        const errorStates = new Set<string>();
+          const doneStates = new Set<string>();
+          const errorStates = new Set<string>();
 
-        for (const row of allRows) {
-          const viaKeys = extractViaKeys(row);
-          for (const fKey of row.fromKeys) {
-            if (
-              viaKeys.includes('DONE') ||
-              viaKeys.includes('ALL_DONE') ||
-              (awaitingStateNames.has(fKey) &&
-                viaKeys.some(
-                  (v) =>
-                    !externalEvents.has(v) &&
-                    !v.startsWith('after(') &&
-                    !v.startsWith('every(') &&
-                    v !== 'always()',
-                ))
-            ) {
-              doneStates.add(fKey);
-            }
-            if (viaKeys.includes('ERROR')) {
-              errorStates.add(fKey);
+          for (const row of allRows) {
+            const viaKeys = extractViaKeys(row);
+            for (const fKey of row.fromKeys) {
+              if (
+                viaKeys.includes('DONE') ||
+                viaKeys.includes('ALL_DONE') ||
+                (awaitingStateNames.has(fKey) &&
+                  viaKeys.some(
+                    (v) =>
+                      !externalEvents.has(v) &&
+                      !v.startsWith('after(') &&
+                      !v.startsWith('every(') &&
+                      v !== 'always()',
+                  ))
+              ) {
+                doneStates.add(fKey);
+              }
+              if (viaKeys.includes('ERROR')) {
+                errorStates.add(fKey);
+              }
             }
           }
-        }
 
-        for (const row of allRows) {
-          if (row.anyCombinatorCall && !hasUnresolvedSpread) {
-            const { stateKey, callNode } = row.anyCombinatorCall;
+          for (const row of allRows) {
+            if (row.anyCombinatorCall && !hasUnresolvedSpread) {
+              const { stateKey, callNode } = row.anyCombinatorCall;
+              const hasError =
+                errorStates.has(stateKey) || errorStates.has('anyState()');
+              if (!hasError) {
+                context.report({
+                  node: callNode,
+                  messageId: 'missingAwaitingHandlers',
+                  data: {
+                    state: 'any(...)',
+                    missing: `[any(...), 'ERROR', ...]`,
+                  },
+                });
+              }
+            }
+            if (!row.awaitingCall) {
+              continue;
+            }
+            const { stateName, callNode } = row.awaitingCall;
+            if (!hasCallOption(row.optionsNode)) {
+              context.report({
+                node: callNode,
+                messageId: 'missingAwaitingCall',
+                data: {
+                  state: stateName,
+                },
+              });
+            }
+            if (hasUnresolvedSpread) {
+              continue;
+            }
+            const hasDone =
+              doneStates.has(stateName) || doneStates.has('anyState()');
             const hasError =
-              errorStates.has(stateKey) || errorStates.has('anyState()');
-            if (!hasError) {
+              errorStates.has(stateName) || errorStates.has('anyState()');
+
+            if (!hasDone || !hasError) {
+              const missingParts: string[] = [];
+              if (!hasDone) {
+                missingParts.push(`['${stateName}', 'DONE', ...]`);
+              }
+              if (!hasError) {
+                missingParts.push(`['${stateName}', 'ERROR', ...]`);
+              }
               context.report({
                 node: callNode,
                 messageId: 'missingAwaitingHandlers',
                 data: {
-                  state: 'any(...)',
-                  missing: `[any(...), 'ERROR', ...]`,
+                  state: stateName,
+                  missing: missingParts.join(' and '),
                 },
               });
             }
-          }
-          if (!row.awaitingCall) {
-            continue;
-          }
-          const { stateName, callNode } = row.awaitingCall;
-          if (!hasCallOption(row.optionsNode)) {
-            context.report({
-              node: callNode,
-              messageId: 'missingAwaitingCall',
-              data: {
-                state: stateName,
-              },
-            });
-          }
-          if (hasUnresolvedSpread) {
-            continue;
-          }
-          const hasDone =
-            doneStates.has(stateName) || doneStates.has('anyState()');
-          const hasError =
-            errorStates.has(stateName) || errorStates.has('anyState()');
-
-          if (!hasDone || !hasError) {
-            const missingParts: string[] = [];
-            if (!hasDone) {
-              missingParts.push(`['${stateName}', 'DONE', ...]`);
-            }
-            if (!hasError) {
-              missingParts.push(`['${stateName}', 'ERROR', ...]`);
-            }
-            context.report({
-              node: callNode,
-              messageId: 'missingAwaitingHandlers',
-              data: {
-                state: stateName,
-                missing: missingParts.join(' and '),
-              },
-            });
           }
         }
       },

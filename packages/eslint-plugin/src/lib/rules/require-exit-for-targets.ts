@@ -42,6 +42,7 @@ export const requireExitForTargets = createRule<[], MessageIds>({
   defaultOptions: [],
   create(context) {
     const extractedVars = new Map<string, ParsedTransitionRow[]>();
+    const machineNodes: TSESTree.CallExpression[] = [];
 
     return {
       VariableDeclarator(node: TSESTree.VariableDeclarator) {
@@ -63,73 +64,80 @@ export const requireExitForTargets = createRule<[], MessageIds>({
         }
       },
       CallExpression(node: TSESTree.CallExpression) {
-        const arrayNode = getMachineTransitionsArray(node);
-        if (!arrayNode) {
-          return;
+        if (getMachineTransitionsArray(node)) {
+          machineNodes.push(node);
         }
-
-        const allRows: ParsedTransitionRow[] = [];
-        let hasUnresolvedSpread = false;
-
-        for (const el of arrayNode.elements) {
-          if (!el) {
+      },
+      'Program:exit'() {
+        for (const node of machineNodes) {
+          const arrayNode = getMachineTransitionsArray(node);
+          if (!arrayNode) {
             continue;
           }
-          if (el.type === AST_NODE_TYPES.SpreadElement) {
-            if (el.argument.type === AST_NODE_TYPES.Identifier) {
-              const spreadRows = extractedVars.get(el.argument.name);
-              if (spreadRows) {
-                allRows.push(...spreadRows);
+
+          const allRows: ParsedTransitionRow[] = [];
+          let hasUnresolvedSpread = false;
+
+          for (const el of arrayNode.elements) {
+            if (!el) {
+              continue;
+            }
+            if (el.type === AST_NODE_TYPES.SpreadElement) {
+              if (el.argument.type === AST_NODE_TYPES.Identifier) {
+                const spreadRows = extractedVars.get(el.argument.name);
+                if (spreadRows) {
+                  allRows.push(...spreadRows);
+                } else {
+                  hasUnresolvedSpread = true;
+                }
               } else {
                 hasUnresolvedSpread = true;
               }
-            } else {
-              hasUnresolvedSpread = true;
+              continue;
             }
-            continue;
-          }
-          const parsed = parseTransitionRow(el);
-          if (parsed) {
-            allRows.push(parsed);
-          }
-        }
-
-        if (hasUnresolvedSpread) {
-          return;
-        }
-
-        const statesWithValidExit = new Set<string>();
-        for (const row of allRows) {
-          for (const fKey of row.fromKeys) {
-            if (
-              fKey &&
-              row.toKey &&
-              row.toKey !== 'stay()' &&
-              row.toKey !== fKey
-            ) {
-              statesWithValidExit.add(fKey);
+            const parsed = parseTransitionRow(el);
+            if (parsed) {
+              allRows.push(parsed);
             }
           }
-        }
 
-        for (const row of allRows) {
-          if (!row.isTransientTarget || !row.toKey) {
+          if (hasUnresolvedSpread) {
             continue;
           }
-          const hasDirectOrWildcardExit =
-            statesWithValidExit.has(row.toKey) ||
-            statesWithValidExit.has('anyState()');
-          const hasCombinatorChildExit =
-            row.toChildKeys.length > 0 &&
-            row.toChildKeys.some((ck) => statesWithValidExit.has(ck));
-          if (!hasDirectOrWildcardExit && !hasCombinatorChildExit) {
-            context.report({
-              node: row.toNode,
-              messageId: 'missingExitTransition',
-              data: {
-                target: row.targetDisplayName || row.toKey,
-              },
-            });
+
+          const statesWithValidExit = new Set<string>();
+          for (const row of allRows) {
+            for (const fKey of row.fromKeys) {
+              if (
+                fKey &&
+                row.toKey &&
+                row.toKey !== 'stay()' &&
+                row.toKey !== fKey
+              ) {
+                statesWithValidExit.add(fKey);
+              }
+            }
+          }
+
+          for (const row of allRows) {
+            if (!row.isTransientTarget || !row.toKey) {
+              continue;
+            }
+            const hasDirectOrWildcardExit =
+              statesWithValidExit.has(row.toKey) ||
+              statesWithValidExit.has('anyState()');
+            const hasCombinatorChildExit =
+              row.toChildKeys.length > 0 &&
+              row.toChildKeys.some((ck) => statesWithValidExit.has(ck));
+            if (!hasDirectOrWildcardExit && !hasCombinatorChildExit) {
+              context.report({
+                node: row.toNode,
+                messageId: 'missingExitTransition',
+                data: {
+                  target: row.targetDisplayName || row.toKey,
+                },
+              });
+            }
           }
         }
       },

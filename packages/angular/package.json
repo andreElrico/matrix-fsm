@@ -2,6 +2,7 @@
   "name": "@matrix-fsm/angular",
   "version": "0.0.1",
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -34,9 +35,8 @@
     "@matrix-fsm/core": "workspace:*"
   },
   "peerDependencies": {
-    "@angular/core": "~22.1.0",
-    "@matrix-fsm/core": "workspace:*",
-    "@ngrx/signals": "^22.0.0",
+    "@angular/core": "^21.0.0 || ^22.0.0",
+    "@ngrx/signals": "^21.0.0 || ^22.0.0",
     "effect": "^4.0.0",
     "rxjs": "^7.4.0"
   },

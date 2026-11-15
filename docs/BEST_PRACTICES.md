@@ -26,10 +26,10 @@ export const baristaFSM = createFSM<{
   // prettier-ignore
   transitions: [
     /* FROM                 VIA               TO                            OPTIONS */
-    ['ticketQueued',        'START_BREWING',  awaiting('brewingCoffee')],
+    ['ticketQueued',        'START_BREWING',  awaiting('brewingCoffee'),    { call: (m) => m._brewCoffee }],
     ['brewingCoffee',       'DONE',           finalState('COFFEE_READY')],
     ['brewingCoffee',       'ERROR',          'machineMaintenance',         { call: (m) => m._setBrewError }],
-    ['machineMaintenance',  'RETRY_BREW',     awaiting('brewingCoffee')],
+    ['machineMaintenance',  'RETRY_BREW',     awaiting('brewingCoffee'),    { call: (m) => m._brewCoffee }],
   ],
 });
 ```
@@ -44,17 +44,17 @@ export const baristaFSM = createFSM<{
 2. **Store-Methoden per `{ call: (m) => m._methodName }` statt riesiger Inline-`patch`-Lambdas:**
    - Synchrone State-Mutationen werden in `withMethods((store) => ({ _selectDrink: ... }))` mit `patchState(store, ...)` definiert.
    - Methoden mit führendem Unterstrich (`_selectDrink`, `_markPaid`, `_setBrewError`) werden von `@ngrx/signals` automatisch nach außen hin privat gehalten, werden aber von `withStateMachine` zur Compile-Zeit über alle Eltern- und Sub-Maschinen hinweg erzwungen und über `{ call: (m) => m._selectDrink }` typsicher aufgerufen.
-   - **Verboten (Anti-Pattern):** Niemals mehrere Methoden in einem `call`-Selektor aufrufen (`{ call: (m) => { m._a(); m._b(); } }`) oder HTTP-/Async-Side-Effects in `withMethods` verstecken. Asynchrone Operationen gehören ausschließlich in `tasks: { awaitingState: ... }`!
+   - **Verboten (Anti-Pattern):** Niemals mehrere Methoden in einem `call`-Selektor aufrufen (`{ call: (m) => { m._a(); m._b(); } }`) oder HTTP-/Async-Side-Effects auf normalen/synchronen Zeilen verstecken. Asynchrone Operationen gehören ausschließlich in `{ call: (m) => m._asyncTask }` beim Übergang in einen `awaiting('...ing')`-Zustand!
 
 ---
 
 ## 3. Entkoppelte Task-Runner: Promises, RxJS Observables & Optionales Effect-TS (ADR 5)
 
 - **`@matrix-fsm/angular` (Core Adapter, 0 % Effect-TS-Abhängigkeit):**
-  - Unterstützt nativ Standard-**Promises** (`async/await` + `AbortSignal`) sowie **RxJS `Observable`** (inkl. automatischem `unsubscribe()` beim Verlassen/Abbrechen eines `awaiting`-Zustands).
+  - Unterstützt nativ Standard-**Promises** (`async/await` + `AbortSignal`), **RxJS `Observable`** (inkl. automatischem `unsubscribe()` beim Verlassen/Abbrechen eines `awaiting`-Zustands) sowie Angular **`ResourceRef`**.
   - Unterstützt Tagged-Error-Routing (`err._tag` oder benannte `Error`-Klassen) direkt in Spalte 2 (`VIA`) ohne Effect-TS-Zwang.
 - **`@matrix-fsm/angular/effect` (Optionaler Secondary Entrypoint):**
-  - Stellt `effectTaskAdapter` und `runEffect` für Teams bereit, die Effect-TS Fibers und `Data.TaggedError` einsetzen möchten.
+  - Stellt `createEffectMachineFeature`, `createEffectTaskAdapter`, `createEffectExecutorAdapter` und `runEffect` für Teams bereit, die Effect-TS Fibers und `Data.TaggedError` einsetzen möchten.
 
 ---
 
@@ -64,11 +64,11 @@ Das Kernprinzip von `@matrix-fsm` ist die **visuelle 2D-Matrix**. Eine Transitio
 
 ### Verbindliche Formatierungsregeln für `transitions`:
 1. **Die ersten 3 Spalten (`FROM`, `VIA`, `TO`) stehen IMMER in einer Zeile** und sind über alle Zeilen der Tabelle hinweg **exakt vertikal spaltenbündig** ausgerichtet.
-2. **Die 4. Spalte (`OPTIONS`: `{ guard, call, patch }`)** steht durch die schlanken `{ call: (m) => m._... }`-Referenzen im Regelfall direkt in derselben Zeile als 4. Spalte (oder darf bei Bedarf auf die Zeile direkt darunter umbrechen).
+2. **Die 4. Spalte (`OPTIONS`: `{ guard, call, input, output }`)** steht durch die schlanken `{ call: (m) => m._... }`-Referenzen im Regelfall direkt in derselben Zeile als spaltenbündige 4. Spalte (oder darf bei Bedarf auf die Zeile direkt darunter umbrechen).
 3. **Schutz vor Standard-Formattern (Prettier):**
-   - `**/*.machine.ts` ist in [`.prettierignore`](file:///Users/andreellrich/private/matrix-fsm/.prettierignore) eingetragen.
+   - `**/*.machine.ts` ist in [`.prettierignore`](../.prettierignore) eingetragen.
    - Zusätzlich wird über jedem `transitions: [`-Block `// prettier-ignore` sowie der Spalten-Header `/* FROM ... VIA ... TO ... OPTIONS */` platziert.
-   - Die ESLint-Regel `@matrix-fsm/align-matrix-columns` prüft und repariert (`eslint --fix`) das Spalten-Alignment der ersten drei Spalten automatisch.
+   - Die ESLint-Regel `@matrix-fsm/align-matrix-columns` prüft und repariert (`eslint --fix`) das Spalten-Alignment automatisch.
 
 ---
 
@@ -83,34 +83,38 @@ Das Kernprinzip von `@matrix-fsm` ist die **visuelle 2D-Matrix**. Eine Transitio
 ## 6. Sandwich-Pattern (`createMachineFeature`), Unified Tuple Outputs & Neue DSL-Primitiven
 
 1. **The Sandwich Pattern (`createMachineFeature`):**
-   - Kombiniert **1. Public Contract** (`inputs`, `events`, `outputs`, `states`) oben, **2. Transition Matrix** (`transitions` — 0 % DI innerhalb der Matrix!) in der Mitte und **3. Encapsulated Runtime** (`state`, `methods`, `tasks`, `on`) unten in einer einzigen kohäsiven Definition.
-   - Funktioniert sowohl als gekapselter Sub-Actor (`store.actors.barista()`) als auch als **First-Class Root-Feature** direkt in `signalStore(withStateMachine(coffeeShopFSM))` ohne manuelles `withState` oder `withMethods`.
+   - Kombiniert **1. Public Contract** (`inputs`, `events`, `outputs`, `states`, `methods`) oben, **2. Transition Matrix** (`transitions` — 0 % DI innerhalb der Matrix!) in der Mitte und **3. Encapsulated Runtime** (`state`, `syncContext`, `methods`, `onEnter`, `onExit`) unten in einer einzigen kohäsiven Definition.
+   - Funktioniert sowohl als gekapselter Sub-Actor (`store.actors.barista()` bzw. gealiased via `subMachine(baristaFSM, 'baristaVip')`) als auch als **First-Class Root-Feature** direkt in `signalStore(withStateMachine(coffeeShopFSM))` ohne manuelles `withState` oder `withMethods`.
 2. **Unified Tuple Outputs (`finalState()` + `{ output: ['NAME', (ctx, ev) => payload] }`):**
    - Sowohl Zwischen-Outputs (`stay()` / Folgezustand) als auch terminale Outputs (`finalState()`) nutzen `{ output: ['COFFEE_READY', (ctx, ev) => ({ ... })] }` (oder `'HEARTBEAT'` für `void`-Outputs).
    - Kollisionsschutz: Benanntes `finalState('CANCELLED')` darf niemals gleichzeitig mit `options.output` kombiniert werden (`@matrix-fsm/no-conflicting-final-output`). Bei terminalen Sub-Actor-Outputs ist `stay()` in der Eltern-Maschine verboten.
-3. **Global Events (`anyState()`) & Declarative Timers (`after(ms)`):**
-   - `anyState()` in Spalte 1 (`FROM`) definiert globale Fallback-Übergänge (Pass 1 prüft spezifische `[state, event, ...]`-Zeilen, Pass 2 prüft `[anyState(), event, ...]`).
-   - `after(ms)` in Spalte 2 (`VIA`) plant automatisch Timer beim Betreten eines Zustands (auch auf `initial`) und räumt diese bei jedem Zustandswechsel oder Sub-Actor-Hard-Kill via `clearTimeout` deterministisch auf.
-4. **Actor Combinators (`all`, `race`, `any`) & Signal Bridge (`whenSignal`):**
-   - `all(m1, m2)` wartet auf alle Kind-Aktoren (mit Fail-Fast-Abort bei `'ERROR'`), `race(m1, m2)` gewinnt beim ersten abgeschlossenen Aktor, `any(m1, m2)` gewinnt beim ersten erfolgreichen Aktor.
-   - `whenSignal(sig, mappingOrSelector)` überbrückt externe Angular Signals reaktiv in die FIFO-Event-Queue (feuert nicht initial bei `t = 0`, sondern nur bei echten Wertänderungen; unterstützt statische Maps und dynamische Selektoren `(url) => url ? ['DEEP_LINK', { url }] : null`).
+3. **Global Events (`anyState()`) & Declarative Timers (`after(ms)`, `every(ms)`):**
+   - `anyState()` in Spalte 1 (`FROM`) definiert globale Fallback-Übergänge (`stay()`, `finalState()`, `initial` für globalen Reset oder `VIA === 'ERROR'`).
+   - `after(ms)` und `every(ms)` in Spalte 2 (`VIA`) planen automatisch Timer beim Betreten eines Zustands (auch auf `initial` sowie innerhalb von `VIA`-Arrays) und räumen diese bei jedem Zustandswechsel deterministisch auf.
+4. **Actor Combinators (`all`, `race`, `any`, `each`) & Reactive Signal Mirroring (`syncContext`):**
+   - `all(m1, m2)` wartet auf alle Kind-Aktoren (mit Fail-Fast-Abort bei `'ERROR'`), `race(m1, m2)` gewinnt beim ersten abgeschlossenen Aktor, `any(m1, m2)` gewinnt beim ersten erfolgreichen Aktor. Gleiche Aktor-Definitionen lassen sich mit `subMachine(m, 'alias')` mehrfach einsetzen.
+   - `each(key, childFSM, mapper?)` erzeugt parallele 1:N-Instanzen (mit automatischer Singularisierung z. B. `batchOrders -> batchOrder` oder explizitem Item-Input-Mapper).
+   - `syncContext: () => ({ prop: externalSignal })` spiegelt externe Angular Signals reaktiv in den Maschinen-Kontext (und triggert automatisch `always()`-, dynamische `every()`- sowie `each()`-Auswertungen).
 5. **Fast Unit Testing ohne Angular `TestBed` (`createFeatureTester`):**
-   - `createFeatureTester(baristaFSM, { inputs, tasks })` testet jede `createMachineFeature` in reinem Vitest in `< 5ms` inkl. `tester.flushTasks()` und `tester.emittedOutputs()`.
+   - `createFeatureTester(baristaFSM, { inputs, methods })` testet jede `createMachineFeature` in reinem Vitest in `< 5ms` inkl. `tester.flushTasks()`, `tester.emittedOutputs()` und `tester.finalPayload()`.
 
 ---
 
-## 7. Alle AST- & Graphen-Linter-Regeln (`@matrix-fsm/eslint-plugin`)
+## 7. Alle 14 kanonischen AST- & Graphen-Linter-Regeln (`@matrix-fsm/eslint-plugin`)
 
 | # | Regel | Beschreibung |
 |---|-------|--------------|
-| 1 | `align-matrix-columns` | Erzwingt, dass `[FROM, VIA, TO]` in einer Zeile stehen und über alle Zeilen vertikal spaltenbündig ausgerichtet sind (`OPTIONS` darf in derselben oder der nächsten Zeile stehen). |
-| 2 | `group-contiguous-transitions` | Gleiche `[FROM, VIA]`-Paare müssen direkt untereinander stehen; keine Array-Listen in Spalte 1. |
+| 1 | `align-matrix-columns` | Erzwingt, dass `[FROM, VIA, TO]` in einer Zeile stehen und über alle Zeilen (inkl. einzeiligem `OPTIONS`) vertikal spaltenbündig ausgerichtet sind. |
+| 2 | `group-contiguous-transitions` | Gleiche `[FROM, VIA]`-Paare müssen direkt untereinander stehen; Array-Listen in Spalte 1 werden per `--fix` expandiert. |
 | 3 | `require-fallback-transition` | Jede bewachte (`guard`) `[FROM, VIA]`-Gruppe muss mit einer unbewachten Fallback-Zeile enden. |
-| 4 | `no-unreachable-transitions` | Keine unbewachte Zeile darf vor einer weiteren Zeile derselben `[FROM, VIA]`-Gruppe (oder unter einem unbewachten `[anyState(), EVENT, ...]`) stehen. |
-| 5 | `require-awaiting-handlers` | Jeder `awaiting('x')`-Zustand benötigt mindestens einen `'DONE'`- und einen `'ERROR'`-Übergang (spezifisch oder global via `anyState()`). |
+| 4 | `no-unreachable-transitions` | Keine unbewachte Zeile darf vor einer weiteren Zeile derselben `[FROM, VIA]`-Gruppe (oder unter einem unbewachten `[anyState(), EVENT, ...]`) stehen. *(Deprecated Alias: `no-shadowed-transitions`.)* |
+| 5 | `require-awaiting-handlers` | Jeder `awaiting('x')`-Zustand benötigt `{ call }` beim Eintritt sowie mindestens einen `'DONE'`- (bzw. `outcome()`) und einen `'ERROR'`-Übergang. |
 | 6 | `awaiting-naming-convention` | Jeder Zustand in `awaiting('...')` muss auf `-ing` enden (z. B. `'checkingLoyalty'`, `'brewingCoffee'`). |
 | 7 | `complete-extracted-groups` | `transitions([...])`-Variablen dürfen eine `[FROM, VIA]`-Gruppe nicht aufteilen und sind erst ab **> 3 Zeilen** (`minRows: 4`) erlaubt. |
 | 8 | `pure-machine-definition` | Verbietet `@angular/*`, Service- oder Store-Imports sowie `inject()` in reinen `*.machine.ts` (und verbietet `inject()` innerhalb von `transitions: [...]` in `createMachineFeature`) und stellt sicher, dass `call` eine einzelne Methodenreferenz `(m) => m._method` ist. |
-| 9 | `no-conflicting-final-output` | Verbietet die gleichzeitige Angabe eines benannten `finalState('NAME')` und `options.output` in derselben Zeile. |
+| 9 | `no-conflicting-final-output` | Verbietet die gleichzeitige Angabe eines benannten `finalState('NAME')` und `options.output` in derselben Zeile sowie `stay()` auf terminale Kind-Outputs. |
 | 10 | `require-exit-for-targets` | Jeder transiente/aktive Zielknoten (`awaiting`, Sub-Machine, `all`, `race`, `any`, `each`) in Spalte 3 (`TO`) muss mindestens einen echten Ausgang (`TO !== FROM` und `TO !== stay()`) in Spalte 1 (`FROM`) besitzen ($\deg^+(v) \ge 1$). |
 | 11 | `no-unreachable-states` | Jeder Zustand oder Sub-Actor in Spalte 1 (`FROM`, außer `anyState()`) muss entweder `initial` sein oder mindestens einmal in Spalte 3 (`TO`, inkl. innerhalb von `all`/`race`/`any`/`each`) betreten werden ($\deg^-(v) \ge 1$). |
+| 12 | `no-duplicate-combinator-actors` | Verbietet doppelte Aktor-Referenzen in `all()`, `race()` oder `any()`, sofern sie nicht per `subMachine(fsm, 'alias')` eindeutig benannt sind. |
+| 13 | `valid-any-state-target` | Erlaubt bei `anyState()` nur `stay()`, `finalState()`, `initial` (globaler Reset) oder `VIA === 'ERROR'`. |
+| 14 | `valid-timer-transitions` | Erzwingt, dass `after(ms)` den Zustand verlässt (niemals `stay()`) und `every(ms)` auf `stay()` zielt (auch in `VIA`-Arrays). |

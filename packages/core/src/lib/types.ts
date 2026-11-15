@@ -28,6 +28,17 @@ export interface FSMContract {
   readonly output?: any;
 }
 
+export type ValidateContractKeys<
+  TContract,
+  TValidKeys extends PropertyKey = keyof FSMContract,
+> = [0] extends [1 & TContract]
+  ? unknown
+  : [Exclude<keyof TContract, TValidKeys>] extends [never]
+    ? unknown
+    : {
+        readonly __invalidContractKey: Exclude<keyof TContract, TValidKeys>;
+      };
+
 export type ContractInput<T extends FSMContract> =
   T extends { readonly inputs: infer I extends object }
     ? [I] extends [never]
@@ -151,10 +162,13 @@ export interface AnyStateNode {
   readonly __type: 'anyState';
 }
 
-export interface FinalNode<TOutcome extends string = string> {
+export interface FinalNode<
+  TOutcome extends string = string,
+  TIsBare extends boolean = boolean,
+> {
   readonly __type: 'finalState';
   readonly outcome: TOutcome;
-  readonly isBare?: boolean;
+  readonly isBare?: TIsBare;
 }
 
 export interface AfterNode<TMs extends number = number, TContext = any> {
@@ -186,11 +200,18 @@ export interface SubMachineRef<
 export interface EachNode<
   TKey extends string = string,
   TFSM extends AnyFSMDefinition = AnyFSMDefinition,
+  THasMapper extends boolean = boolean,
 > {
   readonly __type: 'each';
   readonly id: `each:${TKey}`;
   readonly key: TKey;
   readonly machine: TFSM;
+  readonly itemInputMapper?: (
+    item: any,
+    index: number,
+    ctx: any,
+  ) => Record<string, unknown>;
+  readonly __hasMapperBrand?: THasMapper;
 }
 
 export type CombinatorKind = 'all' | 'race' | 'any';
@@ -224,6 +245,7 @@ export interface CombinatorNode<
   readonly __type: TKind;
   readonly id: `${TKind}:${JoinMachineIds<TMachines>}`;
   readonly machines: UnwrapSubMachineTuple<TMachines>;
+  readonly actorRefs?: readonly SubMachineRef<any, any>[];
 }
 
 export type AllNode<
@@ -555,6 +577,9 @@ export type TransitionVia<
           ? string
           : TEvent | ExtractMethodOutcomeEvents<TMethods>)
       | BuiltInLifecycleEvent
+      | AfterNode<number, TContext>
+      | EveryNode<TContext>
+      | AlwaysNode
     )[]
   | BuiltInLifecycleEvent
   | AfterNode<number, TContext>
@@ -704,9 +729,27 @@ export type AnyTransitionRow<
   TMethods = any,
 > = TransitionRow<TContext, any, any, TMethods, any>;
 
+export type InitialStateTarget<TState extends string = string> =
+  | TState
+  | AwaitingNode<TState>
+  | AnyFSMDefinition
+  | SubMachineRef<any, any>
+  | CombinatorNode<any, any>
+  | EachNode<any, any>;
+
+export type ResolveInitialStateKey<TInitial> = TInitial extends string
+  ? TInitial
+  : TInitial extends AwaitingNode<infer S extends string>
+    ? S
+    : TInitial extends SubMachineRef<any, infer Id extends string>
+      ? Id
+      : TInitial extends { readonly id: infer Id extends string }
+        ? Id
+        : string;
+
 export interface FSMConfig<
   TId extends string,
-  TInitial extends TStates,
+  TInitial extends InitialStateTarget<TStates>,
   TContext extends object = EmptyObject,
   TEvents extends Record<string, any> = Record<string, any>,
   TTransitions extends readonly AnyTransitionRow<TContext, any>[] =
@@ -1010,11 +1053,33 @@ type IsEveryNode<T> =
         ? true
         : false;
 
+type HasAfterNode<Via> =
+  [0] extends [1 & Via]
+    ? false
+    : IsAfterNode<Via> extends true
+      ? true
+      : Via extends readonly (infer El)[]
+        ? true extends (El extends any ? IsAfterNode<El> : false)
+          ? true
+          : false
+        : false;
+
+type HasEveryNode<Via> =
+  [0] extends [1 & Via]
+    ? false
+    : IsEveryNode<Via> extends true
+      ? true
+      : Via extends readonly (infer El)[]
+        ? true extends (El extends any ? IsEveryNode<El> : false)
+          ? true
+          : false
+        : false;
+
 type IsInvalidAfterRow<Via, To> =
-  IsAfterNode<Via> extends true ? IsStayNode<To> : false;
+  HasAfterNode<Via> extends true ? IsStayNode<To> : false;
 
 type IsInvalidEveryRow<Via, To> =
-  IsEveryNode<Via> extends true
+  HasEveryNode<Via> extends true
     ? IsStayNode<To> extends true
       ? false
       : true
@@ -1029,16 +1094,26 @@ type HasAnyStateInArray<From> =
         : false
       : false;
 
-type IsInvalidAnyStateRow<From, Via, To> =
-  IsAnyStateNode<From> extends true
-    ? IsStayNode<To> extends true
+type IsInvalidAnyStateRow<
+  From,
+  Via,
+  To,
+  TInitial extends string = never,
+> = IsAnyStateNode<From> extends true
+  ? IsStayNode<To> extends true
+    ? false
+    : IsFinalNode<To> extends true
       ? false
-      : IsFinalNode<To> extends true
+      : [Via] extends ['ERROR']
         ? false
-        : [Via] extends ['ERROR']
-          ? false
-          : true
-    : false;
+        : [TInitial] extends [never]
+          ? true
+          : string extends TInitial
+            ? true
+            : [To] extends [TInitial]
+              ? false
+              : true
+  : false;
 
 type IsTerminalSubMachineOutput<From, Via> =
   [0] extends [1 & From]
@@ -1089,6 +1164,13 @@ type IsCombinatorNode<T> =
       ? true
       : false;
 
+type IsEachNode<T> =
+  [0] extends [1 & T]
+    ? false
+    : T extends EachNode<any, any, any>
+      ? true
+      : false;
+
 type IsSubMachineOrCombinatorNode<T> =
   [0] extends [1 & T]
     ? false
@@ -1096,12 +1178,82 @@ type IsSubMachineOrCombinatorNode<T> =
       ? true
       : IsSubMachineNode<T>;
 
-type HasRequiredSubMachineInput<To> =
+type RequiredKeysOf<T> = T extends object
+  ? {
+      [K in keyof T]-?: EmptyObject extends Pick<T, K> ? never : K;
+    }[keyof T]
+  : never;
+
+export type SingularizeKey<K extends string> =
+  K extends `${string}${'series' | 'Series' | 'species' | 'Species'}`
+    ? never
+    : K extends `${infer Stem}ies`
+      ? Stem extends ''
+        ? never
+        : `${Stem}y`
+  : K extends `${string}${'ss' | 'x' | 'ch' | 'sh' | 'us'}es`
+    ? K extends `${infer Base}es`
+      ? Base
+      : never
+    : K extends `${string}${'ss' | 'us' | 'is'}`
+      ? never
+      : K extends `${infer Stem}s`
+        ? Stem extends ''
+          ? never
+          : Stem
+        : never;
+
+type ExtractEachArrayElement<TKey extends string, TContext> =
+  TKey extends keyof TContext
+    ? NonNullable<TContext[TKey]> extends readonly (infer El)[]
+      ? El
+      : unknown
+    : unknown;
+
+type AutoEachProvidedKeys<TKey extends string, TContext> =
+  | 'item'
+  | 'index'
+  | SingularizeKey<TKey>
+  | (ExtractEachArrayElement<TKey, TContext> extends infer El
+      ? [0] extends [1 & El]
+        ? PropertyKey
+        : unknown extends El
+          ? never
+          : El extends object
+            ? keyof El
+            : never
+      : never);
+
+type HasUnmetEachInput<To, TContext = any> =
+  To extends EachNode<infer TKey, infer TChild, infer THasMapper>
+    ? [THasMapper] extends [true]
+      ? false
+      : [ExtractNonEmptyInput<TChild>] extends [never]
+        ? false
+        : [RequiredKeysOf<ExtractInput<TChild>>] extends [never]
+          ? false
+          : IsDefaultOrUntypedObject<TContext> extends true
+            ? false
+            : TKey extends keyof TContext
+              ? [
+                  Exclude<
+                    RequiredKeysOf<ExtractInput<TChild>>,
+                    AutoEachProvidedKeys<TKey, TContext>
+                  >,
+                ] extends [never]
+                ? false
+                : true
+              : true
+    : false;
+
+type HasRequiredSubMachineInput<To, TContext = any> =
   IsSubMachineOrCombinatorNode<To> extends true
     ? [ExtractNonEmptyInput<To>] extends [never]
       ? false
-      : true
-    : false;
+      : [RequiredKeysOf<ExtractInput<To>>] extends [never]
+        ? false
+        : true
+    : HasUnmetEachInput<To, TContext>;
 
 type ExtractKeyedCombinatorInput<
   TActors extends readonly (AnyFSMDefinition | SubMachineRef<any, any>)[],
@@ -1124,7 +1276,11 @@ type AllowedSubInput<To> =
             | UnionToIntersection<ExtractNonEmptyInput<TActors[number]>>
             | ExtractKeyedCombinatorInput<TActors>
         : ExtractInputs<To>
-    : any;
+    : To extends EachNode<any, infer TChild, any>
+      ? [ExtractNonEmptyInput<TChild>] extends [never]
+        ? any
+        : ExtractInputs<TChild>
+      : any;
 
 type ExtractViaStrings<Via> = Via extends string
   ? Via
@@ -1198,10 +1354,52 @@ type ResolveSubMachineOutputPayload<From, Via> =
       : ExtractOutputsMap<From>[Via]
     : any;
 
+type UnwrapActorFSM<T> = T extends SubMachineRef<infer Inner, any> ? Inner : T;
+
+type InferRowTerminalPayload<Row, TFallbackCtx> =
+  Row extends readonly [any, any, FinalNode<any, infer TIsBare>, ...infer Rest]
+    ? Rest extends readonly [infer Opts]
+      ? Opts extends {
+          readonly output: readonly [any, (...args: any[]) => infer R];
+        }
+        ? R
+        : Opts extends { readonly output: any }
+          ? undefined
+          : [TIsBare] extends [false]
+            ? Opts extends { readonly call: any }
+              ? TFallbackCtx
+              : undefined
+            : undefined
+      : undefined
+    : never;
+
+type InferUntypedTerminalPayload<TActor> =
+  UnwrapActorFSM<TActor> extends FSMDefinition<
+    any,
+    any,
+    any,
+    any,
+    infer TTransitions,
+    any,
+    any,
+    any
+  >
+    ? [0] extends [1 & TTransitions]
+      ? unknown
+      : InferRowTerminalPayload<
+            TTransitions[number],
+            ExtractContext<UnwrapActorFSM<TActor>>
+          > extends infer TPayloads
+        ? [TPayloads] extends [never]
+          ? undefined
+          : TPayloads
+        : undefined
+    : unknown;
+
 export type ExtractTerminalOutputPayload<TActor> = TActor extends any
   ? ExtractOutputsMap<TActor> extends infer TOutputsMap
     ? [keyof TOutputsMap] extends [never]
-      ? ExtractContext<TActor>
+      ? InferUntypedTerminalPayload<TActor>
       : Extract<
           Exclude<ExtractFinalOutcomes<TActor>, 'ERROR'>,
           keyof TOutputsMap
@@ -1474,7 +1672,7 @@ type ValidateRowOptions<
   TMethods,
   To,
   TOutputs,
-> = HasRequiredSubMachineInput<To> extends true
+> = HasRequiredSubMachineInput<To, TContext> extends true
   ? [
       options: TransitionOptionsWithRequiredInput<
         TContext,
@@ -1582,6 +1780,7 @@ export type ValidateTransitionRows<
   TMethods = any,
   TOutputs = EmptyObject,
   TEventsMap = Record<string, any>,
+  TInitial extends string = never,
 > = {
   readonly [K in keyof TTransitions]: TTransitions[K] extends readonly [
     infer From,
@@ -1605,9 +1804,9 @@ export type ValidateTransitionRows<
           ? {
               readonly __error: 'anyState() cannot be used inside a Column 1 (FROM) state array';
             }
-          : IsInvalidAnyStateRow<From, Via, To> extends true
+          : IsInvalidAnyStateRow<From, Via, To, TInitial> extends true
             ? {
-                readonly __error: "anyState() in Column 1 (FROM) is only allowed with stay(), finalState(), or when Column 2 (VIA) is 'ERROR'";
+                readonly __error: "anyState() in Column 1 (FROM) is only allowed with stay(), finalState(), initial state, or when Column 2 (VIA) is 'ERROR'";
               }
             : IsInvalidAfterRow<Via, To> extends true
               ? {
@@ -1708,6 +1907,26 @@ export type ValidateTransitionRows<
                     TOutputs
                   >,
                 ]
+              : IsEachNode<To> extends true
+                ? readonly [
+                    from: From,
+                    via: Via,
+                    to: To,
+                    ...ValidateRowOptions<
+                      Rest,
+                      TContext,
+                      ResolveRowPayload<
+                        From,
+                        Via,
+                        TEventsMap,
+                        TTransitions,
+                        TMethods
+                      >,
+                      TMethods,
+                      To,
+                      TOutputs
+                    >,
+                  ]
               : IsAwaitingNode<To> extends true
                 ? readonly [
                     from: From,
@@ -1838,13 +2057,120 @@ type ExtractDirectSubMachinesFromTransitions<
 export type ExtractDirectSubMachines<TFSM> =
   TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any, any, any>
     ? ExtractDirectSubMachinesFromTransitions<TTransitions>
-    : TFSM extends CombinatorNode<any, infer TActors>
-      ? ExtractSubMachineFromNode<TActors[number]>
+    : TFSM extends SubMachineRef<infer Inner, any>
+      ? ExtractDirectSubMachines<Inner>
+      : TFSM extends CombinatorNode<any, infer TActors>
+        ? ExtractSubMachineFromNode<TActors[number]>
+        : never;
+
+type CollectSubMachinesRecursive<
+  TCurrent,
+  TVisited = never,
+  TDepth extends readonly unknown[] = readonly [],
+> = [TCurrent] extends [never]
+  ? never
+  : TDepth['length'] extends 8
+    ? TCurrent
+    : TCurrent extends any
+      ? TCurrent extends TVisited
+        ? never
+        :
+            | TCurrent
+            | CollectSubMachinesRecursive<
+                Exclude<ExtractDirectSubMachines<TCurrent>, TVisited | TCurrent>,
+                TVisited | TCurrent,
+                readonly [...TDepth, unknown]
+              >
       : never;
 
-export type ExtractAllSubMachines<TFSM> =
-  | ExtractDirectSubMachines<TFSM>
-  | ExtractDirectSubMachines<ExtractDirectSubMachines<TFSM>>;
+export type ExtractAllSubMachines<TFSM> = CollectSubMachinesRecursive<
+  ExtractDirectSubMachines<TFSM>
+>;
+
+export interface ActorEntry<
+  TId extends string = string,
+  TMachine extends AnyFSMDefinition = AnyFSMDefinition,
+> {
+  readonly id: TId;
+  readonly machine: TMachine;
+}
+
+type ExtractActorEntryFromNode<Node> =
+  [0] extends [1 & Node]
+    ? never
+    : Node extends readonly (infer El)[]
+      ? ExtractActorEntryFromNode<El>
+      : Node extends SubMachineRef<infer Sub, infer AliasId>
+        ? IsConcreteFSM<Sub> extends true
+          ? ActorEntry<AliasId, Sub>
+          : never
+        : IsConcreteFSM<Node> extends true
+          ? Node extends FSMDefinition<infer Id, any, any, any, any, any, any, any>
+            ? ActorEntry<Id, Node>
+            : never
+          : Node extends EachNode<any, infer EachSub, any>
+            ? IsConcreteFSM<EachSub> extends true
+              ? EachSub extends FSMDefinition<
+                  infer Id,
+                  any,
+                  any,
+                  any,
+                  any,
+                  any,
+                  any,
+                  any
+                >
+                ? ActorEntry<Id, EachSub>
+                : never
+              : never
+            : Node extends CombinatorNode<any, infer CombMachines>
+              ? ExtractActorEntryFromNode<CombMachines[number]>
+              : never;
+
+type ExtractDirectActorEntriesFromTransitions<
+  TTransitions extends readonly AnyTransitionRow<any, any>[],
+> = [0] extends [1 & TTransitions]
+  ? never
+  : TTransitions[number] extends infer Row
+    ? [0] extends [1 & Row]
+      ? never
+      : Row extends readonly [infer From, any, infer To, ...any[]]
+        ? ExtractActorEntryFromNode<From> | ExtractActorEntryFromNode<To>
+        : never
+    : never;
+
+export type ExtractDirectActorEntries<TFSM> =
+  TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any, any, any>
+    ? ExtractDirectActorEntriesFromTransitions<TTransitions>
+    : TFSM extends SubMachineRef<infer Inner, any>
+      ? ExtractDirectActorEntries<Inner>
+      : TFSM extends CombinatorNode<any, infer TActors>
+        ? ExtractActorEntryFromNode<TActors[number]>
+        : never;
+
+type CollectActorEntriesRecursive<
+  TEntries,
+  TVisitedMachines = never,
+  TDepth extends readonly unknown[] = readonly [],
+> = [TEntries] extends [never]
+  ? never
+  : TDepth['length'] extends 8
+    ? TEntries
+    : TEntries extends ActorEntry<any, infer M>
+      ? M extends TVisitedMachines
+        ? TEntries
+        :
+            | TEntries
+            | CollectActorEntriesRecursive<
+                ExtractDirectActorEntries<M>,
+                TVisitedMachines | M,
+                readonly [...TDepth, unknown]
+              >
+      : never;
+
+export type ExtractAllActorEntries<TFSM> = CollectActorEntriesRecursive<
+  ExtractDirectActorEntries<TFSM>
+>;
 
 export type ExtractOwnStates<TFSM> =
   TFSM extends FSMDefinition<
@@ -1997,24 +2323,26 @@ type ExtractRowEvent<Row> =
   Row extends readonly [infer From, infer Via, ...any[]]
     ? Via extends ExtractedMarker<any, any>
       ? never
-      : Via extends string
-        ? IsSubMachineNode<From> extends true
-          ? Exclude<
-              Via,
-              | BuiltInLifecycleEvent
-              | ExtractFinalOutcomes<From>
-              | ExtractEmittedOutputs<From>
-              | ExtractOutputKeys<From>
-            >
-          : From extends CombinatorNode<any, infer CombMachines>
+      : ExtractViaStrings<Via> extends infer VStr extends string
+        ? [VStr] extends [never]
+          ? never
+          : IsSubMachineNode<From> extends true
             ? Exclude<
-                Via,
+                VStr,
                 | BuiltInLifecycleEvent
-                | ExtractFinalOutcomes<CombMachines[number]>
-                | ExtractEmittedOutputs<CombMachines[number]>
-                | ExtractOutputKeys<CombMachines[number]>
+                | ExtractFinalOutcomes<From>
+                | ExtractEmittedOutputs<From>
+                | ExtractOutputKeys<From>
               >
-            : Exclude<Via, BuiltInLifecycleEvent>
+            : From extends CombinatorNode<any, infer CombMachines>
+              ? Exclude<
+                  VStr,
+                  | BuiltInLifecycleEvent
+                  | ExtractFinalOutcomes<CombMachines[number]>
+                  | ExtractEmittedOutputs<CombMachines[number]>
+                  | ExtractOutputKeys<CombMachines[number]>
+                >
+              : Exclude<VStr, BuiltInLifecycleEvent>
         : never
     : never;
 
@@ -2043,26 +2371,111 @@ export type ExtractEvents<TFSM> =
   | ExtractShallowEvents<TFSM>
   | ExtractShallowEvents<ExtractAllSubMachines<TFSM>>;
 
+type OwnDeclaredEventPayload<TFSM, TEvent extends string> =
+  TFSM extends FSMDefinition<any, any, any, infer TEvents, any, any, any, any>
+    ? TEvent extends keyof TEvents
+      ? string extends keyof TEvents
+        ? never
+        : TEvents[TEvent]
+      : never
+    : TFSM extends SubMachineRef<infer Inner, any>
+      ? OwnDeclaredEventPayload<Inner, TEvent>
+      : never;
+
 export type ExtractEventPayload<
   TFSM,
   TEvent extends string,
-> = TFSM extends FSMDefinition<any, any, any, infer TEvents, any, any, any, any>
-  ? TEvent extends keyof TEvents
-    ? string extends keyof TEvents
-      ? unknown
-      : TEvents[TEvent]
-    : ExtractAllSubMachines<TFSM> extends infer Sub
-      ? [Sub] extends [never]
-        ? unknown
-        : Sub extends FSMDefinition<any, any, any, infer TSubEvents, any, any, any, any>
-          ? TEvent extends keyof TSubEvents
-            ? string extends keyof TSubEvents
-              ? unknown
-              : TSubEvents[TEvent]
-            : never
-          : never
-      : unknown
+> = (
+  | OwnDeclaredEventPayload<TFSM, TEvent>
+  | OwnDeclaredEventPayload<ExtractAllSubMachines<TFSM>, TEvent>
+) extends infer TCollected
+  ? [TCollected] extends [never]
+    ? unknown
+    : TCollected
   : unknown;
+
+export type AllowedSendEvents<
+  TFSM extends AnyFSMDefinition,
+  TExtraEvents extends string = never,
+> = [0] extends [1 & TFSM]
+  ? string
+  : string extends TFSM['id']
+    ? string
+    : [ExtractEvents<TFSM>] extends [never]
+      ? string
+      : ExtractEvents<TFSM> | TExtraEvents;
+
+export type EventDispatchArgs<
+  TFSM extends AnyFSMDefinition,
+  TEvent extends string,
+> = [void] extends [ExtractEventPayload<TFSM, TEvent>]
+  ? [event: TEvent, payload?: ExtractEventPayload<TFSM, TEvent>]
+  : [undefined] extends [ExtractEventPayload<TFSM, TEvent>]
+    ? [event: TEvent, payload?: ExtractEventPayload<TFSM, TEvent>]
+    : unknown extends ExtractEventPayload<TFSM, TEvent>
+      ? [event: TEvent, payload?: unknown]
+      : [event: TEvent, payload: ExtractEventPayload<TFSM, TEvent>];
+
+export type SendFn<
+  TFSM extends AnyFSMDefinition,
+  TExtraEvents extends string = never,
+> = <TEvent extends AllowedSendEvents<TFSM, TExtraEvents>>(
+  ...args: EventDispatchArgs<TFSM, TEvent>
+) => void;
+
+export type CanFn<
+  TFSM extends AnyFSMDefinition,
+  TExtraEvents extends string = never,
+> = <TEvent extends AllowedSendEvents<TFSM, TExtraEvents>>(
+  ...args: EventDispatchArgs<TFSM, TEvent>
+) => boolean;
+
+type ExtractEachEntryFromNode<Node> =
+  [0] extends [1 & Node]
+    ? never
+    : Node extends readonly (infer El)[]
+      ? ExtractEachEntryFromNode<El>
+      : Node extends EachNode<infer TKey, infer TSub, any>
+        ? { readonly key: TKey; readonly machine: TSub }
+        : never;
+
+type ExtractDirectEachEntries<TFSM> =
+  TFSM extends FSMDefinition<any, any, any, any, infer TTransitions, any, any, any>
+    ? [0] extends [1 & TTransitions]
+      ? never
+      : TTransitions[number] extends infer Row
+        ? Row extends readonly [infer From, any, infer To, ...any[]]
+          ? ExtractEachEntryFromNode<From> | ExtractEachEntryFromNode<To>
+          : never
+        : never
+    : TFSM extends SubMachineRef<infer Inner, any>
+      ? ExtractDirectEachEntries<Inner>
+      : never;
+
+export type ExtractEachMap<TFSM> = {
+  readonly [E in
+    | ExtractDirectEachEntries<TFSM>
+    | ExtractDirectEachEntries<ExtractAllSubMachines<TFSM>> as E['key']]: E['machine'];
+};
+
+export type SendToChildFn<
+  TFSM extends AnyFSMDefinition,
+  TExtraEvents extends string = never,
+> = [0] extends [1 & TFSM]
+  ? (key: string, itemId: string, event: string, payload?: unknown) => void
+  : [keyof ExtractEachMap<TFSM>] extends [never]
+    ? (key: string, itemId: string, event: string, payload?: unknown) => void
+    : <
+        TKey extends Extract<keyof ExtractEachMap<TFSM>, string>,
+        TEvent extends AllowedSendEvents<
+          ExtractEachMap<TFSM>[TKey],
+          TExtraEvents
+        >,
+      >(
+        key: TKey,
+        itemId: string,
+        ...args: EventDispatchArgs<ExtractEachMap<TFSM>[TKey], TEvent>
+      ) => void;
 
 /**
  * Extracts all `awaiting('stateName')` states from an FSM definition (including nested child machines).
